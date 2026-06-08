@@ -1,4 +1,4 @@
-import { Stack, StackProps, RemovalPolicy, Duration, CfnOutput, Fn } from "aws-cdk-lib";
+import { Stack, StackProps, RemovalPolicy, Duration, CfnOutput, Fn, CfnDeletionPolicy } from "aws-cdk-lib";
 import {
   Vpc,
   SubnetType,
@@ -26,6 +26,9 @@ import {
 import {
   CfnProvisioningTemplate,
   CfnPolicy as IotPolicy,
+  CfnThingGroup,
+  CfnSoftwarePackage,
+  CfnSoftwarePackageVersion,
 } from "aws-cdk-lib/aws-iot";
 import {
   Secret,
@@ -58,8 +61,6 @@ import { Construct } from "constructs";
 
 export interface ParticipantStackProps extends StackProps {
   deploymentId: string;
-  edgeVpc: Vpc;
-  cloudVpc: Vpc;
 }
 
 /**
@@ -81,7 +82,10 @@ export class ParticipantStack extends Stack {
   constructor(scope: Construct, id: string, props: ParticipantStackProps) {
     super(scope, id, props);
 
-    const { deploymentId, edgeVpc, cloudVpc } = props;
+    const { deploymentId } = props;
+
+    const edgeVpc = Vpc.fromLookup(this, "WorkshopEdgeVpc", { vpcName: "workshop-edge" });
+    const cloudVpc = Vpc.fromLookup(this, "WorkshopCloudVpc", { vpcName: "workshop-cloud" });
 
     // ── S3 ──────────────────────────────────────────────────────────────────
     const workshopBucket = new Bucket(this, "WorkshopBucket", {
@@ -152,7 +156,7 @@ export class ParticipantStack extends Stack {
     // ── IoT policies ─────────────────────────────────────────────────────────
     new IotPolicy(this, "ClaimPolicy", {
       policyName: `workshop-${deploymentId}-claim-policy`,
-      policyDocument: JSON.stringify({
+      policyDocument: {
         Version: "2012-10-17",
         Statement: [
           {
@@ -185,12 +189,12 @@ export class ParticipantStack extends Stack {
             ],
           },
         ],
-      }),
+      },
     });
 
     new IotPolicy(this, "DevicePolicy", {
       policyName: `workshop-${deploymentId}-device-policy`,
-      policyDocument: JSON.stringify({
+      policyDocument: {
         Version: "2012-10-17",
         Statement: [
           {
@@ -220,7 +224,7 @@ export class ParticipantStack extends Stack {
             Resource: `arn:aws:iot:${this.region}:${this.account}:thing/\${iot:Connection.Thing.ThingName}`,
           },
         ],
-      }),
+      },
     });
 
     // ── Pre-provisioning hook Lambda ─────────────────────────────────────────
@@ -249,6 +253,7 @@ export class ParticipantStack extends Stack {
       })
     );
 
+    // --8<-- [start:pre-provision-hook]
     const preProvisionLambda = new LambdaFn(this, "PreProvisionHook", {
       functionName: `workshop-${deploymentId}-pre-provision`,
       runtime: Runtime.NODEJS_22_X,
@@ -300,6 +305,7 @@ exports.handler = async (event) => {
     preProvisionLambda.addPermission("AllowIoTInvoke", {
       principal: new ServicePrincipal("iot.amazonaws.com"),
     });
+    // --8<-- [end:pre-provision-hook]
 
     // ── IoT Provisioning Template ────────────────────────────────────────────
     const provisioningRole = new Role(this, "ProvisioningRole", {
@@ -321,6 +327,30 @@ exports.handler = async (event) => {
       })
     );
 
+    // Thing group that every provisioned device joins — IoT Job targets this group
+    new CfnThingGroup(this, "DevicesThingGroup", {
+      thingGroupName: `${deploymentId}-devices`,
+    });
+
+    // ── Software Package Catalog ─────────────────────────────────────────────
+    // Registered so fleet indexing can query $package shadow by version.
+    // Devices write the $package shadow on boot (v1.0.0) and after the
+    // telemetry-v2 job runs (v2.0.0).
+    const softwarePackage = new CfnSoftwarePackage(this, "TelemetryAgentPackage", {
+      packageName: `${deploymentId}-telemetry-agent`,
+    });
+
+    new CfnSoftwarePackageVersion(this, "TelemetryAgentV1", {
+      packageName: softwarePackage.ref,
+      versionName: "1.0.0",
+    });
+
+    new CfnSoftwarePackageVersion(this, "TelemetryAgentV2", {
+      packageName: softwarePackage.ref,
+      versionName: "2.0.0",
+    });
+
+    // --8<-- [start:provisioning-template]
     new CfnProvisioningTemplate(this, "ProvisioningTemplate", {
       templateName: `${deploymentId}-provisioning`,
       description: `Fleet provisioning template for deployment ${deploymentId}`,
@@ -350,9 +380,11 @@ exports.handler = async (event) => {
               AttributePayload: {
                 deploymentId: deploymentId,
               },
+              ThingGroups: [`${deploymentId}-devices`],
             },
             OverrideSettings: {
               AttributePayload: "MERGE",
+              ThingGroups: "REPLACE",
             },
           },
           policy: {
@@ -364,6 +396,7 @@ exports.handler = async (event) => {
         },
       }),
     });
+    // --8<-- [end:provisioning-template]
 
     // ── Edge subnet (network-isolated /24) ───────────────────────────────────
     // We pick a /24 slot based on the numeric slot index embedded in deploymentId.
@@ -491,50 +524,16 @@ EOF
 
 mkdir -p /etc/aws-iot-device-client/jobs
 
-# Initial telemetry publisher (0.2 Hz, cpu/mem/disk)
-cat > /etc/aws-iot-device-client/jobs/publish-telemetry.sh <<'TELEMETRY'
+# Generic IoT Job handler: downloads and runs an S3-hosted script
+cat > /etc/aws-iot-device-client/jobs/run-script.sh <<'HANDLER'
 #!/bin/bash
-INSTANCE_ID=$(ec2-metadata --instance-id | cut -d' ' -f2)
-DEPLOYMENT_ID="${deploymentId}"
-IOT_ENDPOINT=$(aws iot describe-endpoint --endpoint-type iot:Data-ATS --query endpointAddress --output text)
-INTERVAL_S=5  # 0.2 Hz
-
-while true; do
-  TS=$(date -u +%s%3N)
-  CPU=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | tr -d '%us,')
-  MEM=$(free | awk '/Mem:/ {printf "%.1f", $3/$2*100}')
-  DISK=$(df / | awk 'NR==2 {print $5}' | tr -d '%')
-
-  PAYLOAD=$(printf '{"thing_name":"%s","message_timestamp":%s,"cpu_pct":%s,"mem_used_pct":%s,"disk_used_pct":%s}' \
-    "$INSTANCE_ID" "$TS" "$CPU" "$MEM" "$DISK")
-
-  aws iot-data publish \
-    --endpoint-url "https://$IOT_ENDPOINT" \
-    --topic "edge/$DEPLOYMENT_ID/$INSTANCE_ID/telemetry" \
-    --payload "$PAYLOAD" \
-    --cli-binary-format raw-in-base64-out \
-    2>/dev/null
-
-  sleep $INTERVAL_S
-done
-TELEMETRY
-chmod +x /etc/aws-iot-device-client/jobs/publish-telemetry.sh
-
-# Systemd unit for telemetry
-cat > /etc/systemd/system/workshop-telemetry.service <<EOF
-[Unit]
-Description=Workshop Telemetry Publisher
-After=network.target aws-iot-device-client.service
-
-[Service]
-Type=simple
-ExecStart=/etc/aws-iot-device-client/jobs/publish-telemetry.sh
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
+set -euo pipefail
+SCRIPT_URI=$(echo "$JOB_DOCUMENT" | python3 -c "import json,sys; print(json.load(sys.stdin)['scriptUri'])")
+aws s3 cp "$SCRIPT_URI" /tmp/job-script.sh
+chmod +x /tmp/job-script.sh
+/tmp/job-script.sh
+HANDLER
+chmod +x /etc/aws-iot-device-client/jobs/run-script.sh
 
 # Systemd unit for Device Client
 cat > /etc/systemd/system/aws-iot-device-client.service <<EOF
@@ -557,18 +556,7 @@ systemctl enable aws-iot-device-client
 systemctl start aws-iot-device-client
 
 # Delete claim cert files after Device Client runs provisioning (give it 60 s)
-(sleep 60 && rm -f /tmp/claim.pem.crt /tmp/claim-private.pem.key && \
-  systemctl enable workshop-telemetry && systemctl start workshop-telemetry) &
-
-# Write initial device-config shadow (reported only on boot)
-(sleep 90 && INSTANCE_ID=$(ec2-metadata --instance-id | cut -d' ' -f2) && \
-  IOT_EP=$(aws iot describe-endpoint --endpoint-type iot:Data-ATS --query endpointAddress --output text) && \
-  aws iot-data update-thing-shadow \
-    --endpoint-url "https://$IOT_EP" \
-    --thing-name "$INSTANCE_ID" \
-    --shadow-name device-config \
-    --payload '{"state":{"reported":{"telemetry_interval_ms":5000,"metrics":["cpu_pct","mem_used_pct","disk_used_pct"],"config_version":"1.0.0"}}}' \
-    /dev/null) &
+(sleep 60 && rm -f /tmp/claim.pem.crt /tmp/claim-private.pem.key) &
 `;
 
     const amiId = MachineImage.latestAmazonLinux2023().getImage(this).imageId;
@@ -635,6 +623,9 @@ systemctl start aws-iot-device-client
         },
       },
     });
+    // MSK takes 15+ min to create and can't be deleted while CREATING, which causes
+    // DELETE_FAILED cascades on rollback. Teardown is handled by scripts/teardown.sh.
+    mskCluster.cfnOptions.deletionPolicy = CfnDeletionPolicy.RETAIN;
 
     // ── IoT Rule → S3 (raw telemetry landing) ───────────────────────────────
     // Routes edge/<deploymentId>/+/telemetry messages to S3 for Athena queries.
@@ -670,9 +661,9 @@ systemctl start aws-iot-device-client
     });
 
     // ── AppSync Events API (live push — no persistence) ──────────────────────
-    // IoT Rules Engine posts directly to the AppSync Events HTTP endpoint via
-    // SigV4-signed HTTP action. Path: device MQTT → IoT Core → IoT Rule →
-    // AppSync Events → browser WebSocket. No Lambda hop, no database write.
+    // Path: device MQTT → IoT Core → IoT Rule → Lambda → AppSync Events → browser WebSocket.
+    // IoT's HTTP action requires a pre-confirmed destination URL (not settable via CFN),
+    // so a thin Lambda bridge is used instead.
     const eventsApi = new CfnAppSyncApi(this, "TelemetryEventsApi", {
       name: `workshop-${deploymentId}-events`,
       eventConfig: {
@@ -689,12 +680,15 @@ systemctl start aws-iot-device-client
       name: "telemetry",
     });
 
-    // IAM role that allows IoT Rules Engine to publish to the Events HTTP endpoint
-    const iotAppSyncRole = new Role(this, "IotAppSyncRole", {
-      assumedBy: new ServicePrincipal("iot.amazonaws.com"),
+    // Lambda bridge: IoT Rule → Lambda → AppSync Events publish
+    const appSyncBridgeRole = new Role(this, "AppSyncBridgeRole", {
+      assumedBy: new ServicePrincipal("lambda.amazonaws.com"),
+      managedPolicies: [
+        ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaBasicExecutionRole"),
+      ],
     });
 
-    iotAppSyncRole.addToPolicy(
+    appSyncBridgeRole.addToPolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,
         actions: ["appsync:EventPublish"],
@@ -702,25 +696,75 @@ systemctl start aws-iot-device-client
       })
     );
 
-    // IoT Rule → AppSync Events (raw telemetry push to browser subscribers)
-    // Channel path: /telemetry/<deploymentId>/<thingName>
-    // No database write; used for the "live push" freshness panel.
+    const appSyncBridgeFn = new LambdaFn(this, "AppSyncBridge", {
+      functionName: `workshop-${deploymentId}-appsync-bridge`,
+      runtime: Runtime.NODEJS_22_X,
+      architecture: Architecture.ARM_64,
+      handler: "index.handler",
+      role: appSyncBridgeRole,
+      timeout: Duration.seconds(5),
+      environment: {
+        APPSYNC_HTTP_ENDPOINT: eventsApi.attrDnsHttp,
+        DEPLOYMENT_ID: deploymentId,
+        REGION: this.region,
+      },
+      code: Code.fromInline(`
+const https = require("https");
+const { SignatureV4 } = require("@smithy/signature-v4");
+const { Sha256 } = require("@aws-crypto/sha256-js");
+
+exports.handler = async (event) => {
+  const host = process.env.APPSYNC_HTTP_ENDPOINT;
+  const deploymentId = process.env.DEPLOYMENT_ID;
+  const region = process.env.REGION;
+  const thingName = event.thing_name ?? "unknown";
+  const channel = \`/telemetry/\${deploymentId}/\${thingName}\`;
+  const body = JSON.stringify({ channel, events: [JSON.stringify(event)] });
+
+  const signer = new SignatureV4({
+    credentials: {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+      sessionToken: process.env.AWS_SESSION_TOKEN,
+    },
+    region,
+    service: "appsync",
+    sha256: Sha256,
+  });
+
+  const req = await signer.sign({
+    method: "POST",
+    hostname: host,
+    path: "/event",
+    headers: { host, "content-type": "application/json" },
+    body,
+  });
+
+  await new Promise((resolve, reject) => {
+    const r = https.request({ hostname: host, path: "/event", method: "POST", headers: req.headers }, (res) => {
+      res.resume();
+      res.on("end", resolve);
+    });
+    r.on("error", reject);
+    r.write(body);
+    r.end();
+  });
+};
+      `),
+    });
+
+    appSyncBridgeFn.addPermission("AllowIoTInvoke", {
+      principal: new ServicePrincipal("iot.amazonaws.com"),
+    });
+
     new CfnTopicRule(this, "IotToAppSyncRule", {
       ruleName: `workshop_${deploymentId.replace(/-/g, "_")}_to_appsync`,
       topicRulePayload: {
         sql: `SELECT * FROM 'edge/${deploymentId}/+/telemetry'`,
         actions: [
           {
-            http: {
-              url: `https://${eventsApi.attrDnsHttp}/event/channel/telemetry/${deploymentId}/\${topic(2)}`,
-              auth: {
-                sigv4: {
-                  serviceName: "appsync",
-                  signingRegion: this.region,
-                  roleArn: iotAppSyncRole.roleArn,
-                },
-              },
-              headers: [{ key: "Content-Type", value: "application/json" }],
+            lambda: {
+              functionArn: appSyncBridgeFn.functionArn,
             },
           },
         ],

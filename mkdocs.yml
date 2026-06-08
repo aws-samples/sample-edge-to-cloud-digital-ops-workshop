@@ -3,6 +3,10 @@ site_description: A 7-session hands-on workshop covering IoT fleet management, r
 site_author: NOV Digital Operations
 docs_dir: workshop
 
+repo_url: https://github.com/energy-digital-operations/edge-digital-operations-workshop
+repo_name: edge-digital-operations-workshop
+edit_uri: blob/main/workshop/
+
 theme:
   name: material
   palette:
@@ -44,7 +48,12 @@ markdown_extensions:
   - pymdownx.highlight:
       anchor_linenums: true
   - pymdownx.inlinehilite
-  - pymdownx.snippets
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.snippets:
+      base_path: [workshop, .]
+      check_paths: true
   - tables
   - attr_list
   - def_list
@@ -54,6 +63,9 @@ markdown_extensions:
 
 plugins:
   - search
+
+extra_javascript:
+  - javascripts/deployment-id.js
 
 nav:
   - Home: index.md
@@ -106,3 +118,4 @@ nav:
       - Architecture Decisions: reference/decisions.md
       - Gotchas & Watch-Outs: reference/gotchas.md
       - Repository Structure: reference/repo-structure.md
+      - Contributing to the Docs: reference/contributing.md

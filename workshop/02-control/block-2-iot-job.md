@@ -11,7 +11,7 @@ The update does two things:
 
 ## Steps
 
-**1. Open `job-scripts/telemetry-v2.sh`** in your editor. Facilitator walks through the key sections:
+**1. Open `job-scripts/telemetry-v2.sh`** in your editor (or browse it on [GitHub](https://github.com/energy-digital-operations/edge-digital-operations-workshop/blob/main/job-scripts/telemetry-v2.sh)). Facilitator walks through the key sections:
 
 - `TELEMETRY_INTERVAL_MS` changing from `5000` → `1000`
 - The `METRICS` array extended with the two network metrics

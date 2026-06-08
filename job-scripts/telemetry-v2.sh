@@ -1,4 +1,5 @@
 #!/bin/bash
+# --8<-- [start:job-handler]
 # IoT Job handler: update telemetry to 1 Hz and add network metrics.
 # Exit 0 = SUCCESS reported to IoT Jobs; non-zero = FAILED.
 set -euo pipefail
@@ -55,7 +56,7 @@ chmod +x "$TELEMETRY_SCRIPT"
 # ── Restart telemetry service ──────────────────────────────────────────────────
 systemctl restart workshop-telemetry
 
-# ── Update device-config shadow: report new version ───────────────────────────
+# ── Update shadows: report new version ────────────────────────────────────────
 sleep 2
 aws iot-data update-thing-shadow \
   --region "$REGION" \
@@ -65,5 +66,14 @@ aws iot-data update-thing-shadow \
   --payload '{"state":{"reported":{"telemetry_interval_ms":1000,"metrics":["cpu_pct","mem_used_pct","disk_used_pct","net_io_bytes_sent","net_io_bytes_recv"],"config_version":"2.0.0"}}}' \
   /dev/null
 
+aws iot-data update-thing-shadow \
+  --region "$REGION" \
+  --endpoint-url "https://$IOT_ENDPOINT" \
+  --thing-name "$INSTANCE_ID" \
+  --shadow-name '$package' \
+  --payload '{"state":{"reported":{"telemetry-agent":{"version":"2.0.0"}}}}' \
+  /dev/null
+
 echo "telemetry-v2 applied successfully"
 exit 0
+# --8<-- [end:job-handler]

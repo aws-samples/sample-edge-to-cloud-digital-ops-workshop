@@ -44,19 +44,19 @@ cd edge-digital-ops-workshop
 pnpm install
 
 # 2. Bootstrap CDK (first time only per account/region)
-cd cdk && pnpm cdk bootstrap
+npx cdk bootstrap
 
-# 3. Deploy platform stack (shared VPCs — one-time per account)
-pnpm cdk deploy PlatformStack
-
-# 4. Deploy participant stacks (one per participant)
-for ID in ws-a1b2c3 ws-b4c5d6; do
-  pnpm cdk deploy ParticipantStack --context deploymentId=$ID
-done
-
-# 5. Deploy Amplify app
-cd .. && npx ampx pipeline-deploy --branch main
+# 3. Deploy all participant environments in parallel
+#    Deploys the shared platform stack once first (if needed),
+#    then starts one Amplify sandbox per participant concurrently.
+pnpm sandbox:all ws-a1b2c3 ws-b4c5d6
 ```
+
+!!! info "What `pnpm sandbox:all` does"
+    `scripts/sandbox-all.sh` deploys `WorkshopPlatformStack` (shared VPCs) sequentially first — eliminating any race condition — then fans out `npx ampx sandbox --identifier <ID>` for each participant in parallel. Each participant gets their own isolated full-stack Amplify environment. Logs are prefixed with `[ws-a1b2c3]` etc. for readability.
+
+!!! tip "Single participant"
+    To deploy or iterate on one environment: `pnpm sandbox ws-a1b2c3`
 
 ---
 

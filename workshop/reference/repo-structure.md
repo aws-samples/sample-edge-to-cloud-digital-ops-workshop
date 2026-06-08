@@ -2,31 +2,25 @@
 
 ```
 edge-digital-ops-workshop/
-├── amplify/                    # Amplify Gen 2 project root
-│   ├── backend.ts              # Custom CDK constructs (MSK, EKS, IoT, Athena)
-│   └── auth/                   # Cognito user pool per deployment
-├── cdk/
-│   ├── platform-stack/         # Shared VPCs, subnets, route tables
-│   ├── participant-stack/      # Per-deployment resources (IoT, MSK, EKS, S3)
-│   │   └── provisioning.ts     # Fleet provisioning template + claim cert logic
-│   └── sensor-simulator/       # Session 5 sensor EC2 CDK construct
-├── helm/
-│   ├── edge-stack/             # Umbrella chart: Redpanda, RisingWave, CNPG, MinIO, HMI
-│   ├── risingwave-values.yaml
-│   └── rp-connect-timescaledb.yaml
-├── k8s/
-│   └── timescaledb-cluster.yaml
-├── hmi/                        # Next.js HMI (React Flow site view + Digital Ops page)
-├── frontend/                   # Amplify-hosted cloud UI (device fleet, freshness comparison)
+├── amplify/
+│   ├── backend.ts                  # Amplify Gen 2 entry point
+│   ├── auth/                       # Cognito user pool per deployment
+│   └── custom/
+│       ├── participant-stack.ts    # Per-deployment resources (IoT, MSK, S3, AppSync)
+│       └── platform-stack.ts      # Shared VPCs, subnets, route tables
+├── frontend/                       # Amplify-hosted cloud UI (fleet view, freshness panel)
+├── job-scripts/                    # IoT Job handler scripts (deployed to devices via Jobs)
+│   ├── telemetry-v2.sh             # Session 2: 1 Hz + network metrics
+│   ├── deploy-k3s.sh               # Session 5: K3s cluster bootstrap
+│   └── add-shadows.sh              # Session 3: app-deployment + device-health shadows
 ├── scripts/
-│   ├── create-workshop-user.sh # Create Cognito user for the front-end UI
-│   └── teardown.sh             # Ordered resource cleanup
-├── job-scripts/                # IoT Job handler scripts (deployed to devices via Jobs)
-│   ├── telemetry-v2.sh         # Session 2: 1 Hz + network metrics
-│   ├── deploy-k3s.sh           # Session 5: K3s cluster bootstrap
-│   └── add-shadows.sh          # Session 3: app-deployment + device-health shadows
-├── workshop/                   # MkDocs source (this documentation)
+│   ├── create-workshop-user.sh     # Create Cognito user for the front-end UI
+│   └── teardown.sh                 # Ordered resource cleanup
+├── workshop/                       # MkDocs source (this documentation)
 │   ├── index.md
+│   ├── javascripts/
+│   │   └── deployment-id.js        # Client-side ?did= deployment ID substitution
+│   ├── snippets/                   # Reserved for future snippet fragments (currently empty)
 │   ├── 00-prerequisites/
 │   ├── 01-observe/
 │   ├── 02-control/
@@ -36,11 +30,10 @@ edge-digital-ops-workshop/
 │   ├── 06-hmi/
 │   ├── 07-capstone/
 │   └── reference/
-├── docs/
-│   ├── workshop-plan.md        # Full session plan (source of truth)
+├── docs/                           # Internal facilitator notes (not published)
+│   ├── workshop-plan.md
 │   ├── intent.md
 │   └── notes/
-│       ├── real-time-pipeline-architecture.md
-│       └── ...
-└── mkdocs.yml                  # MkDocs configuration
+├── requirements.txt                # Python deps for MkDocs (mkdocs-material)
+└── mkdocs.yml                      # MkDocs configuration
 ```
