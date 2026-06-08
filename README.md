@@ -73,6 +73,24 @@ Removes IoT things, EC2 instances, MSK cluster, S3 objects, Athena workgroup, an
 
 ---
 
+## Workshop Docs (Local Preview)
+
+The workshop instructions live in `workshop/` and are built with [MkDocs Material](https://squidfunk.github.io/mkdocs-material/).
+
+```bash
+# One-time setup (recommended: use a virtual environment)
+python3 -m venv .venv
+source .venv/bin/activate
+pip install mkdocs-material pymdown-extensions
+
+# Start the dev server with live reload
+mkdocs serve
+```
+
+Open `http://localhost:8000`. The site rebuilds automatically whenever you save a file in `workshop/` or `mkdocs.yml`.
+
+---
+
 ## Repository Layout
 
 ```

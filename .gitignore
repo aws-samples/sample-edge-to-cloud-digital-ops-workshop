@@ -8,4 +8,12 @@ CLAUDE.md
 cdk.out
 *.js.map
 
+# Python / MkDocs
+.venv
+__pycache__
+*.py[cod]
+*.pyo
+.Python
+site/
+
 
