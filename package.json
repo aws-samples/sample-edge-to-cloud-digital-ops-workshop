@@ -1,0 +1,24 @@
+{
+  "name": "edge-digital-ops-workshop",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sandbox": "npx ampx sandbox",
+    "sandbox:delete": "npx ampx sandbox delete",
+    "pipeline-deploy": "npx ampx pipeline-deploy",
+    "test": "node scripts/smoke-test.mjs"
+  },
+  "devDependencies": {
+    "@aws-amplify/backend": "^1.23.0",
+    "@aws-amplify/backend-cli": "^1.8.3",
+    "@types/node": "^25.9.2",
+    "aws-cdk-lib": "^2.258.0",
+    "constructs": "^10.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  },
+  "dependencies": {
+    "aws-amplify": "^6.13.0"
+  }
+}

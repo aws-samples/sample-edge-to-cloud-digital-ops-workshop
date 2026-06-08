@@ -1,0 +1,22 @@
+block-beta
+  columns 3
+
+  Sensor["📡 Sensor<br/>────────────────────────<br/>Generates readings at regular<br/>intervals (e.g. 1 Hz).<br/>Publishes over MQTT."]:1
+
+  MQTT["📨 MQTT Broker<br/>────────────────────────<br/>Lightweight pub/sub.<br/>Not a durable log.<br/>Forwards to streaming service.<br/>────────────────────────<br/>e.g. IoT Core, EMQX"]:1
+
+  Kafka["🔁 Streaming Service<br/>────────────────────────<br/>Durable, ordered log.<br/>Multiple consumers read<br/>independently. Handles<br/>replay on reconnect.<br/>────────────────────────<br/>e.g. Kafka, Redpanda, MSK"]:1
+
+  space space space
+
+  Mem["🧠 In-Memory Store<br/>────────────────────────<br/>Materialized views in RAM.<br/>Continuous queries run as<br/>data arrives.<br/>Sub-50 ms latency.<br/>────────────────────────<br/>Use for: live dashboards,<br/>alarms, fleet aggregates<br/>────────────────────────<br/>e.g. RisingWave"]:1
+
+  Disk["🗄️ Time-Series DB<br/>────────────────────────<br/>Accepts high-throughput writes.<br/>Continuous aggregates<br/>pre-computed on schedule.<br/>90–95% compression.<br/>────────────────────────<br/>Use for: recent history,<br/>ad-hoc drilldown, SQL joins<br/>────────────────────────<br/>e.g. TimescaleDB"]:1
+
+  Object["🪣 Object Storage<br/>────────────────────────<br/>Raw stream archived directly.<br/>Unlimited capacity, low cost.<br/>Write-once, batch-read.<br/>────────────────────────<br/>Use for: long-term archive,<br/>ML training, compliance<br/>────────────────────────<br/>e.g. S3"]:1
+
+  Sensor --> MQTT
+  MQTT --> Kafka
+  Kafka --> Mem
+  Kafka --> Disk
+  Kafka --> Object
