@@ -1,0 +1,11 @@
+tmp
+.claude
+node_modules
+.DS_Store
+.amplify
+amplify_outputs.json
+CLAUDE.md
+cdk.out
+*.js.map
+
+

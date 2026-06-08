@@ -1,0 +1,108 @@
+site_name: Edge Digital Operations Workshop
+site_description: A 7-session hands-on workshop covering IoT fleet management, real-time data pipelines, and edge computing on AWS.
+site_author: NOV Digital Operations
+docs_dir: workshop
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: orange
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: orange
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.path
+    - navigation.top
+    - navigation.footer
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+    - content.code.annotate
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - tables
+  - attr_list
+  - def_list
+  - footnotes
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Prerequisites:
+      - Admin Setup: 00-prerequisites/index.md
+  - Session 1 — Observe:
+      - Overview: 01-observe/index.md
+      - Block 0 — Fleet Provisioning: 01-observe/block-0-fleet-provisioning.md
+      - Block 1 — Console Tour: 01-observe/block-1-console-tour.md
+      - Block 2 — S3 Observation: 01-observe/block-2-s3.md
+      - Block 3 — Athena Freshness: 01-observe/block-3-athena.md
+      - Block 4 — Fleet Indexing: 01-observe/block-4-fleet-indexing.md
+  - Session 2 — Control:
+      - Overview: 02-control/index.md
+      - Block 1 — Device Client Architecture: 02-control/block-1-device-client.md
+      - Block 2 — Create and Deploy a Job: 02-control/block-2-iot-job.md
+      - Block 3 — Fleet Management Deep Dive: 02-control/block-3-fleet-management.md
+      - Block 4 — Observe Updated Data Flow: 02-control/block-4-observe.md
+  - Session 3 — State:
+      - Overview: 03-state/index.md
+      - Block 1 — Named Shadow Architecture: 03-state/block-1-shadows.md
+      - Block 2 — Deploy Shadow Update Job: 03-state/block-2-shadow-job.md
+      - Block 3 — Front-End UI Walkthrough: 03-state/block-3-ui.md
+      - Block 4 — Failure Detection: 03-state/block-4-failure.md
+  - Session 4 — Analytics:
+      - Overview: 04-analytics/index.md
+      - Block 1 — Deploy Cloud Analytics Stack: 04-analytics/block-1-deploy.md
+      - Block 2 — RisingWave Materialized Views: 04-analytics/block-2-risingwave.md
+      - Block 3 — AppSync Resolvers & Freshness: 04-analytics/block-3-appsync.md
+      - Block 4 — TimescaleDB Continuous Aggregates: 04-analytics/block-4-timescaledb.md
+  - Session 5 — Edge Infrastructure:
+      - Overview: 05-edge-infra/index.md
+      - Block 1 — Edge Stack Architecture: 05-edge-infra/block-1-architecture.md
+      - Block 2 — Launch K3s + Sensor EC2: 05-edge-infra/block-2-k3s-launch.md
+      - Block 3 — Deploy Edge Helm Stack: 05-edge-infra/block-3-helm.md
+      - Block 4 — Verify Edge Pipeline: 05-edge-infra/block-4-verify.md
+  - Session 6 — HMI:
+      - Overview: 06-hmi/index.md
+      - Block 1 — Port-Forward and Load HMI: 06-hmi/block-1-port-forward.md
+      - Block 2 — Site View Exploration: 06-hmi/block-2-site-view.md
+      - Block 3 — Digital Ops & Network Failure: 06-hmi/block-3-failure-sim.md
+      - Block 4 — Compare Edge vs Cloud Freshness: 06-hmi/block-4-freshness.md
+  - Session 7 — Capstone:
+      - Overview: 07-capstone/index.md
+      - Block 1 — Architecture Walkthrough: 07-capstone/block-1-architecture.md
+      - Block 2 — Fleet Scale Discussion: 07-capstone/block-2-scale.md
+      - Block 3 — Day-2 Operations Scenario: 07-capstone/block-3-day2.md
+      - Block 4 — Teardown: 07-capstone/block-4-teardown.md
+  - Reference:
+      - Architecture Decisions: reference/decisions.md
+      - Gotchas & Watch-Outs: reference/gotchas.md
+      - Repository Structure: reference/repo-structure.md
