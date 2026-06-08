@@ -4,8 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "sandbox": "npx ampx sandbox",
-    "sandbox:delete": "npx ampx sandbox delete",
+    "sandbox": "bash scripts/sandbox.sh",
+    "sandbox:all": "bash scripts/sandbox-all.sh",
+    "sandbox:delete": "npx ampx sandbox delete --identifier ${WORKSHOP_DEPLOYMENT_ID:-ws-slot00} --yes",
+    "sandbox:delete-all": "bash scripts/sandbox-delete-all.sh",
     "pipeline-deploy": "npx ampx pipeline-deploy",
     "test": "node scripts/smoke-test.mjs"
   },

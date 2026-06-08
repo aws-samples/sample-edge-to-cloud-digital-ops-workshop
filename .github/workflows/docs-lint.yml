@@ -1,0 +1,56 @@
+name: Docs Lint
+
+on:
+  pull_request:
+    paths:
+      - 'workshop/**'
+      - 'job-scripts/**'
+      - 'amplify/custom/participant-stack.ts'
+      - 'mkdocs.yml'
+      - 'requirements.txt'
+      - '.github/workflows/docs-lint.yml'
+
+jobs:
+  build:
+    name: Strict MkDocs build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build (strict — fail on warnings)
+        run: mkdocs build --strict
+
+  links:
+    name: Check external links
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore built site
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install -r requirements.txt
+      - run: mkdocs build
+
+      - name: Check links with lychee
+        uses: lycheeverse/lychee-action@v2
+        with:
+          # Check the built HTML output; skip anchors (drift fast), localhost, and AWS console (auth-gated)
+          args: >
+            --no-progress
+            --exclude-loopback
+            --exclude 'console\.aws\.amazon\.com'
+            --exclude '#'
+            ./site
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

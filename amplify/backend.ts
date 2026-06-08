@@ -1,43 +1,30 @@
 import { defineBackend } from "@aws-amplify/backend";
-import { Stack } from "aws-cdk-lib";
 import { auth } from "./auth/resource";
-import { PlatformStack } from "./custom/platform-stack";
 import { ParticipantStack } from "./custom/participant-stack";
 
 const backend = defineBackend({ auth });
 
-// Amplify custom CDK scope — runs during `ampx sandbox` / pipeline deploy.
-// The platform stack creates the two shared VPCs and is deployed once.
-// ParticipantStack is deployed once per DEPLOYMENT_ID (default: 10 slots).
-const customResources = backend.createStack("WorkshopCustomResources");
-
-const platformStack = new PlatformStack(
-  customResources,
-  "WorkshopPlatformStack",
-  {
-    env: {
-      account: Stack.of(customResources).account,
-      region: Stack.of(customResources).region,
-    },
-  }
-);
-
-// Default deployment count; set WORKSHOP_SLOT_COUNT env var to override.
-const slotCount = parseInt(process.env.WORKSHOP_SLOT_COUNT ?? "10", 10);
-
-for (let i = 0; i < slotCount; i++) {
-  const deploymentId = `ws-slot${String(i).padStart(2, "0")}`;
-  new ParticipantStack(
-    customResources,
-    `Participant-${deploymentId}`,
-    {
-      deploymentId,
-      edgeVpc: platformStack.edgeVpc,
-      cloudVpc: platformStack.cloudVpc,
-      env: {
-        account: Stack.of(customResources).account,
-        region: Stack.of(customResources).region,
-      },
-    }
+// WORKSHOP_DEPLOYMENT_ID is set by scripts/sandbox.sh (e.g. "ws-slot00").
+const deploymentId = process.env.WORKSHOP_DEPLOYMENT_ID;
+if (!deploymentId) {
+  throw new Error(
+    "WORKSHOP_DEPLOYMENT_ID must be set. Run: pnpm sandbox (uses scripts/sandbox.sh) or export WORKSHOP_DEPLOYMENT_ID=ws-slot00"
   );
 }
+
+// Vpc.fromLookup requires concrete account/region at synth time (not CFN tokens).
+// CDK_DEFAULT_ACCOUNT and CDK_DEFAULT_REGION are populated by `ampx sandbox`.
+const account = process.env.CDK_DEFAULT_ACCOUNT;
+const region = process.env.CDK_DEFAULT_REGION;
+if (!account || !region) {
+  throw new Error("CDK_DEFAULT_ACCOUNT and CDK_DEFAULT_REGION must be set");
+}
+
+const customResources = backend.createStack("WorkshopCustomResources");
+
+// ParticipantStack has a concrete env, so Vpc.fromLookup resolves correctly
+// inside it. The VPC IDs are looked up there, not here.
+new ParticipantStack(customResources, `Participant-${deploymentId}`, {
+  deploymentId,
+  env: { account, region },
+});
