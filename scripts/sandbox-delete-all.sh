@@ -14,13 +14,51 @@ DEPLOYMENT_IDS=("$@")
 PLATFORM_STACK="WorkshopPlatformStack"
 PLATFORM_APP="npx tsx amplify/custom/platform-app.ts"
 
+# ── Delete MSK clusters explicitly (RETAIN policy means CFN won't touch them) ─
+echo ">>> Deleting MSK clusters for all deployment IDs..."
+MSK_PIDS=()
+for ID in "${DEPLOYMENT_IDS[@]}"; do
+  (
+    MSK_ARN=$(aws kafka list-clusters-v2 \
+      --query "ClusterInfoList[?ClusterName=='workshop-${ID}-msk'].ClusterArn" \
+      --output text 2>/dev/null)
+    if [[ -z "$MSK_ARN" || "$MSK_ARN" == "None" ]]; then
+      echo ">>> [$ID] No MSK cluster found, skipping."
+      exit 0
+    fi
+    STATE=$(aws kafka describe-cluster-v2 --cluster-arn "$MSK_ARN" \
+      --query "ClusterInfo.State" --output text 2>/dev/null || echo "UNKNOWN")
+    if [[ "$STATE" == "DELETING" ]]; then
+      echo ">>> [$ID] MSK already deleting."
+    elif [[ "$STATE" != "UNKNOWN" ]]; then
+      echo ">>> [$ID] Deleting MSK cluster ($STATE)..."
+      aws kafka delete-cluster --cluster-arn "$MSK_ARN" > /dev/null
+    fi
+    echo ">>> [$ID] Waiting for MSK to finish deleting..."
+    while true; do
+      S=$(aws kafka describe-cluster-v2 --cluster-arn "$MSK_ARN" \
+        --query "ClusterInfo.State" --output text 2>&1)
+      [[ "$S" == *"NotFoundException"* || "$S" == *"does not exist"* ]] && break
+      echo ">>> [$ID] MSK: $S"
+      sleep 30
+    done
+    echo ">>> [$ID] MSK deleted."
+  ) &
+  MSK_PIDS+=($!)
+done
+for pid in "${MSK_PIDS[@]}"; do wait "$pid" || true; done
+echo ">>> All MSK clusters deleted."
+
 # ── Delete participant sandboxes in parallel ─────────────────────────────────
 echo ">>> Deleting ${#DEPLOYMENT_IDS[@]} sandboxes in parallel..."
 
 PIDS=()
 for ID in "${DEPLOYMENT_IDS[@]}"; do
-  WORKSHOP_DEPLOYMENT_ID="$ID" npx ampx sandbox delete --identifier "$ID" --yes \
-    > >(sed "s/^/[$ID] /") \
+  bash -c '
+    . "$HOME/.nvm/nvm.sh"
+    nvm use 22 --silent
+    WORKSHOP_DEPLOYMENT_ID="'"$ID"'" npx ampx sandbox delete --identifier "'"$ID"'" --yes
+  ' > >(sed "s/^/[$ID] /") \
     2> >(sed "s/^/[$ID] /" >&2) &
   PIDS+=($!)
   echo ">>> [$ID] delete started (pid $!)"

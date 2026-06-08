@@ -37,8 +37,11 @@ echo ">>> Starting ${#DEPLOYMENT_IDS[@]} sandboxes in parallel..."
 
 PIDS=()
 for ID in "${DEPLOYMENT_IDS[@]}"; do
-  WORKSHOP_DEPLOYMENT_ID="$ID" npx ampx sandbox --identifier "$ID" \
-    > >(sed "s/^/[$ID] /") \
+  bash -c '
+    . "$HOME/.nvm/nvm.sh"
+    nvm use 22 --silent
+    WORKSHOP_DEPLOYMENT_ID="'"$ID"'" npx ampx sandbox --identifier "'"$ID"'" --once
+  ' > >(sed "s/^/[$ID] /") \
     2> >(sed "s/^/[$ID] /" >&2) &
   PIDS+=($!)
   echo ">>> [$ID] sandbox started (pid $!)"
