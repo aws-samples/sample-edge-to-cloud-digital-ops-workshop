@@ -974,49 +974,7 @@ systemctl start sensor-sim
         DEPLOYMENT_ID: deploymentId,
         REGION: this.region,
       },
-      code: Code.fromInline(`
-const https = require("https");
-const { SignatureV4 } = require("@smithy/signature-v4");
-const { Sha256 } = require("@aws-crypto/sha256-js");
-
-exports.handler = async (event) => {
-  const host = process.env.APPSYNC_HTTP_ENDPOINT;
-  const deploymentId = process.env.DEPLOYMENT_ID;
-  const region = process.env.REGION;
-  const thingName = event.thing_name ?? "unknown";
-  const channel = \`/telemetry/\${deploymentId}/\${thingName}\`;
-  const body = JSON.stringify({ channel, events: [JSON.stringify(event)] });
-
-  const signer = new SignatureV4({
-    credentials: {
-      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-      sessionToken: process.env.AWS_SESSION_TOKEN,
-    },
-    region,
-    service: "appsync",
-    sha256: Sha256,
-  });
-
-  const req = await signer.sign({
-    method: "POST",
-    hostname: host,
-    path: "/event",
-    headers: { host, "content-type": "application/json" },
-    body,
-  });
-
-  await new Promise((resolve, reject) => {
-    const r = https.request({ hostname: host, path: "/event", method: "POST", headers: req.headers }, (res) => {
-      res.resume();
-      res.on("end", resolve);
-    });
-    r.on("error", reject);
-    r.write(body);
-    r.end();
-  });
-};
-      `),
+      code: Code.fromAsset("amplify/lambda/appsync-bridge"),
     });
 
     appSyncBridgeFn.addPermission("AllowIoTInvoke", {

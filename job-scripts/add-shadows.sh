@@ -23,6 +23,7 @@ aws iot-data update-thing-shadow \\
   --endpoint-url "https://\$IOT_ENDPOINT" \\
   --thing-name "\$INSTANCE_ID" \\
   --shadow-name app-deployment \\
+  --cli-binary-format raw-in-base64-out \\
   --payload "\$PAYLOAD" \\
   /dev/null
 SCRIPT
@@ -71,6 +72,7 @@ aws iot-data update-thing-shadow \\
   --endpoint-url "https://\$IOT_ENDPOINT" \\
   --thing-name "\$INSTANCE_ID" \\
   --shadow-name device-health \\
+  --cli-binary-format raw-in-base64-out \\
   --payload "\$PAYLOAD" \\
   /dev/null
 SCRIPT

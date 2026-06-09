@@ -6,6 +6,11 @@ import {
   IpAddresses,
   IVpc,
 } from "aws-cdk-lib/aws-ec2";
+import {
+  AwsCustomResource,
+  AwsCustomResourcePolicy,
+  PhysicalResourceId,
+} from "aws-cdk-lib/custom-resources";
 import { Construct } from "constructs";
 
 export interface PlatformStackProps extends StackProps {}
@@ -62,6 +67,49 @@ export class PlatformStack extends Stack {
     // hairpin through the NAT gateway for S3 writes.
     this.cloudVpc.addGatewayEndpoint("S3Endpoint", {
       service: GatewayVpcEndpointAwsService.S3,
+    });
+
+    // Fleet Indexing: enable REGISTRY_AND_SHADOW with named shadow indexing.
+    // Required for Session 3 shadow-based fleet queries
+    // (e.g. shadow.name.device-health.reported.cpu_pct).
+    // This is an account-wide setting — one Custom Resource in PlatformStack
+    // covers all participant slots.
+    new AwsCustomResource(this, "FleetIndexingConfig", {
+      onCreate: {
+        service: "Iot",
+        action: "updateIndexingConfiguration",
+        parameters: {
+          thingIndexingConfiguration: {
+            thingIndexingMode: "REGISTRY_AND_SHADOW",
+            thingConnectivityIndexingMode: "STATUS",
+            deviceDefenderIndexingMode: "OFF",
+            namedShadowIndexingMode: "ON",
+            filter: {
+              namedShadowNames: ["device-health", "device-config", "app-deployment"],
+            },
+          },
+        },
+        physicalResourceId: PhysicalResourceId.of("FleetIndexingConfig"),
+      },
+      onUpdate: {
+        service: "Iot",
+        action: "updateIndexingConfiguration",
+        parameters: {
+          thingIndexingConfiguration: {
+            thingIndexingMode: "REGISTRY_AND_SHADOW",
+            thingConnectivityIndexingMode: "STATUS",
+            deviceDefenderIndexingMode: "OFF",
+            namedShadowIndexingMode: "ON",
+            filter: {
+              namedShadowNames: ["device-health", "device-config", "app-deployment"],
+            },
+          },
+        },
+        physicalResourceId: PhysicalResourceId.of("FleetIndexingConfig"),
+      },
+      policy: AwsCustomResourcePolicy.fromSdkCalls({
+        resources: AwsCustomResourcePolicy.ANY_RESOURCE,
+      }),
     });
   }
 }
