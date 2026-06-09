@@ -5,11 +5,11 @@
 #   helm repo add risingwavelabs https://risingwavelabs.github.io/helm-charts
 #   helm repo update
 #   helm upgrade --install risingwave-operator risingwavelabs/risingwave-operator \
-#     -n risingwave --create-namespace \
+#     -n risingwave-system --create-namespace \
 #     -f helm/risingwave-values.yaml
 #
-# After the operator is running, apply the RisingWave CR:
-#   kubectl apply -f k8s/risingwave-cloud.yaml -n risingwave
+# After the operator is running, apply the RisingWave CR into your participant namespace:
+#   sed "s/\${DEPLOYMENT_ID}/ws-slot00/g" k8s/risingwave-cloud.yaml | kubectl apply -n ws-slot00 -f -
 # ──────────────────────────────────────────────────────────────────────────────
 
 # The operator itself is stateless and lightweight — one pod manages CRs
@@ -29,7 +29,6 @@ leaderElection:
 # Install the RisingWave CRD if it is not already present.
 installCRDs: true
 
-# Restrict the operator to the risingwave namespace so it does not require
-# cluster-wide list/watch permissions on unrelated namespaces.
-watchNamespaces:
-  - risingwave
+# Watch all namespaces so participant CRs (in ws-slotNN namespaces) are managed.
+# The operator is cluster-scoped; leaving watchNamespaces empty means all namespaces.
+watchNamespaces: []

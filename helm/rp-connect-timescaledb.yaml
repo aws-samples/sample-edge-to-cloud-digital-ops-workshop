@@ -5,16 +5,16 @@
 #   helm repo add redpanda https://charts.redpanda.com
 #   helm repo update
 #   helm upgrade --install rp-connect-timescaledb redpanda/connect \
-#     -n analytics --create-namespace \
+#     -n ws-slot00 \
 #     -f helm/rp-connect-timescaledb.yaml
 #
-# Prerequisites (create before helm install):
-#   kubectl create secret generic msk-credentials -n analytics \
+# Prerequisites (create before helm install, substituting your deployment ID):
+#   kubectl create secret generic msk-credentials -n ws-slot00 \
 #     --from-literal=MSK_BOOTSTRAP_SERVERS="b-1.xxx.kafka.us-east-1.amazonaws.com:9096,b-2.xxx.kafka.us-east-1.amazonaws.com:9096" \
 #     --from-literal=MSK_USERNAME="workshop" \
 #     --from-literal=MSK_PASSWORD="<password>"
-#   kubectl create secret generic timescaledb-credentials -n analytics \
-#     --from-literal=TIMESCALE_DSN="postgres://workshop:<password>@timescaledb-cloud-rw.analytics.svc:5432/edge"
+#   kubectl create secret generic timescaledb-credentials -n ws-slot00 \
+#     --from-literal=TIMESCALE_DSN="postgres://workshop:<password>@timescaledb-cloud-rw.ws-slot00.svc:5432/edge"
 # ──────────────────────────────────────────────────────────────────────────────
 
 replicaCount: 1

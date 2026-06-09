@@ -20,22 +20,18 @@ WITH (
 )
 FORMAT PLAIN ENCODE JSON;
 
--- Materialized view: latest reading per sensor per site
+-- Materialized view: latest reading per sensor per site.
+-- Uses MAX_BY to get the value/unit from the row with the highest ts_ms.
 -- HMI /api/live-stream subscribes to this view.
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_sensor_latest AS
 SELECT
     sensor,
     site_id,
-    value,
-    unit,
-    ts_ms
+    MAX_BY(value, ts_ms)  AS value,
+    MAX_BY(unit,  ts_ms)  AS unit,
+    MAX(ts_ms)            AS ts_ms
 FROM sensors_raw
-WHERE ts_ms = (
-    SELECT MAX(ts_ms)
-    FROM sensors_raw s2
-    WHERE s2.sensor  = sensors_raw.sensor
-      AND s2.site_id = sensors_raw.site_id
-);
+GROUP BY sensor, site_id;
 
 -- Materialized view: 1-minute rolling averages (used by Digital Ops page)
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_sensor_1min_avg AS

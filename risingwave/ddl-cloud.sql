@@ -2,9 +2,9 @@
 -- Run once after deploying risingwave-operator + risingwave-cloud.yaml and
 -- applying the MSK credentials Secret.
 --
--- Connect:
---   psql -h <risingwave-svc> -p 4566 -U root -f risingwave/ddl-cloud.sql
--- (after: kubectl port-forward -n risingwave svc/risingwave-cloud-frontend 4566:4566)
+-- Connect (substitute your deployment ID):
+--   kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4566:4566
+--   psql -h localhost -p 4566 -U root -f risingwave/ddl-cloud.sql
 --
 -- MSK credentials must be available as env vars in the RisingWave pods
 -- (injected from the msk-credentials Secret — see k8s/risingwave-cloud.yaml).
@@ -40,16 +40,11 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS mv_sensor_fleet_latest AS
 SELECT
     sensor,
     site_id,
-    value,
-    unit,
-    ts_ms
+    MAX_BY(value, ts_ms)  AS value,
+    MAX_BY(unit,  ts_ms)  AS unit,
+    MAX(ts_ms)            AS ts_ms
 FROM sensors_raw_cloud
-WHERE ts_ms = (
-    SELECT MAX(ts_ms)
-    FROM sensors_raw_cloud s2
-    WHERE s2.sensor  = sensors_raw_cloud.sensor
-      AND s2.site_id = sensors_raw_cloud.site_id
-);
+GROUP BY sensor, site_id;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Materialized view: 1-minute tumbling window averages per sensor per site

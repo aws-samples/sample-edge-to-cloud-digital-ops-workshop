@@ -72,24 +72,23 @@ if [ -n "$INSTANCE_IDS" ]; then
   run aws ec2 terminate-instances --region "$REGION" --instance-ids $INSTANCE_IDS
 fi
 
-# ── 6. Delete EKS nodegroup and cluster (Session 4) ─────────────────────────
-echo "--- EKS ---"
-EKS_CLUSTER="workshop-${DEPLOYMENT_ID}-eks"
+# ── 6. Delete participant namespace from shared EKS cluster (Session 4) ──────
+echo "--- EKS namespace ---"
+EKS_CLUSTER="workshop-eks"
 EKS_STATUS=$(aws eks describe-cluster --region "$REGION" --name "$EKS_CLUSTER" \
   --query "cluster.status" --output text 2>/dev/null || echo "NOT_FOUND")
 
 if [ "$EKS_STATUS" != "NOT_FOUND" ]; then
-  # Delete nodegroup first (required before cluster delete)
-  NG_NAME=$(aws eks list-nodegroups --region "$REGION" --cluster-name "$EKS_CLUSTER" \
-    --query "nodegroups[0]" --output text 2>/dev/null || true)
-  if [ -n "$NG_NAME" ] && [ "$NG_NAME" != "None" ]; then
-    echo "  Deleting nodegroup $NG_NAME"
-    run aws eks delete-nodegroup --region "$REGION" --cluster-name "$EKS_CLUSTER" --nodegroup-name "$NG_NAME"
-    echo "  Waiting for nodegroup deletion (this takes ~3 min)…"
-    $DRY_RUN || aws eks wait nodegroup-deleted --region "$REGION" --cluster-name "$EKS_CLUSTER" --nodegroup-name "$NG_NAME" 2>/dev/null || true
+  aws eks update-kubeconfig --region "$REGION" --name "$EKS_CLUSTER" \
+    --kubeconfig /tmp/workshop-kubeconfig 2>/dev/null || true
+  if [ -f /tmp/workshop-kubeconfig ]; then
+    echo "  Deleting namespace ${DEPLOYMENT_ID}"
+    run env KUBECONFIG=/tmp/workshop-kubeconfig kubectl delete namespace "$DEPLOYMENT_ID" \
+      --ignore-not-found --wait=false
+    rm -f /tmp/workshop-kubeconfig
   fi
-  echo "  Deleting EKS cluster $EKS_CLUSTER"
-  run aws eks delete-cluster --region "$REGION" --name "$EKS_CLUSTER"
+else
+  echo "  Shared EKS cluster not found — skipping namespace deletion."
 fi
 
 # ── 7. Delete MSK cluster ─────────────────────────────────────────────────────

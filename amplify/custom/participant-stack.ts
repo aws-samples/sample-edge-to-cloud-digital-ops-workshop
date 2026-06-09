@@ -42,10 +42,6 @@ import {
   CfnCluster as MskCluster,
 } from "aws-cdk-lib/aws-msk";
 import {
-  CfnCluster as EksCfnCluster,
-  CfnNodegroup,
-} from "aws-cdk-lib/aws-eks";
-import {
   Bucket,
   BlockPublicAccess,
   BucketEncryption,
@@ -89,7 +85,7 @@ export interface ParticipantStackProps extends StackProps {
  *  - MSK Provisioned cluster (kafka.t3.small × 2 brokers, SASL/SCRAM)
  *  - IoT Rule → Lambda → MSK (raw.telemetry topic, Session 4)
  *  - S3 bucket + Athena workgroup + Glue telemetry table (Sessions 1–3)
- *  - EKS cluster (t3.medium × 2 nodes, workshop-cloud VPC, Session 4)
+ *  - Kubernetes namespace (ws-slotNN) in the shared workshop-eks cluster
  */
 export class ParticipantStack extends Stack {
   constructor(scope: Construct, id: string, props: ParticipantStackProps) {
@@ -996,66 +992,6 @@ systemctl start sensor-sim
       },
     });
 
-    // ── EKS Cluster (Session 4 — cloud analytics) ────────────────────────────
-    // L1 constructs to keep the CDK package footprint minimal.
-    const eksClusterRole = new Role(this, "EksClusterRole", {
-      assumedBy: new ServicePrincipal("eks.amazonaws.com"),
-      managedPolicies: [
-        ManagedPolicy.fromAwsManagedPolicyName("AmazonEKSClusterPolicy"),
-        ManagedPolicy.fromAwsManagedPolicyName("AmazonEKSVPCResourceController"),
-      ],
-    });
-
-    const eksNodeRole = new Role(this, "EksNodeRole", {
-      assumedBy: new ServicePrincipal("ec2.amazonaws.com"),
-      managedPolicies: [
-        ManagedPolicy.fromAwsManagedPolicyName("AmazonEKSWorkerNodePolicy"),
-        ManagedPolicy.fromAwsManagedPolicyName("AmazonEKS_CNI_Policy"),
-        ManagedPolicy.fromAwsManagedPolicyName("AmazonEC2ContainerRegistryReadOnly"),
-      ],
-    });
-
-    const eksSg = new SecurityGroup(this, "EksSg", {
-      vpc: cloudVpc,
-      description: `workshop-${deploymentId}-eks`,
-      allowAllOutbound: true,
-    });
-
-    const eksCluster = new EksCfnCluster(this, "EksCluster", {
-      name: `workshop-${deploymentId}-eks`,
-      version: "1.30",
-      roleArn: eksClusterRole.roleArn,
-      resourcesVpcConfig: {
-        subnetIds: cloudVpc.selectSubnets({ subnetType: SubnetType.PRIVATE_WITH_EGRESS }).subnetIds,
-        securityGroupIds: [eksSg.securityGroupId],
-        endpointPublicAccess: true,
-        endpointPrivateAccess: true,
-      },
-      accessConfig: {
-        authenticationMode: "API_AND_CONFIG_MAP",
-        bootstrapClusterCreatorAdminPermissions: true,
-      },
-    });
-    // EKS takes ~12 min to create. Retain on stack delete — teardown.sh handles cleanup.
-    eksCluster.cfnOptions.deletionPolicy = CfnDeletionPolicy.RETAIN;
-
-    const eksNodegroup = new CfnNodegroup(this, "EksNodegroup", {
-      clusterName: eksCluster.ref,
-      nodegroupName: `workshop-${deploymentId}-nodes`,
-      nodeRole: eksNodeRole.roleArn,
-      subnets: cloudVpc.selectSubnets({ subnetType: SubnetType.PRIVATE_WITH_EGRESS }).subnetIds,
-      instanceTypes: ["t3.medium"],
-      scalingConfig: {
-        minSize: 2,
-        maxSize: 3,
-        desiredSize: 2,
-      },
-      amiType: "AL2_x86_64",
-      diskSize: 20,
-    });
-    eksNodegroup.addDependency(eksCluster);
-    eksNodegroup.cfnOptions.deletionPolicy = CfnDeletionPolicy.RETAIN;
-
     // ── IoT Rule → MSK (Session 4 — raw telemetry to Kafka) ─────────────────
     // A second rule on the same topic feeds MSK alongside the existing S3 rule.
     // IoT's Kafka action uses a VPC destination; this approach uses a Lambda bridge
@@ -1172,8 +1108,8 @@ systemctl start sensor-sim
 
     new CfnOutput(this, "EksClusterName", {
       exportName: `workshop-${deploymentId}-eks-cluster`,
-      value: eksCluster.ref,
-      description: "Run: aws eks update-kubeconfig --name <value> to configure kubectl",
+      value: "workshop-eks",
+      description: "Shared EKS cluster. Run: aws eks update-kubeconfig --name workshop-eks",
     });
 
     new CfnOutput(this, "MskCredSecretArn", {

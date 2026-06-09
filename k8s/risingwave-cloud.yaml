@@ -1,23 +1,22 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# risingwave-cloud.yaml — RisingWave CR for the cloud EKS cluster
+# risingwave-cloud.yaml — RisingWave CR for the shared cloud EKS cluster
 #
 # Prerequisites:
-#   1. risingwave-operator is running (helm/risingwave-values.yaml)
-#   2. Secret named "msk-credentials" exists in the risingwave namespace with:
+#   1. risingwave-operator is running (helm/risingwave-values.yaml, in risingwave-system ns)
+#   2. Participant namespace exists: kubectl create namespace ws-slotNN
+#   3. Secret named "msk-credentials" exists in your participant namespace with:
 #        MSK_USERNAME  — SASL/SCRAM username
 #        MSK_PASSWORD  — SASL/SCRAM password
 #        MSK_BOOTSTRAP_SERVERS — comma-separated host:port list
-#   3. The EKS node role / IRSA annotation below has s3:GetObject, s3:PutObject,
-#      s3:DeleteObject, s3:ListBucket on the state bucket.
 #
-# Apply:
-#   kubectl apply -f k8s/risingwave-cloud.yaml -n risingwave
+# Apply (substitute your deployment ID):
+#   sed "s/\${DEPLOYMENT_ID}/ws-slot00/g" k8s/risingwave-cloud.yaml | kubectl apply -n ws-slot00 -f -
 # ──────────────────────────────────────────────────────────────────────────────
 apiVersion: risingwave.risingwavelabs.com/v1alpha1
 kind: RisingWave
 metadata:
   name: risingwave-cloud
-  namespace: risingwave
+  namespace: ${DEPLOYMENT_ID}
   labels:
     app.kubernetes.io/part-of: edge-digital-ops-cloud
     app.kubernetes.io/component: risingwave
