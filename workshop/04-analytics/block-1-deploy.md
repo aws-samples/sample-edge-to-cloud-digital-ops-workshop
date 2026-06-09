@@ -6,19 +6,14 @@
 
 ## Steps
 
-**1. Configure kubectl access to the EKS cluster**
+**1. Configure kubectl access to the shared EKS cluster**
 
-The cluster was deployed by the CDK stack. Get the name from the stack output:
+The cluster is shared across all participants and pre-created by the platform stack:
 
 ```bash
-aws cloudformation describe-stacks \
-  --stack-name "workshop-{DEPLOYMENT_ID}" \
-  --query "Stacks[0].Outputs[?OutputKey=='EksClusterName'].OutputValue" \
-  --output text
-
 aws eks update-kubeconfig \
   --region us-east-1 \
-  --name workshop-{DEPLOYMENT_ID}-eks
+  --name workshop-eks
 ```
 
 Confirm nodes are Ready:
@@ -55,9 +50,9 @@ aws kafka get-bootstrap-brokers \
 Create a Kubernetes Secret with these values (used by Redpanda Connect and RisingWave):
 
 ```bash
-kubectl create namespace analytics
+kubectl create namespace {DEPLOYMENT_ID}
 kubectl create secret generic msk-credentials \
-  --namespace analytics \
+  --namespace {DEPLOYMENT_ID} \
   --from-literal=username=workshop-{DEPLOYMENT_ID} \
   --from-literal=password=<password-from-above> \
   --from-literal=bootstrap-servers=<brokers-from-above>
@@ -65,20 +60,24 @@ kubectl create secret generic msk-credentials \
 
 **4. Deploy RisingWave operator and instance**
 
+The RisingWave operator is cluster-scoped and shared — install it once into `risingwave-system` if not already present:
+
 ```bash
 helm upgrade --install risingwave-operator risingwavelabs/risingwave-operator \
-  --namespace risingwave --create-namespace \
+  --namespace risingwave-system --create-namespace \
   -f helm/risingwave-values.yaml
 
 # Wait for operator
 kubectl wait --for=condition=available deployment/risingwave-operator-controller-manager \
-  -n risingwave --timeout=120s
+  -n risingwave-system --timeout=120s
 
-# Apply the RisingWave CR (edit deployment ID placeholder first)
-sed "s/\${DEPLOYMENT_ID}/{DEPLOYMENT_ID}/g" k8s/risingwave-cloud.yaml | kubectl apply -n analytics -f -
+# Deploy the RisingWave CR into your participant namespace
+sed "s/\${DEPLOYMENT_ID}/{DEPLOYMENT_ID}/g" k8s/risingwave-cloud.yaml | kubectl apply -n {DEPLOYMENT_ID} -f -
 ```
 
 **5. Deploy TimescaleDB via CloudNativePG**
+
+The CNPG operator is cluster-scoped and shared — install once into `cnpg-system` if not already present:
 
 ```bash
 helm upgrade --install cnpg cloudnative-pg/cloudnative-pg \
@@ -88,7 +87,7 @@ helm upgrade --install cnpg cloudnative-pg/cloudnative-pg \
 kubectl wait --for=condition=available deployment/cnpg-cloudnative-pg \
   -n cnpg-system --timeout=120s
 
-kubectl apply -f k8s/timescaledb-cloud-cluster.yaml -n analytics
+kubectl apply -f k8s/timescaledb-cloud-cluster.yaml -n {DEPLOYMENT_ID}
 ```
 
 **6. Deploy Redpanda Connect (MSK → TimescaleDB)**
@@ -97,14 +96,14 @@ Update `helm/rp-connect-timescaledb.yaml` with the MSK bootstrap brokers, then:
 
 ```bash
 helm upgrade --install rp-connect-timescaledb redpanda/connect \
-  --namespace analytics \
+  --namespace {DEPLOYMENT_ID} \
   -f helm/rp-connect-timescaledb.yaml
 ```
 
 **7. Bootstrap RisingWave DDL**
 
 ```bash
-kubectl port-forward -n analytics svc/risingwave 4566:4566 &
+kubectl port-forward -n {DEPLOYMENT_ID} svc/risingwave 4566:4566 &
 psql -h localhost -p 4566 -U root \
   -v msk_username=workshop-{DEPLOYMENT_ID} \
   -v msk_password=<password> \
@@ -114,9 +113,9 @@ psql -h localhost -p 4566 -U root \
 **8. Wait for all pods**
 
 ```bash
-kubectl get pods -n analytics
+kubectl get pods -n {DEPLOYMENT_ID}
 kubectl get pods -n cnpg-system
-kubectl get pods -n risingwave
+kubectl get pods -n risingwave-system
 ```
 
 All pods should reach `Running` within ~5 minutes of each deploy step.

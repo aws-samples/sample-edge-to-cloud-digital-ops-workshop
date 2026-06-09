@@ -7,7 +7,7 @@
 ## Connect to TimescaleDB
 
 ```bash
-kubectl port-forward -n cnpg-system svc/timescaledb-rw 5432:5432 &
+kubectl port-forward -n {DEPLOYMENT_ID} svc/timescaledb-rw 5432:5432 &
 psql -h localhost -p 5432 -U workshop -d telemetry
 ```
 

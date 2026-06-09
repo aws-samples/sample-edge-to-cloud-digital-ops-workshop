@@ -28,5 +28,23 @@ spec:
           env:
             - name: DEPLOYMENT_ID
               value: {{ .Values.deploymentId | quote }}
+            - name: RISINGWAVE_HOST
+              value: {{ .Values.risingwave.serviceName | default "edge-stack-risingwave" | quote }}
+            - name: RISINGWAVE_PORT
+              value: "4566"
+            - name: TIMESCALE_HOST
+              value: "timescaledb-rw"
+            - name: TIMESCALE_PORT
+              value: "5432"
+            - name: TIMESCALE_DB
+              value: "edge"
+            - name: TIMESCALE_USER
+              value: "workshop"
+            - name: TIMESCALE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: timescaledb-app
+                  key: password
+                  optional: true
           resources:
             {{- toYaml .Values.hmi.resources | nindent 12 }}

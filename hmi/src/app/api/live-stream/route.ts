@@ -50,19 +50,24 @@ export async function GET(): Promise<Response> {
     try {
       await client.connect();
 
-      // RisingWave SUBSCRIBE — streams change rows from the materialized view.
-      // initial_checkpoint = false means we only see NEW changes, not the
-      // entire current snapshot.
+      // RisingWave subscription cursor pattern (v2.0+):
+      //   1. CREATE SUBSCRIPTION (idempotent — skips if already exists)
+      //   2. DECLARE SUBSCRIPTION CURSOR — starts from current position
+      //   3. FETCH n FROM cursor — poll for new change rows
+      // Each row has: op (1=insert/upsert, 2=delete/retract), plus MV columns.
+      const subName = "hmi_live_stream";
+      const curName = "hmi_cursor";
       await client.query(
-        "SUBSCRIBE mv_sensor_latest WITH (initial_checkpoint = false)"
+        `CREATE SUBSCRIPTION IF NOT EXISTS ${subName} ON mv_sensor_latest`
+      );
+      await client.query(
+        `DECLARE ${curName} SUBSCRIPTION CURSOR FOR ${subName}`
       );
 
       sendComment("connected");
 
-      // FETCH NEXT returns 0 or more rows each call.
-      // We loop until the client disconnects (stream is cancelled).
       while (true) {
-        const result = await client.query("FETCH NEXT FROM mv_sensor_latest");
+        const result = await client.query(`FETCH 100 FROM ${curName}`);
 
         for (const row of result.rows) {
           // row: { op, ts_ms, sensor, site_id, value, unit }
@@ -93,6 +98,11 @@ export async function GET(): Promise<Response> {
         // already closed
       }
     } finally {
+      try {
+        await client.query("CLOSE hmi_cursor");
+      } catch {
+        // cursor may already be gone
+      }
       try {
         await client.end();
       } catch {

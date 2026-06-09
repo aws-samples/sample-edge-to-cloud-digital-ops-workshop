@@ -1,11 +1,20 @@
-import { Stack, StackProps } from "aws-cdk-lib";
+import { Stack, StackProps, CfnOutput, CfnDeletionPolicy } from "aws-cdk-lib";
 import {
   Vpc,
   SubnetType,
   GatewayVpcEndpointAwsService,
   IpAddresses,
-  IVpc,
+  SecurityGroup,
 } from "aws-cdk-lib/aws-ec2";
+import {
+  Role,
+  ServicePrincipal,
+  ManagedPolicy,
+} from "aws-cdk-lib/aws-iam";
+import {
+  CfnCluster as EksCfnCluster,
+  CfnNodegroup,
+} from "aws-cdk-lib/aws-eks";
 import {
   AwsCustomResource,
   AwsCustomResourcePolicy,
@@ -16,12 +25,13 @@ import { Construct } from "constructs";
 export interface PlatformStackProps extends StackProps {}
 
 /**
- * Creates two shared VPCs used across all participant slots.
- * Checked-for-existence at deploy time via CDK context; only one set of VPCs
- * is created regardless of how many participant stacks are deployed.
+ * Shared platform infrastructure — deployed once per account/region.
  *
  * workshop-edge  10.0.0.0/16  — edge EC2 instances, isolated /24 subnets per slot
- * workshop-cloud 10.1.0.0/16  — EKS cluster, MSK cluster
+ * workshop-cloud 10.1.0.0/16  — shared EKS cluster, per-slot MSK clusters
+ *
+ * EKS cluster is shared across all participants. Each participant slot gets its
+ * own namespace (e.g. ws-slot00) with RBAC scoped to that namespace.
  */
 export class PlatformStack extends Stack {
   public readonly edgeVpc: Vpc;
@@ -67,6 +77,73 @@ export class PlatformStack extends Stack {
     // hairpin through the NAT gateway for S3 writes.
     this.cloudVpc.addGatewayEndpoint("S3Endpoint", {
       service: GatewayVpcEndpointAwsService.S3,
+    });
+
+    // ── Shared EKS cluster ───────────────────────────────────────────────────
+    // One cluster hosts all participant namespaces. Provisioned here (pre-workshop)
+    // so participants don't wait ~12 min for cluster creation during Session 4.
+    const eksClusterRole = new Role(this, "EksClusterRole", {
+      assumedBy: new ServicePrincipal("eks.amazonaws.com"),
+      managedPolicies: [
+        ManagedPolicy.fromAwsManagedPolicyName("AmazonEKSClusterPolicy"),
+        ManagedPolicy.fromAwsManagedPolicyName("AmazonEKSVPCResourceController"),
+      ],
+    });
+
+    const eksNodeRole = new Role(this, "EksNodeRole", {
+      assumedBy: new ServicePrincipal("ec2.amazonaws.com"),
+      managedPolicies: [
+        ManagedPolicy.fromAwsManagedPolicyName("AmazonEKSWorkerNodePolicy"),
+        ManagedPolicy.fromAwsManagedPolicyName("AmazonEKS_CNI_Policy"),
+        ManagedPolicy.fromAwsManagedPolicyName("AmazonEC2ContainerRegistryReadOnly"),
+      ],
+    });
+
+    const eksSg = new SecurityGroup(this, "EksSg", {
+      vpc: this.cloudVpc,
+      description: "workshop-eks shared cluster",
+      allowAllOutbound: true,
+    });
+
+    const eksCluster = new EksCfnCluster(this, "EksCluster", {
+      name: "workshop-eks",
+      version: "1.30",
+      roleArn: eksClusterRole.roleArn,
+      resourcesVpcConfig: {
+        subnetIds: this.cloudVpc.selectSubnets({ subnetType: SubnetType.PRIVATE_WITH_EGRESS }).subnetIds,
+        securityGroupIds: [eksSg.securityGroupId],
+        endpointPublicAccess: true,
+        endpointPrivateAccess: true,
+      },
+      accessConfig: {
+        authenticationMode: "API_AND_CONFIG_MAP",
+        bootstrapClusterCreatorAdminPermissions: true,
+      },
+    });
+    // Retain on stack delete — manual cleanup prevents accidental data loss.
+    eksCluster.cfnOptions.deletionPolicy = CfnDeletionPolicy.RETAIN;
+
+    const eksNodegroup = new CfnNodegroup(this, "EksNodegroup", {
+      clusterName: eksCluster.ref,
+      nodegroupName: "workshop-nodes",
+      nodeRole: eksNodeRole.roleArn,
+      subnets: this.cloudVpc.selectSubnets({ subnetType: SubnetType.PRIVATE_WITH_EGRESS }).subnetIds,
+      instanceTypes: ["t3.medium"],
+      scalingConfig: {
+        minSize: 2,
+        maxSize: 8,
+        desiredSize: 2,
+      },
+      amiType: "AL2_x86_64",
+      diskSize: 20,
+    });
+    eksNodegroup.addDependency(eksCluster);
+    eksNodegroup.cfnOptions.deletionPolicy = CfnDeletionPolicy.RETAIN;
+
+    new CfnOutput(this, "EksClusterName", {
+      exportName: "workshop-eks-cluster-name",
+      value: eksCluster.ref,
+      description: "Run: aws eks update-kubeconfig --name workshop-eks to configure kubectl",
     });
 
     // Fleet Indexing: enable REGISTRY_AND_SHADOW with named shadow indexing.

@@ -7,7 +7,7 @@
 ## Connect to RisingWave
 
 ```bash
-kubectl port-forward -n risingwave svc/risingwave 4566:4566 &
+kubectl port-forward -n {DEPLOYMENT_ID} svc/risingwave 4566:4566 &
 psql -h localhost -p 4566 -U root
 ```
 

@@ -1,8 +1,8 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # timescaledb-cloud-cluster.yaml — CNPG Cluster CR for cloud EKS TimescaleDB
 #
-# Apply after the CNPG operator is running in the cluster:
-#   kubectl apply -f k8s/timescaledb-cloud-cluster.yaml -n analytics
+# Apply into your participant namespace after the CNPG operator is running:
+#   kubectl apply -f k8s/timescaledb-cloud-cluster.yaml -n ws-slot00
 #
 # The primary service is timescaledb-cloud-rw (read-write, port 5432).
 # The replica service is timescaledb-cloud-r (read-only).
@@ -11,7 +11,7 @@ apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
   name: timescaledb-cloud
-  namespace: analytics
+  # namespace is set by the kubectl apply -n flag — do not hardcode it here
   labels:
     app.kubernetes.io/part-of: edge-digital-ops-cloud
     app.kubernetes.io/component: timescaledb
