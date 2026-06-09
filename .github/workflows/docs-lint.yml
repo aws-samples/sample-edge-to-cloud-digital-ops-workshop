@@ -7,7 +7,7 @@ on:
       - 'job-scripts/**'
       - 'amplify/custom/participant-stack.ts'
       - 'mkdocs.yml'
-      - 'requirements.txt'
+      - 'workshop/requirements.txt'
       - '.github/workflows/docs-lint.yml'
 
 jobs:
@@ -22,7 +22,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r workshop/requirements.txt
 
       - name: Build (strict — fail on warnings)
         run: mkdocs build --strict
@@ -39,7 +39,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - run: pip install -r requirements.txt
+      - run: pip install -r workshop/requirements.txt
       - run: mkdocs build
 
       - name: Check links with lychee

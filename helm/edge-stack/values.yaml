@@ -1,0 +1,247 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# edge-stack default values
+# Override with helm/edge-stack-values.yaml for workshop slot deployments.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Workshop slot identifier — used as a label on all resources.
+deploymentId: workshop-slot00
+
+# ──────────────────────────────────────────────────────────────────────────────
+# HMI (Next.js)
+# ──────────────────────────────────────────────────────────────────────────────
+hmi:
+  enabled: true
+  image:
+    repository: workshop-hmi
+    tag: latest
+    # Never pull — image is loaded directly into K3s containerd with
+    # `k3s ctr images import` or `docker save | k3s ctr images import`.
+    pullPolicy: Never
+  replicaCount: 1
+  service:
+    type: NodePort
+    port: 3000
+    nodePort: 30080
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Redpanda (single-node, community chart)
+# ──────────────────────────────────────────────────────────────────────────────
+redpanda:
+  enabled: true
+
+  # Single-node workshop deployment
+  statefulset:
+    replicas: 1
+
+  # No TLS / SASL for workshop simplicity
+  tls:
+    enabled: false
+
+  auth:
+    sasl:
+      enabled: false
+
+  resources:
+    cpu:
+      cores: 1
+    memory:
+      container:
+        max: "2Gi"
+      redpanda:
+        # 1 GB JVM heap
+        memory: "1Gi"
+        reserveMemory: "256Mi"
+
+  storage:
+    persistentVolume:
+      enabled: true
+      size: "2Gi"
+
+  # Disable rack awareness for single-node
+  rackAwareness:
+    enabled: false
+
+  # Redpanda Console — bundled with the chart
+  console:
+    enabled: true
+    service:
+      type: NodePort
+      nodePort: 30900
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Redpanda Connect — MQTT → Redpanda ingest
+# ──────────────────────────────────────────────────────────────────────────────
+rpConnectIngest:
+  enabled: true
+
+rp-connect-ingest:
+  replicaCount: 1
+
+  # Mount the ingest pipeline ConfigMap as the config file
+  extraVolumes:
+    - name: pipeline-config
+      configMap:
+        name: rp-connect-ingest-config
+
+  extraVolumeMounts:
+    - name: pipeline-config
+      mountPath: /connect/config.yaml
+      subPath: config.yaml
+
+  args:
+    - run
+    - /connect/config.yaml
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Redpanda Connect — Redpanda → MSK relay
+# ──────────────────────────────────────────────────────────────────────────────
+rpConnectRelay:
+  enabled: true
+
+# MSK bootstrap servers for the relay (override per slot)
+mskBootstrapServers: "b-1.example.amazonaws.com:9092,b-2.example.amazonaws.com:9092"
+
+rp-connect-relay:
+  replicaCount: 1
+
+  extraVolumes:
+    - name: pipeline-config
+      configMap:
+        name: rp-connect-relay-config
+
+  extraVolumeMounts:
+    - name: pipeline-config
+      mountPath: /connect/config.yaml
+      subPath: config.yaml
+
+  args:
+    - run
+    - /connect/config.yaml
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MQTT broker reference (mosquitto deployed in the same namespace)
+# ──────────────────────────────────────────────────────────────────────────────
+mqtt:
+  host: mosquitto
+  port: 1883
+
+# ──────────────────────────────────────────────────────────────────────────────
+# RisingWave — single-node workshop config
+# ──────────────────────────────────────────────────────────────────────────────
+risingwave:
+  enabled: true
+
+  # Use the standalone (all-in-one) topology for workshop
+  standalone:
+    enabled: true
+
+  metaStore:
+    # Use embedded SQLite for meta (no external etcd needed for workshop)
+    sqlite:
+      enabled: true
+
+  stateStore:
+    # Point to MinIO in the same namespace
+    s3:
+      enabled: true
+      bucket: risingwave
+      endpoint: "http://edge-stack-minio:9000"
+      region: us-east-1
+      accessKey: minioadmin
+      secretKey: minioadmin
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+  persistence:
+    size: 2Gi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CloudNativePG operator
+# ──────────────────────────────────────────────────────────────────────────────
+cnpg:
+  enabled: true
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MinIO — standalone single-node
+# ──────────────────────────────────────────────────────────────────────────────
+minio:
+  enabled: true
+
+  mode: standalone
+  replicas: 1
+
+  rootUser: minioadmin
+  rootPassword: minioadmin
+
+  persistence:
+    enabled: true
+    size: 10Gi
+
+  service:
+    type: ClusterIP
+    port: 9000
+
+  consoleService:
+    type: NodePort
+    nodePort: 30901
+
+  # Pre-create buckets needed by other components
+  buckets:
+    - name: risingwave
+      policy: none
+      purge: false
+    - name: edge-data
+      policy: none
+      purge: false
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi

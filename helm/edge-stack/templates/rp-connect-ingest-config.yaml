@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rp-connect-ingest-config
+  labels:
+    {{- include "edge-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rp-connect-ingest
+data:
+  config.yaml: |
+    # ──────────────────────────────────────────────────────────────────────────
+    # Redpanda Connect pipeline: MQTT sensors/raw/# → Redpanda sensors.raw.*
+    # ──────────────────────────────────────────────────────────────────────────
+    input:
+      mqtt:
+        urls:
+          - tcp://{{ .Values.mqtt.host }}:{{ .Values.mqtt.port }}
+        # Subscribe to all sensor subtopics
+        topics:
+          - sensors/raw/#
+        client_id: rp-connect-ingest-{{ .Values.deploymentId }}
+        # Clean session so we don't retain stale subscriptions on restart
+        clean_session: true
+        connect_timeout: 30s
+        keepalive: 30
+
+    pipeline:
+      processors:
+        # Derive a Redpanda topic name from the MQTT topic path.
+        # MQTT topic:  sensors/raw/<sensor_name>
+        # Kafka topic: sensors.raw.<sensor_name>
+        # The metadata key "mqtt_topic" is set automatically by the MQTT input.
+        - mapping: |
+            # Replace slashes with dots to form the Kafka topic name.
+            let mqtt_topic = meta("mqtt_topic")
+            meta kafka_topic = $mqtt_topic.replace_all("/", ".")
+
+            # Forward the raw payload unchanged.
+            root = this
+
+    output:
+      kafka_franz:
+        seed_brokers:
+          - redpanda:9092
+        topic: ${! meta("kafka_topic") }
+        # Deliver at least once — acceptable for workshop ingest
+        acks_required: leader
+        compression: snappy
+        max_in_flight: 64

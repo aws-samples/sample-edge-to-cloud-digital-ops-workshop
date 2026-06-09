@@ -1,0 +1,49 @@
+apiVersion: v2
+name: edge-stack
+description: >
+  Edge data stack umbrella chart — Redpanda, Redpanda Connect, RisingWave,
+  CloudNativePG operator, MinIO, and the workshop HMI. Sized for a
+  single-node/demo deployment on a 3-node K3s cluster (t3.medium).
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+
+dependencies:
+  # Redpanda broker + Console
+  - name: redpanda
+    version: "5.*"
+    repository: https://charts.redpanda.com
+    condition: redpanda.enabled
+
+  # Redpanda Connect — MQTT ingest pipeline
+  - name: connect
+    alias: rp-connect-ingest
+    version: "0.*"
+    repository: https://charts.redpanda.com
+    condition: rpConnectIngest.enabled
+
+  # Redpanda Connect — MSK relay pipeline
+  - name: connect
+    alias: rp-connect-relay
+    version: "0.*"
+    repository: https://charts.redpanda.com
+    condition: rpConnectRelay.enabled
+
+  # RisingWave streaming SQL engine
+  - name: risingwave
+    version: "2.*"
+    repository: https://risingwavelabs.github.io/helm-charts
+    condition: risingwave.enabled
+
+  # CloudNativePG operator (manages the TimescaleDB Cluster CR)
+  - name: cloudnative-pg
+    alias: cnpg
+    version: "0.*"
+    repository: https://cloudnative-pg.github.io/charts
+    condition: cnpg.enabled
+
+  # MinIO object storage
+  - name: minio
+    version: "5.*"
+    repository: https://charts.min.io
+    condition: minio.enabled

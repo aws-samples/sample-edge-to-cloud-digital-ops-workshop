@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "edge-stack.fullname" . }}-hmi
+  labels:
+    {{- include "edge-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hmi
+spec:
+  replicas: {{ .Values.hmi.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "edge-stack.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: hmi
+  template:
+    metadata:
+      labels:
+        {{- include "edge-stack.labels" . | nindent 8 }}
+        app.kubernetes.io/component: hmi
+    spec:
+      containers:
+        - name: hmi
+          image: "{{ .Values.hmi.image.repository }}:{{ .Values.hmi.image.tag }}"
+          imagePullPolicy: {{ .Values.hmi.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: DEPLOYMENT_ID
+              value: {{ .Values.deploymentId | quote }}
+          resources:
+            {{- toYaml .Values.hmi.resources | nindent 12 }}
