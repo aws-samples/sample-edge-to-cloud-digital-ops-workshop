@@ -37,7 +37,7 @@ The workshop uses the Device Client because the config is a single flat JSON fil
 
 This is the key difference for the workshop.
 
-**Device Client**: has a built-in job handler that reads a `scriptUri` field from the job document, downloads the script from S3, and executes it. No extra software needed.
+**Device Client**: has a built-in job handler. The job document uses the `version: "1.0"` / `steps` format — the handler name and its arguments (e.g. an S3 script URI) are passed as positional args; the handler downloads the script and executes it. No extra software needed.
 
 **Greengrass v2**: does **not** execute arbitrary IoT Jobs natively. To achieve the same result you must:
 1. Write a custom Greengrass component that subscribes to the IoT Jobs queue
