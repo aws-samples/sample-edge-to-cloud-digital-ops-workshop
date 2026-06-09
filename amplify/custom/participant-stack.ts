@@ -276,6 +276,29 @@ export class ParticipantStack extends Stack {
       })
     );
 
+    // K3s install job writes token + kubeconfig to SSM Parameter Store;
+    // agents read them back. Scoped to /workshop/<deploymentId>/.
+    ec2Role.addToPolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["ssm:PutParameter", "ssm:GetParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/workshop/${deploymentId}/*`,
+        ],
+      })
+    );
+
+    // deploy-k3s.sh uses ListThingsInThingGroup to determine server/agent role
+    ec2Role.addToPolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["iot:ListThingsInThingGroup"],
+        resources: [
+          `arn:aws:iot:${this.region}:${this.account}:thinggroup/${deploymentId}-devices`,
+        ],
+      })
+    );
+
     // ── IoT policies ─────────────────────────────────────────────────────────
     new IotPolicy(this, "ClaimPolicy", {
       policyName: `workshop-${deploymentId}-claim-policy`,

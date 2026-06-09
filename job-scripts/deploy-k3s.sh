@@ -74,20 +74,13 @@ else
     exit 1
   fi
 
-  SERVER_IP=$(echo "$GROUP_THINGS" | head -1 | xargs -I{} aws ec2 describe-instances \
+  # Server writes its private IP into the kubeconfig SSM param. Read from there.
+  SERVER_IP=$(aws ssm get-parameter \
     --region "$REGION" \
-    --filters "Name=tag:aws:iot:thingName,Values={}" \
-    --query "Reservations[0].Instances[0].PrivateIpAddress" --output text)
-
-  # Fallback: resolve via SSM kubeconfig
-  if [ -z "$SERVER_IP" ]; then
-    SERVER_IP=$(aws ssm get-parameter \
-      --region "$REGION" \
-      --name "$SSM_KUBECONFIG_PATH" \
-      --with-decryption \
-      --query "Parameter.Value" --output text | \
-      grep -oP 'server: https://\K[0-9.]+')
-  fi
+    --name "$SSM_KUBECONFIG_PATH" \
+    --with-decryption \
+    --query "Parameter.Value" --output text | \
+    grep -oP 'server: https://\K[0-9.]+')
 
   echo "Joining K3s cluster at https://${SERVER_IP}:6443"
   curl -sfL https://get.k3s.io | \
