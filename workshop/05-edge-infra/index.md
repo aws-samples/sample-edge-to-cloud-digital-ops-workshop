@@ -3,6 +3,16 @@
 **Duration:** 4 hours  
 **Goal:** Deploy a K3s cluster across the 3 edge EC2 instances using an IoT Job, then deploy the full edge data pipeline via Helm.
 
+!!! warning "Session 5 — Work in Progress"
+    The following assets are not yet committed to the repository. This session is **conceptual** until they are added:
+
+    - **Sensor simulator EC2** — not in `participant-stack.ts` CDK stack (Block 2, Step 5B)
+    - **`helm/edge-stack/`** — Helm umbrella chart (Redpanda, RisingWave, TimescaleDB, MinIO, Next.js HMI) (Block 3)
+    - **`helm/edge-stack-values.yaml`** — values file for the above (Block 3)
+    - **Next.js HMI app** — source not in repo; referenced as a container image in the Helm chart
+
+    Facilitators: add the Helm chart, sensor simulator CDK construct, and HMI app source before running this session.
+
 ---
 
 ## Session Overview

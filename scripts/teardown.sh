@@ -32,7 +32,7 @@ echo "=== Teardown for $DEPLOYMENT_ID (region: $REGION) ==="
 echo "--- IoT Things ---"
 THINGS=$(aws iot list-things-in-thing-group \
   --region "$REGION" \
-  --thing-group-name "ws-${DEPLOYMENT_ID}" \
+  --thing-group-name "${DEPLOYMENT_ID}-devices" \
   --query "things" --output text 2>/dev/null || true)
 
 for THING in $THINGS; do
@@ -49,7 +49,7 @@ for THING in $THINGS; do
 done
 
 # ── 2. Delete IoT Thing Group ─────────────────────────────────────────────────
-run aws iot delete-thing-group --region "$REGION" --thing-group-name "ws-${DEPLOYMENT_ID}" 2>/dev/null || true
+run aws iot delete-thing-group --region "$REGION" --thing-group-name "${DEPLOYMENT_ID}-devices" 2>/dev/null || true
 
 # ── 3. Disable and delete IoT Topic Rule ─────────────────────────────────────
 RULE_NAME="workshop_${DEPLOYMENT_ID//-/_}_to_msk"
