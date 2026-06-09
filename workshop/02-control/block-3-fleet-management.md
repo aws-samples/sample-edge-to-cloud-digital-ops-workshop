@@ -8,9 +8,8 @@
 
 **1. Navigate to IoT Core → Software Package Catalog**
 
-- Register package: `telemetry-agent`
-- Add versions `1.0.0` and `2.0.0`
-- The job handler script automatically tags each device with `package_version=2.0.0` via `UpdateThingShadow`
+- Observe the pre-registered package `{DEPLOYMENT_ID}-telemetry-agent` with versions `1.0.0` and `2.0.0` (deployed by the platform stack — no manual registration needed)
+- The `telemetry-v2.sh` job handler will update each device's `$package` shadow with `version: 2.0.0` after it runs successfully
 
 **2. Run a Fleet Indexing query to confirm all devices report `2.0.0`:**
 

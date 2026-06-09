@@ -36,4 +36,4 @@ export WORKSHOP_DEPLOYMENT_ID="$DEPLOYMENT_ID"
 echo ">>> Starting Amplify sandbox --identifier $DEPLOYMENT_ID"
 . "$HOME/.nvm/nvm.sh"
 nvm use 22 --silent
-exec npx ampx sandbox --identifier "$DEPLOYMENT_ID" --once
+npx ampx sandbox --identifier "$DEPLOYMENT_ID" --once

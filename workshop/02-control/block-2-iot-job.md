@@ -29,13 +29,13 @@ aws s3 cp job-scripts/telemetry-v2.sh \
 
 **4. Create the IoT Job in the console:**
 
-- Target: Thing Group `ws-{DEPLOYMENT_ID}`
+- Target: Thing Group `{DEPLOYMENT_ID}-devices`
 - Job document:
 
 ```json
 {
   "operation": "update-telemetry-config",
-  "scriptUrl": "s3://workshop-{DEPLOYMENT_ID}/job-scripts/telemetry-v2.sh",
+  "scriptUri": "s3://workshop-{DEPLOYMENT_ID}/job-scripts/telemetry-v2.sh",
   "version": "2.0.0"
 }
 ```
