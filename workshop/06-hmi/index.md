@@ -3,6 +3,9 @@
 **Duration:** 4 hours  
 **Goal:** Use the Next.js HMI via port-forwarding to visualize the industrial site in real time, explore digital ops metrics, and simulate a network failure.
 
+!!! warning "Session 6 — Work in Progress"
+    This session depends on the `helm/edge-stack/` Helm chart from Session 5, which is not yet committed to the repository. The HMI app source code and its Helm chart configuration are also missing. This session is **conceptual** until those assets are added.
+
 ---
 
 ## Session Overview
