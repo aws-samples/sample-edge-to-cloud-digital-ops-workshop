@@ -63,6 +63,7 @@ aws iot-data update-thing-shadow \
   --endpoint-url "https://$IOT_ENDPOINT" \
   --thing-name "$INSTANCE_ID" \
   --shadow-name device-config \
+  --cli-binary-format raw-in-base64-out \
   --payload '{"state":{"reported":{"telemetry_interval_ms":1000,"metrics":["cpu_pct","mem_used_pct","disk_used_pct","net_io_bytes_sent","net_io_bytes_recv"],"config_version":"2.0.0"}}}' \
   /dev/null
 
@@ -71,6 +72,7 @@ aws iot-data update-thing-shadow \
   --endpoint-url "https://$IOT_ENDPOINT" \
   --thing-name "$INSTANCE_ID" \
   --shadow-name '$package' \
+  --cli-binary-format raw-in-base64-out \
   --payload '{"state":{"reported":{"telemetry-agent":{"version":"2.0.0"}}}}' \
   /dev/null
 
