@@ -161,6 +161,9 @@ mqtt:
 risingwave:
   enabled: true
 
+  # Service name used by the DDL bootstrap Job to connect
+  serviceName: "edge-stack-risingwave"
+
   # Use the standalone (all-in-one) topology for workshop
   standalone:
     enabled: true

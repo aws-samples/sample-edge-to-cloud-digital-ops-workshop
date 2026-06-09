@@ -22,18 +22,26 @@ kubectl port-forward -n edge svc/redpanda-console 8080:8080
 
 Open `http://localhost:8080`. Navigate to **Topics → sensors.raw.\*** and confirm messages are flowing.
 
-**3. Bootstrap RisingWave DDL (one-time)**
+**3. Confirm RisingWave DDL ran (Helm post-install hook)**
+
+The Helm chart includes a `post-install` Job that automatically runs `risingwave/ddl.sql` — creating the Kafka source and materialized views. Check it completed:
 
 ```bash
-kubectl port-forward -n edge svc/edge-risingwave 4566:4566 &
-psql -h localhost -p 4566 -U root -f risingwave/ddl.sql
+kubectl get job -n edge -l app.kubernetes.io/component=risingwave-ddl
+kubectl logs -n edge job/edge-stack-rw-ddl
 ```
 
-This creates the `sensors_raw` Kafka source, `mv_sensor_latest`, and `mv_sensor_1min_avg` materialized views. Re-running is safe (`IF NOT EXISTS`).
+If the job failed, re-run manually:
+
+```bash
+kubectl port-forward -n edge svc/edge-stack-risingwave 4566:4566 &
+psql -h localhost -p 4566 -U root -f risingwave/ddl.sql
+```
 
 **4. Confirm RisingWave materialized views are computing**
 
 ```bash
+kubectl port-forward -n edge svc/edge-stack-risingwave 4566:4566 &
 psql -h localhost -p 4566 -U root -c "SELECT * FROM mv_sensor_latest LIMIT 5;"
 ```
 
