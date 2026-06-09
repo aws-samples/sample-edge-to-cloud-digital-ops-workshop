@@ -72,7 +72,27 @@ if [ -n "$INSTANCE_IDS" ]; then
   run aws ec2 terminate-instances --region "$REGION" --instance-ids $INSTANCE_IDS
 fi
 
-# ── 6. Delete MSK cluster ─────────────────────────────────────────────────────
+# ── 6. Delete EKS nodegroup and cluster (Session 4) ─────────────────────────
+echo "--- EKS ---"
+EKS_CLUSTER="workshop-${DEPLOYMENT_ID}-eks"
+EKS_STATUS=$(aws eks describe-cluster --region "$REGION" --name "$EKS_CLUSTER" \
+  --query "cluster.status" --output text 2>/dev/null || echo "NOT_FOUND")
+
+if [ "$EKS_STATUS" != "NOT_FOUND" ]; then
+  # Delete nodegroup first (required before cluster delete)
+  NG_NAME=$(aws eks list-nodegroups --region "$REGION" --cluster-name "$EKS_CLUSTER" \
+    --query "nodegroups[0]" --output text 2>/dev/null || true)
+  if [ -n "$NG_NAME" ] && [ "$NG_NAME" != "None" ]; then
+    echo "  Deleting nodegroup $NG_NAME"
+    run aws eks delete-nodegroup --region "$REGION" --cluster-name "$EKS_CLUSTER" --nodegroup-name "$NG_NAME"
+    echo "  Waiting for nodegroup deletion (this takes ~3 min)…"
+    $DRY_RUN || aws eks wait nodegroup-deleted --region "$REGION" --cluster-name "$EKS_CLUSTER" --nodegroup-name "$NG_NAME" 2>/dev/null || true
+  fi
+  echo "  Deleting EKS cluster $EKS_CLUSTER"
+  run aws eks delete-cluster --region "$REGION" --name "$EKS_CLUSTER"
+fi
+
+# ── 7. Delete MSK cluster ─────────────────────────────────────────────────────
 echo "--- MSK ---"
 MSK_ARN=$(aws kafka list-clusters-v2 \
   --region "$REGION" \
@@ -84,7 +104,7 @@ if [ -n "$MSK_ARN" ] && [ "$MSK_ARN" != "None" ]; then
   run aws kafka delete-cluster --region "$REGION" --cluster-arn "$MSK_ARN"
 fi
 
-# ── 7. Empty and delete S3 bucket ─────────────────────────────────────────────
+# ── 8. Empty and delete S3 bucket ─────────────────────────────────────────────
 echo "--- S3 ---"
 BUCKET="workshop-${DEPLOYMENT_ID}"
 if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
@@ -93,16 +113,18 @@ if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
   run aws s3api delete-bucket --bucket "$BUCKET" --region "$REGION"
 fi
 
-# ── 8. Delete Athena workgroup ────────────────────────────────────────────────
+# ── 9. Delete Athena workgroup ────────────────────────────────────────────────
 run aws athena delete-work-group --region "$REGION" \
   --work-group "workshop-${DEPLOYMENT_ID}" --recursive-delete-option 2>/dev/null || true
 
-# ── 9. Delete Secrets Manager secret ─────────────────────────────────────────
-run aws secretsmanager delete-secret --region "$REGION" \
-  --secret-id "/workshop/${DEPLOYMENT_ID}/claim-cert" \
-  --force-delete-without-recovery 2>/dev/null || true
+# ── 10. Delete Secrets Manager secrets ───────────────────────────────────────
+for SECRET in "/workshop/${DEPLOYMENT_ID}/claim-cert" "/workshop/${DEPLOYMENT_ID}/msk-credentials"; do
+  run aws secretsmanager delete-secret --region "$REGION" \
+    --secret-id "$SECRET" \
+    --force-delete-without-recovery 2>/dev/null || true
+done
 
-# ── 10. SSM parameters ────────────────────────────────────────────────────────
+# ── 11. SSM parameters ────────────────────────────────────────────────────────
 for PARAM in "/workshop/${DEPLOYMENT_ID}/k3s-token" "/workshop/${DEPLOYMENT_ID}/kubeconfig"; do
   run aws ssm delete-parameter --region "$REGION" --name "$PARAM" 2>/dev/null || true
 done

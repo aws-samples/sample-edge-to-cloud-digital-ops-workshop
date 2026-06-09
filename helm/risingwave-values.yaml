@@ -1,0 +1,35 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# risingwave-values.yaml — operator chart overrides for cloud EKS
+#
+# Usage:
+#   helm repo add risingwavelabs https://risingwavelabs.github.io/helm-charts
+#   helm repo update
+#   helm upgrade --install risingwave-operator risingwavelabs/risingwave-operator \
+#     -n risingwave --create-namespace \
+#     -f helm/risingwave-values.yaml
+#
+# After the operator is running, apply the RisingWave CR:
+#   kubectl apply -f k8s/risingwave-cloud.yaml -n risingwave
+# ──────────────────────────────────────────────────────────────────────────────
+
+# The operator itself is stateless and lightweight — one pod manages CRs
+# cluster-wide.  These limits are appropriate for t3.medium worker nodes.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# Leader election is enabled by default; keep it on for safety.
+leaderElection:
+  enabled: true
+
+# Install the RisingWave CRD if it is not already present.
+installCRDs: true
+
+# Restrict the operator to the risingwave namespace so it does not require
+# cluster-wide list/watch permissions on unrelated namespaces.
+watchNamespaces:
+  - risingwave

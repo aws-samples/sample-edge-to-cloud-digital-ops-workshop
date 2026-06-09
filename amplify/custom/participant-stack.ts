@@ -42,6 +42,10 @@ import {
   CfnCluster as MskCluster,
 } from "aws-cdk-lib/aws-msk";
 import {
+  CfnCluster as EksCfnCluster,
+  CfnNodegroup,
+} from "aws-cdk-lib/aws-eks";
+import {
   Bucket,
   BlockPublicAccess,
   BucketEncryption,
@@ -83,9 +87,9 @@ export interface ParticipantStackProps extends StackProps {
  *  - IoT Dynamic Thing Group
  *  - IoT Rule → MSK (raw.telemetry topic)
  *  - MSK Provisioned cluster (kafka.t3.small × 2 brokers, SASL/SCRAM)
- *  - S3 bucket for Hudi MoR table
- *  - Athena workgroup
- *  - EKS cluster (t3.medium nodes, workshop-cloud VPC)
+ *  - IoT Rule → Lambda → MSK (raw.telemetry topic, Session 4)
+ *  - S3 bucket + Athena workgroup + Glue telemetry table (Sessions 1–3)
+ *  - EKS cluster (t3.medium × 2 nodes, workshop-cloud VPC, Session 4)
  */
 export class ParticipantStack extends Stack {
   constructor(scope: Construct, id: string, props: ParticipantStackProps) {
@@ -1034,6 +1038,144 @@ exports.handler = async (event) => {
       },
     });
 
+    // ── EKS Cluster (Session 4 — cloud analytics) ────────────────────────────
+    // L1 constructs to keep the CDK package footprint minimal.
+    const eksClusterRole = new Role(this, "EksClusterRole", {
+      assumedBy: new ServicePrincipal("eks.amazonaws.com"),
+      managedPolicies: [
+        ManagedPolicy.fromAwsManagedPolicyName("AmazonEKSClusterPolicy"),
+        ManagedPolicy.fromAwsManagedPolicyName("AmazonEKSVPCResourceController"),
+      ],
+    });
+
+    const eksNodeRole = new Role(this, "EksNodeRole", {
+      assumedBy: new ServicePrincipal("ec2.amazonaws.com"),
+      managedPolicies: [
+        ManagedPolicy.fromAwsManagedPolicyName("AmazonEKSWorkerNodePolicy"),
+        ManagedPolicy.fromAwsManagedPolicyName("AmazonEKS_CNI_Policy"),
+        ManagedPolicy.fromAwsManagedPolicyName("AmazonEC2ContainerRegistryReadOnly"),
+      ],
+    });
+
+    const eksSg = new SecurityGroup(this, "EksSg", {
+      vpc: cloudVpc,
+      description: `workshop-${deploymentId}-eks`,
+      allowAllOutbound: true,
+    });
+
+    const eksCluster = new EksCfnCluster(this, "EksCluster", {
+      name: `workshop-${deploymentId}-eks`,
+      version: "1.30",
+      roleArn: eksClusterRole.roleArn,
+      resourcesVpcConfig: {
+        subnetIds: cloudVpc.selectSubnets({ subnetType: SubnetType.PRIVATE_WITH_EGRESS }).subnetIds,
+        securityGroupIds: [eksSg.securityGroupId],
+        endpointPublicAccess: true,
+        endpointPrivateAccess: true,
+      },
+      accessConfig: {
+        authenticationMode: "API_AND_CONFIG_MAP",
+        bootstrapClusterCreatorAdminPermissions: true,
+      },
+    });
+    // EKS takes ~12 min to create. Retain on stack delete — teardown.sh handles cleanup.
+    eksCluster.cfnOptions.deletionPolicy = CfnDeletionPolicy.RETAIN;
+
+    const eksNodegroup = new CfnNodegroup(this, "EksNodegroup", {
+      clusterName: eksCluster.ref,
+      nodegroupName: `workshop-${deploymentId}-nodes`,
+      nodeRole: eksNodeRole.roleArn,
+      subnets: cloudVpc.selectSubnets({ subnetType: SubnetType.PRIVATE_WITH_EGRESS }).subnetIds,
+      instanceTypes: ["t3.medium"],
+      scalingConfig: {
+        minSize: 2,
+        maxSize: 3,
+        desiredSize: 2,
+      },
+      amiType: "AL2_x86_64",
+      diskSize: 20,
+    });
+    eksNodegroup.addDependency(eksCluster);
+    eksNodegroup.cfnOptions.deletionPolicy = CfnDeletionPolicy.RETAIN;
+
+    // ── IoT Rule → MSK (Session 4 — raw telemetry to Kafka) ─────────────────
+    // A second rule on the same topic feeds MSK alongside the existing S3 rule.
+    // IoT's Kafka action uses a VPC destination; this approach uses a Lambda bridge
+    // to keep setup simple (no VPC destination confirmation flow).
+    const mskBridgeRole = new Role(this, "MskBridgeRole", {
+      assumedBy: new ServicePrincipal("lambda.amazonaws.com"),
+      managedPolicies: [
+        ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaBasicExecutionRole"),
+        ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaVPCAccessExecutionRole"),
+      ],
+    });
+
+    mskBridgeRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["kafka-cluster:Connect", "kafka-cluster:WriteData", "kafka-cluster:DescribeTopic"],
+      resources: [`${mskCluster.attrArn}`, `${mskCluster.attrArn}/topic/raw.telemetry`],
+    }));
+
+    mskBridgeRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["kafka:GetBootstrapBrokers", "kafka:DescribeCluster"],
+      resources: [mskCluster.attrArn],
+    }));
+
+    // MSK SASL credentials stored in Secrets Manager; Lambda reads at runtime
+    const mskCredSecret = new Secret(this, "MskCredSecret", {
+      secretName: `/workshop/${deploymentId}/msk-credentials`,
+      description: `MSK SASL/SCRAM credentials for ${deploymentId}`,
+      removalPolicy: RemovalPolicy.DESTROY,
+      generateSecretString: {
+        secretStringTemplate: JSON.stringify({ username: `workshop-${deploymentId}` }),
+        generateStringKey: "password",
+        excludePunctuation: true,
+      },
+    });
+    mskCredSecret.grantRead(mskBridgeRole);
+
+    const mskBridgeFn = new LambdaFn(this, "MskBridge", {
+      functionName: `workshop-${deploymentId}-msk-bridge`,
+      runtime: Runtime.NODEJS_22_X,
+      architecture: Architecture.ARM_64,
+      // ESM handler: amplify/lambda/msk-bridge/ — install deps before deploy (pnpm install)
+      handler: "index.handler",
+      role: mskBridgeRole,
+      timeout: Duration.seconds(10),
+      vpc: cloudVpc,
+      vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [mskSg],
+      environment: {
+        MSK_CLUSTER_ARN: mskCluster.attrArn,
+        MSK_CRED_SECRET: mskCredSecret.secretName,
+        REGION: this.region,
+      },
+      code: Code.fromAsset("amplify/lambda/msk-bridge"),
+    });
+
+    mskBridgeFn.addPermission("AllowIoTInvokeMsk", {
+      principal: new ServicePrincipal("iot.amazonaws.com"),
+    });
+
+    new CfnTopicRule(this, "IotToMskRule", {
+      ruleName: `workshop_${deploymentId.replace(/-/g, "_")}_to_msk`,
+      topicRulePayload: {
+        sql: `SELECT *, topic() AS mqtt_topic, timestamp() AS ingest_ts FROM 'edge/${deploymentId}/+/telemetry'`,
+        actions: [
+          {
+            lambda: {
+              functionArn: mskBridgeFn.functionArn,
+            },
+          },
+        ],
+        ruleDisabled: false,
+      },
+    });
+
+    // Allow MSK security group ingress from the Lambda (shares mskSg, so already open)
+    mskSg.addIngressRule(Peer.ipv4(cloudVpc.vpcCidrBlock), Port.tcp(9096), "MSK SASL/SCRAM from VPC (Lambda bridge)");
+
     // ── Outputs ──────────────────────────────────────────────────────────────
     new CfnOutput(this, "DeploymentId", {
       exportName: `workshop-${deploymentId}-deployment-id`,
@@ -1068,6 +1210,17 @@ exports.handler = async (event) => {
     new CfnOutput(this, "EventsApiRealtimeEndpoint", {
       exportName: `workshop-${deploymentId}-events-realtime`,
       value: eventsApi.attrDnsRealtime,
+    });
+
+    new CfnOutput(this, "EksClusterName", {
+      exportName: `workshop-${deploymentId}-eks-cluster`,
+      value: eksCluster.ref,
+      description: "Run: aws eks update-kubeconfig --name <value> to configure kubectl",
+    });
+
+    new CfnOutput(this, "MskCredSecretArn", {
+      exportName: `workshop-${deploymentId}-msk-cred-secret`,
+      value: mskCredSecret.secretArn,
     });
   }
 }

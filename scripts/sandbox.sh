@@ -54,6 +54,10 @@ else
   echo ">>> Using cached IoT Device Client binary."
 fi
 
+# ── Install Lambda dependencies (required before CDK bundles the asset) ─────
+echo ">>> Installing MSK bridge Lambda dependencies…"
+(cd amplify/lambda/msk-bridge && pnpm install --prod --frozen-lockfile 2>/dev/null || pnpm install --prod)
+
 # ── Start Amplify sandbox for this participant ───────────────────────────────
 export WORKSHOP_DEPLOYMENT_ID="$DEPLOYMENT_ID"
 echo ">>> Starting Amplify sandbox --identifier $DEPLOYMENT_ID"
