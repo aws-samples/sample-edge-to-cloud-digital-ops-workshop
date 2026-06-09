@@ -240,7 +240,15 @@ export class ParticipantStack extends Stack {
       policy: AwsCustomResourcePolicy.fromSdkCalls({ resources: [claimSecret.secretArn] }),
     });
 
-    // Allow Device Client to assume the role for shadow/job operations
+    // Allow Device Client to look up the IoT data endpoint and perform MQTT/shadow/jobs operations
+    ec2Role.addToPolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["iot:DescribeEndpoint"],
+        resources: ["*"],
+      })
+    );
+
     ec2Role.addToPolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,
@@ -261,7 +269,10 @@ export class ParticipantStack extends Stack {
       new PolicyStatement({
         effect: Effect.ALLOW,
         actions: ["s3:PutObject", "s3:GetObject"],
-        resources: [`${workshopBucket.bucketArn}/job-scripts/*`],
+        resources: [
+          `${workshopBucket.bucketArn}/job-scripts/*`,
+          `${workshopBucket.bucketArn}/bin/*`,
+        ],
       })
     );
 
@@ -322,8 +333,12 @@ export class ParticipantStack extends Stack {
               `arn:aws:iot:${this.region}:${this.account}:topicfilter/edge/${deploymentId}/*`,
               `arn:aws:iot:${this.region}:${this.account}:topic/$aws/things/\${iot:Connection.Thing.ThingName}/shadow/*`,
               `arn:aws:iot:${this.region}:${this.account}:topicfilter/$aws/things/\${iot:Connection.Thing.ThingName}/shadow/*`,
+              `arn:aws:iot:${this.region}:${this.account}:topic/$aws/things/\${iot:Connection.Thing.ThingName}/jobs/*`,
+              `arn:aws:iot:${this.region}:${this.account}:topicfilter/$aws/things/\${iot:Connection.Thing.ThingName}/jobs/*`,
               `arn:aws:iot:${this.region}:${this.account}:topic/$aws/jobs/*`,
               `arn:aws:iot:${this.region}:${this.account}:topicfilter/$aws/jobs/*`,
+              `arn:aws:iot:${this.region}:${this.account}:topic/$aws/things/\${iot:Connection.Thing.ThingName}/tunnels/notify`,
+              `arn:aws:iot:${this.region}:${this.account}:topicfilter/$aws/things/\${iot:Connection.Thing.ThingName}/tunnels/notify`,
             ],
           },
           {
@@ -422,22 +437,11 @@ exports.handler = async (event) => {
     // ── IoT Provisioning Template ────────────────────────────────────────────
     const provisioningRole = new Role(this, "ProvisioningRole", {
       assumedBy: new ServicePrincipal("iot.amazonaws.com"),
+      // AWSIoTThingsRegistration is required for RegisterThing to succeed
+      managedPolicies: [
+        ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSIoTThingsRegistration"),
+      ],
     });
-
-    provisioningRole.addToPolicy(
-      new PolicyStatement({
-        effect: Effect.ALLOW,
-        actions: [
-          "iot:CreateThing",
-          "iot:CreateThingGroup",
-          "iot:AddThingToThingGroup",
-          "iot:UpdateCertificate",
-          "iot:AttachPolicy",
-          "iot:AttachThingPrincipal",
-        ],
-        resources: ["*"],
-      })
-    );
 
     // Thing group that every provisioned device joins — IoT Job targets this group
     new CfnThingGroup(this, "DevicesThingGroup", {
@@ -573,10 +577,6 @@ set -euxo pipefail
 yum install -y amazon-ssm-agent 2>/dev/null || true
 systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent
 
-# Install Docker
-yum install -y docker
-systemctl enable docker && systemctl start docker
-
 INSTANCE_ID=$(ec2-metadata --instance-id | cut -d' ' -f2)
 
 # Retrieve claim cert from Secrets Manager (no hardcoded secrets in user data)
@@ -586,8 +586,10 @@ SECRET_JSON=$(aws secretsmanager get-secret-value \
   --secret-id /workshop/${deploymentId}/claim-cert \
   --query SecretString --output text)
 
-echo "$SECRET_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); open('/tmp/claim.pem.crt','w').write(d['certificate']); open('/tmp/claim-private.pem.key','w').write(d['privateKey'])"
-chmod 600 /tmp/claim.pem.crt /tmp/claim-private.pem.key
+echo "$SECRET_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); open('/etc/aws-iot-device-client/certs/claim.pem.crt','w').write(d['certificate']); open('/etc/aws-iot-device-client/certs/claim-private.pem.key','w').write(d['privateKey'])"
+# cert must be 644 (world-readable) — Device Client validates this
+chmod 644 /etc/aws-iot-device-client/certs/claim.pem.crt
+chmod 600 /etc/aws-iot-device-client/certs/claim-private.pem.key
 
 # Download Amazon Root CA
 curl -o /etc/aws-iot-device-client/certs/AmazonRootCA1.pem \
@@ -599,24 +601,32 @@ IOT_ENDPOINT=$(aws iot describe-endpoint \
   --endpoint-type iot:Data-ATS \
   --query endpointAddress --output text)
 
-mkdir -p /etc/aws-iot-device-client/jobs
+# Download Device Client binary built by sandbox.sh and staged in S3.
+# sandbox.sh builds it once using the official GHCR build image and uploads here.
+aws s3 cp "s3://workshop-${deploymentId}/bin/aws-iot-device-client" /usr/local/bin/aws-iot-device-client --region ${this.region}
+chmod +x /usr/local/bin/aws-iot-device-client
 
-# Write Device Client config for fleet provisioning
+mkdir -p /etc/aws-iot-device-client/jobs
+# certs dir must be 700; Device Client rejects cert files outside a 700 directory
+chmod 700 /etc/aws-iot-device-client/certs
+
+# Write Device Client config.
+# On first boot: cert/key point to claim certs (fleet provisioning not yet run).
+# After fleet provisioning completes, Device Client writes a runtime config that
+# overrides cert/key with the newly-issued device cert for subsequent connections.
+# Note: device-key/device-cert/claim-cert/claim-key are NOT recognized fleet-provisioning
+# JSON keys — omit them to avoid IsValidFilePath() validation on non-existent files.
 cat > /etc/aws-iot-device-client/aws-iot-device-client.conf <<EOF
 {
   "endpoint": "$IOT_ENDPOINT",
-  "cert": "/etc/aws-iot-device-client/certs/device.pem.crt",
-  "key": "/etc/aws-iot-device-client/certs/device-private.pem.key",
+  "cert": "/etc/aws-iot-device-client/certs/claim.pem.crt",
+  "key": "/etc/aws-iot-device-client/certs/claim-private.pem.key",
   "root-ca": "/etc/aws-iot-device-client/certs/AmazonRootCA1.pem",
   "thing-name": "$INSTANCE_ID",
   "fleet-provisioning": {
     "enabled": true,
     "template-name": "${deploymentId}-provisioning",
-    "template-parameters": "{\\"ThingName\\":\\"$INSTANCE_ID\\",\\"SerialNumber\\":\\"$INSTANCE_ID\\"}",
-    "claim-cert": "/tmp/claim.pem.crt",
-    "claim-key": "/tmp/claim-private.pem.key",
-    "device-key": "/etc/aws-iot-device-client/certs/device-private.pem.key",
-    "device-cert": "/etc/aws-iot-device-client/certs/device.pem.crt"
+    "template-parameters": "{\\"ThingName\\":\\"$INSTANCE_ID\\",\\"SerialNumber\\":\\"$INSTANCE_ID\\"}"
   },
   "jobs": {
     "enabled": true,
@@ -625,6 +635,9 @@ cat > /etc/aws-iot-device-client/aws-iot-device-client.conf <<EOF
   "shadow": {
     "enabled": true
   },
+  "tunneling": {
+    "enabled": false
+  },
   "logging": {
     "level": "INFO",
     "type": "FILE",
@@ -632,45 +645,39 @@ cat > /etc/aws-iot-device-client/aws-iot-device-client.conf <<EOF
   }
 }
 EOF
+chmod 640 /etc/aws-iot-device-client/aws-iot-device-client.conf
 
 # Generic IoT Job handler: downloads and runs an S3-hosted script.
-# Runs on the host (bind-mounted into the container) so job scripts can
-# interact with host services (systemd, K3s, etc.).
+# Device Client calls: run-script.sh <runAsUser> <scriptUri> [args...]
+# $1 = runAsUser (empty string if not set), $2 = S3 URI of script to execute
 cat > /etc/aws-iot-device-client/jobs/run-script.sh <<'HANDLER'
 #!/bin/bash
 set -euo pipefail
-SCRIPT_URI=$(echo "$JOB_DOCUMENT" | python3 -c "import json,sys; print(json.load(sys.stdin)['scriptUri'])")
-aws s3 cp "$SCRIPT_URI" /tmp/job-script.sh
+SCRIPT_URI="\${2:-}"
+if [[ -z "$SCRIPT_URI" ]]; then
+  echo "ERROR: no scriptUri provided as arg" >&2
+  exit 1
+fi
+aws s3 cp "$SCRIPT_URI" /tmp/job-script.sh --region us-east-1
 chmod +x /tmp/job-script.sh
 /tmp/job-script.sh
 HANDLER
 chmod +x /etc/aws-iot-device-client/jobs/run-script.sh
 
-# Pull the Device Client image (AWS-managed on GHCR, no build step needed)
-docker pull ghcr.io/awslabs/aws-iot-device-client/amazonlinux:latest
+# Device Client adds ~/.aws-iot-device-client/jobs to PATH when executing handlers.
+# Symlink the configured handler-directory so handlers are found via execvp().
+mkdir -p /root/.aws-iot-device-client
+ln -sfn /etc/aws-iot-device-client/jobs /root/.aws-iot-device-client/jobs
 
-# Systemd unit: run Device Client in Docker
-# --network host    → reaches IoT Core MQTT endpoint without NAT
-# -v /tmp:/tmp      → claim cert files written above are visible inside container
-# -v /etc/aws-iot-device-client → config, certs, and job handlers shared with host
-# -v /var/log:/var/log → log file lands on host for SSM/CloudWatch access
+# Systemd unit for Device Client binary
 cat > /etc/systemd/system/aws-iot-device-client.service <<EOF
 [Unit]
 Description=AWS IoT Device Client
-After=docker.service network.target
-Requires=docker.service
+After=network.target
 
 [Service]
 Type=simple
-ExecStartPre=-/usr/bin/docker rm -f aws-iot-device-client
-ExecStart=/usr/bin/docker run --rm \\
-  --name aws-iot-device-client \\
-  --network host \\
-  -v /etc/aws-iot-device-client:/etc/aws-iot-device-client \\
-  -v /tmp:/tmp \\
-  -v /var/log:/var/log \\
-  ghcr.io/awslabs/aws-iot-device-client/amazonlinux:latest \\
-  --config-file /etc/aws-iot-device-client/aws-iot-device-client.conf
+ExecStart=/usr/local/bin/aws-iot-device-client --config-file /etc/aws-iot-device-client/aws-iot-device-client.conf
 Restart=on-failure
 RestartSec=10
 
@@ -681,9 +688,6 @@ EOF
 systemctl daemon-reload
 systemctl enable aws-iot-device-client
 systemctl start aws-iot-device-client
-
-# Delete claim cert files after Device Client runs provisioning (give it 60 s)
-(sleep 60 && rm -f /tmp/claim.pem.crt /tmp/claim-private.pem.key) &
 `;
 
     const amiId = MachineImage.latestAmazonLinux2023().getImage(this).imageId;
