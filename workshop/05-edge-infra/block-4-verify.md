@@ -22,14 +22,22 @@ kubectl port-forward -n edge svc/redpanda-console 8080:8080
 
 Open `http://localhost:8080`. Navigate to **Topics → sensors.raw.\*** and confirm messages are flowing.
 
-**3. Confirm RisingWave materialized views are computing**
+**3. Bootstrap RisingWave DDL (one-time)**
 
 ```bash
 kubectl port-forward -n edge svc/edge-risingwave 4566:4566 &
+psql -h localhost -p 4566 -U root -f risingwave/ddl.sql
+```
+
+This creates the `sensors_raw` Kafka source, `mv_sensor_latest`, and `mv_sensor_1min_avg` materialized views. Re-running is safe (`IF NOT EXISTS`).
+
+**4. Confirm RisingWave materialized views are computing**
+
+```bash
 psql -h localhost -p 4566 -U root -c "SELECT * FROM mv_sensor_latest LIMIT 5;"
 ```
 
-**4. Confirm WAN relay is forwarding to cloud MSK**
+**5. Confirm WAN relay is forwarding to cloud MSK**
 
 ```bash
 kubectl logs -n edge deployment/redpanda-connect-relay --tail=50
