@@ -46,8 +46,8 @@ export async function GET(): Promise<NextResponse> {
         MIN(value)::float8   AS min,
         MAX(value)::float8   AS max,
         COUNT(*)::int        AS count
-      FROM sensors_raw
-      WHERE ts >= NOW() - INTERVAL '5 minutes'
+      FROM sensor_readings
+      WHERE partition_time >= NOW() - INTERVAL '5 minutes'
       GROUP BY sensor
       ORDER BY sensor
     `);
