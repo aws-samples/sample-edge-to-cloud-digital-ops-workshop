@@ -54,6 +54,17 @@ spec:
       # Enable TimescaleDB extension in the bootstrap database.
       postInitSQL:
         - CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+        - |
+          CREATE TABLE IF NOT EXISTS sensor_readings (
+            ts_ms          BIGINT          NOT NULL,
+            sensor         TEXT            NOT NULL,
+            site_id        TEXT            NOT NULL,
+            value          DOUBLE PRECISION,
+            unit           TEXT,
+            partition_time TIMESTAMPTZ     NOT NULL
+          );
+        - SELECT create_hypertable('sensor_readings', 'partition_time', if_not_exists => TRUE);
+        - CREATE INDEX IF NOT EXISTS idx_sr_sensor ON sensor_readings(sensor, partition_time DESC);
 
   # ────────────────────────────────────────────────────────────────────────────
   # Storage — 10 Gi for workshop data

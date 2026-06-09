@@ -126,6 +126,11 @@ mskBootstrapServers: "b-1.example.amazonaws.com:9092,b-2.example.amazonaws.com:9
 rp-connect-relay:
   replicaCount: 1
 
+  # Inject MSK credentials from the msk-credentials Secret (created before helm install)
+  envFrom:
+    - secretRef:
+        name: msk-credentials
+
   extraVolumes:
     - name: pipeline-config
       configMap:

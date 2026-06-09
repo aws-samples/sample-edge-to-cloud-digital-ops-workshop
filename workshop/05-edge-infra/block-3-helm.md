@@ -24,6 +24,28 @@ All 3 nodes should show `Ready`.
 
 ---
 
+## Create the MSK Credentials Secret
+
+The WAN relay needs MSK credentials to authenticate to the cloud MSK cluster. Retrieve them from Secrets Manager and create a K8s Secret before the Helm install:
+
+```bash
+# Get MSK credentials from Secrets Manager
+MSK_CREDS=$(aws secretsmanager get-secret-value \
+  --secret-id /workshop/{DEPLOYMENT_ID}/msk-credentials \
+  --query SecretString --output text)
+MSK_USER=$(echo "$MSK_CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)['username'])")
+MSK_PASS=$(echo "$MSK_CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
+
+# Create the secret in the edge namespace
+kubectl create namespace edge --dry-run=client -o yaml | kubectl apply -f -
+kubectl create secret generic msk-credentials \
+  --namespace edge \
+  --from-literal=MSK_USERNAME="$MSK_USER" \
+  --from-literal=MSK_PASSWORD="$MSK_PASS"
+```
+
+---
+
 ## Deploy the Edge Stack
 
 ```bash
