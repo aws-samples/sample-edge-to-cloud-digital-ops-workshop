@@ -669,6 +669,57 @@ chmod +x /etc/aws-iot-device-client/jobs/run-script.sh
 mkdir -p /root/.aws-iot-device-client
 ln -sfn /etc/aws-iot-device-client/jobs /root/.aws-iot-device-client/jobs
 
+# Initial telemetry script (v1): publishes at 0.2 Hz with cpu/mem/disk metrics.
+# telemetry-v2.sh job overwrites this file and restarts the service.
+cat > /etc/aws-iot-device-client/jobs/publish-telemetry.sh <<'TELEMETRY'
+#!/bin/bash
+INSTANCE_ID=$(ec2-metadata --instance-id | cut -d' ' -f2)
+DEPLOYMENT_ID=$DEPLOYMENT_ID
+IOT_ENDPOINT=$(aws iot describe-endpoint --endpoint-type iot:Data-ATS --query endpointAddress --output text)
+INTERVAL_S=5  # 0.2 Hz
+
+while true; do
+  TS=$(date -u +%s%3N)
+  CPU=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | tr -d '%us,')
+  MEM=$(free | awk '/Mem:/ {printf "%.1f", $3/$2*100}')
+  DISK=$(df / | awk 'NR==2 {print $5}' | tr -d '%')
+
+  PAYLOAD=$(printf \
+    '{"thing_name":"%s","message_timestamp":%s,"cpu_pct":%s,"mem_used_pct":%s,"disk_used_pct":%s}' \
+    "$INSTANCE_ID" "$TS" "$CPU" "$MEM" "$DISK")
+
+  aws iot-data publish \
+    --endpoint-url "https://$IOT_ENDPOINT" \
+    --topic "edge/$DEPLOYMENT_ID/$INSTANCE_ID/telemetry" \
+    --payload "$PAYLOAD" \
+    --cli-binary-format raw-in-base64-out \
+    2>/dev/null || true
+
+  sleep $INTERVAL_S
+done
+TELEMETRY
+chmod +x /etc/aws-iot-device-client/jobs/publish-telemetry.sh
+
+# Systemd unit: workshop-telemetry — replaced in Session 2 by telemetry-v2.sh job
+cat > /etc/systemd/system/workshop-telemetry.service <<EOF
+[Unit]
+Description=Workshop MQTT Telemetry Publisher
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/workshop-telemetry.env
+ExecStart=/etc/aws-iot-device-client/jobs/publish-telemetry.sh
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Write deployment ID env file so telemetry script picks it up
+echo "DEPLOYMENT_ID=${deploymentId}" > /etc/workshop-telemetry.env
+
 # Systemd unit for Device Client binary
 cat > /etc/systemd/system/aws-iot-device-client.service <<EOF
 [Unit]
@@ -686,8 +737,8 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable aws-iot-device-client
-systemctl start aws-iot-device-client
+systemctl enable aws-iot-device-client workshop-telemetry
+systemctl start aws-iot-device-client workshop-telemetry
 `;
 
     const amiId = MachineImage.latestAmazonLinux2023().getImage(this).imageId;
