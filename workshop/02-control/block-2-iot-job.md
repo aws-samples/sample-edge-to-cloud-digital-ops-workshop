@@ -30,15 +30,28 @@ aws s3 cp job-scripts/telemetry-v2.sh \
 **4. Create the IoT Job in the console:**
 
 - Target: Thing Group `{DEPLOYMENT_ID}-devices`
-- Job document:
+- Job document (Device Client v1.0 steps format):
 
 ```json
 {
-  "operation": "update-telemetry-config",
-  "scriptUri": "s3://workshop-{DEPLOYMENT_ID}/job-scripts/telemetry-v2.sh",
-  "version": "2.0.0"
+  "version": "1.0",
+  "steps": [
+    {
+      "action": {
+        "name": "update-telemetry-config",
+        "type": "runHandler",
+        "input": {
+          "handler": "run-script.sh",
+          "args": ["s3://workshop-{DEPLOYMENT_ID}/job-scripts/telemetry-v2.sh"]
+        },
+        "runAsUser": ""
+      }
+    }
+  ]
 }
 ```
+
+The `run-script.sh` handler receives the S3 URI as `$2` and downloads it to run locally.
 
 **5. Configure rollout:**
 

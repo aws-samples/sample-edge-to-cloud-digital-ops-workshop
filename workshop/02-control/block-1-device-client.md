@@ -28,16 +28,26 @@ Review how AWS IoT Device Client works as a `systemd` service alongside the EC2 
    ls /etc/aws-iot-device-client/jobs/
    cat /etc/aws-iot-device-client/jobs/run-script.sh
    ```
-4. Walk through the `run-script.sh` handler — it reads `scriptUri` from the job document, downloads the script from S3, and runs it
+4. Walk through the `run-script.sh` handler — it reads `$2` (the S3 URI passed as a positional argument), downloads the script, and runs it
 
 ---
 
 ## Handler Script Contract
 
+The Device Client calls a handler like this:
+
+```
+run-script.sh <runAsUser> <arg1> <arg2> ...
+```
+
+- `$1` — the `runAs` username from the job document (empty string if not set)
+- `$2`, `$3`, … — entries from the `input.args` array in the job document
+
+There is **no `JOB_DOCUMENT` environment variable**. All parameters the handler needs must be passed explicitly in the job document's `input.args` array.
+
 ```bash
 #!/bin/bash
-# The Device Client injects JOB_DOCUMENT as an env var containing the raw JSON.
-# run-script.sh parses the scriptUri field, downloads the script from S3, and executes it.
+# $2 = S3 URI of the script to download and run
 # Exit 0  → IoT Jobs marks this device as SUCCEEDED
 # Exit 1+ → IoT Jobs marks this device as FAILED
 ```
