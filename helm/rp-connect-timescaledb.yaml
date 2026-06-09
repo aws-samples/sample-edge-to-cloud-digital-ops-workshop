@@ -1,0 +1,94 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# rp-connect-timescaledb.yaml — Redpanda Connect values for MSK → TimescaleDB
+#
+# Usage:
+#   helm repo add redpanda https://charts.redpanda.com
+#   helm repo update
+#   helm upgrade --install rp-connect-timescaledb redpanda/connect \
+#     -n analytics --create-namespace \
+#     -f helm/rp-connect-timescaledb.yaml
+#
+# Prerequisites (create before helm install):
+#   kubectl create secret generic msk-credentials -n analytics \
+#     --from-literal=MSK_BOOTSTRAP_SERVERS="b-1.xxx.kafka.us-east-1.amazonaws.com:9096,b-2.xxx.kafka.us-east-1.amazonaws.com:9096" \
+#     --from-literal=MSK_USERNAME="workshop" \
+#     --from-literal=MSK_PASSWORD="<password>"
+#   kubectl create secret generic timescaledb-credentials -n analytics \
+#     --from-literal=TIMESCALE_DSN="postgres://workshop:<password>@timescaledb-cloud-rw.analytics.svc:5432/edge"
+# ──────────────────────────────────────────────────────────────────────────────
+
+replicaCount: 1
+
+image:
+  repository: docker.redpanda.com/redpandadata/connect
+  tag: latest
+  pullPolicy: IfNotPresent
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Inject MSK and TimescaleDB credentials from Kubernetes Secrets.
+envFrom:
+  - secretRef:
+      name: msk-credentials
+  - secretRef:
+      name: timescaledb-credentials
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Inline pipeline configuration
+# ──────────────────────────────────────────────────────────────────────────────
+config:
+  # Input: consume all sensor telemetry topics from MSK via SASL/SCRAM-512
+  input:
+    kafka_franz:
+      seed_brokers:
+        - "${MSK_BOOTSTRAP_SERVERS}"
+      topics:
+        - "sensors.raw.*"
+      consumer_group: timescaledb-sink
+      tls:
+        enabled: true
+      sasl:
+        - mechanism: SCRAM-SHA-512
+          username: "${MSK_USERNAME}"
+          password: "${MSK_PASSWORD}"
+
+  # Pipeline: parse JSON and add a truncated timestamp for TimescaleDB
+  # hypertable partitioning (partition_time rounded to the nearest minute).
+  pipeline:
+    processors:
+      - mapping: |
+          root = this
+          root.partition_time = (this.ts_ms / 1000).floor().ts_unix().ts_round("1m").string()
+
+  # Output: batch-insert into TimescaleDB sensor_readings table
+  output:
+    sql_insert:
+      driver: postgres
+      dsn: "${TIMESCALE_DSN}"
+      table: sensor_readings
+      columns:
+        - sensor
+        - site_id
+        - value
+        - unit
+        - ts_ms
+        - partition_time
+      args_mapping: |
+        root = [
+          this.sensor,
+          this.site_id,
+          this.value,
+          this.unit,
+          this.ts_ms,
+          this.partition_time
+        ]
+      max_in_flight: 64
+      batching:
+        count: 1000
+        period: "1s"

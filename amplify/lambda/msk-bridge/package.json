@@ -1,0 +1,10 @@
+{
+  "name": "msk-bridge",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "@aws-sdk/client-kafka": "^3.0.0",
+    "@aws-sdk/client-secrets-manager": "^3.0.0",
+    "kafkajs": "^2.2.4"
+  }
+}
