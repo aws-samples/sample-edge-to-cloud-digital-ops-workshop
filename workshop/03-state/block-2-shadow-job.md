@@ -13,12 +13,41 @@
 
 ## Steps
 
-1. Create an IoT Job targeting Thing Group `{DEPLOYMENT_ID}-devices`
-2. The job script adds two new `systemd` timer units:
-   - `shadow-app-deployment.timer` — reports compose version and image tags
-   - `shadow-device-health.timer` — reports CPU/mem/disk %, container count, uptime, `last_heartbeat`
-3. Observe the new shadows appearing in **IoT Core → Manage → Things → (device) → Shadows**
-4. Use Fleet Indexing to query device health across the fleet:
+1. Upload the job script to S3:
+
+```bash
+aws s3 cp job-scripts/add-shadows.sh \
+  s3://workshop-{DEPLOYMENT_ID}/job-scripts/add-shadows.sh
+```
+
+2. Create an IoT Job targeting Thing Group `{DEPLOYMENT_ID}-devices` with this document:
+
+```json
+{
+  "version": "1.0",
+  "steps": [
+    {
+      "action": {
+        "name": "add-shadows",
+        "type": "runHandler",
+        "input": {
+          "handler": "run-script.sh",
+          "args": ["s3://workshop-{DEPLOYMENT_ID}/job-scripts/add-shadows.sh"]
+        },
+        "runAsUser": ""
+      }
+    }
+  ]
+}
+```
+
+3. The job script installs two `systemd` timer units that fire every 30 seconds:
+   - `report-app-deployment.timer` — reports compose version and deploy status
+   - `report-device-health.timer` — reports CPU/mem/disk %, container count, uptime, `last_heartbeat`
+
+4. Observe the new shadows appearing in **IoT Core → Manage → Things → (device) → Shadows**
+
+5. Use Fleet Indexing to query device health across the fleet:
 
 ```
 shadow.name.device-health.reported.cpu_pct:[50 TO *]
