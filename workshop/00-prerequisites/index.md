@@ -21,10 +21,10 @@ Each participant slot gets a unique **`DEPLOYMENT_ID`** (e.g., `ws-a1b2c3`). All
 | IoT Provisioning Template | 1× per deployment | Claim cert embedded via Secrets Manager |
 | IoT Thing Group | 1× per deployment | Dynamic group: `deploymentId = {DEPLOYMENT_ID}` |
 | MSK Provisioned cluster | 1× per deployment | `kafka.t3.small` × 2 brokers; SASL/SCRAM |
-| EKS cluster | 1× per deployment | In `workshop-cloud` VPC; `t3.medium` nodes |
-| IoT Rule | 1× per deployment | Routes `edge/{DEPLOYMENT_ID}/+/telemetry` → MSK `raw.telemetry` |
-| MSK Connect connector | 1× per deployment | Hudi Sink Connector → `s3://workshop-{DEPLOYMENT_ID}/telemetry/` |
-| S3 bucket | 1× per deployment | Hudi MoR table; Glue catalog registered on first write |
+| EKS cluster | 1× per deployment | ⚠️ **Not yet in CDK** — Session 4 is WIP |
+| IoT Rule | 1× per deployment | Routes `edge/{DEPLOYMENT_ID}/+/telemetry` → S3 (JSON); MSK path is WIP |
+| MSK Connect connector | 1× per deployment | ⚠️ **Not yet in CDK** — Session 4 is WIP |
+| S3 bucket | 1× per deployment | IoT Rule writes JSON directly; Glue + Athena pre-created |
 | Athena workgroup | 1× per deployment | Engine v3; participants `AssumeRole` into it |
 | Amplify app + hosting | 1× per account, shared | Cognito user pool per deployment; AppSync Events API |
 
