@@ -1,0 +1,73 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: #0d1117;
+  color: #e6edf3;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+}
+
+a {
+  color: #58a6ff;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+nav {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 12px 24px;
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+}
+
+nav .brand {
+  font-weight: 700;
+  font-size: 16px;
+  color: #e6edf3;
+  letter-spacing: 0.02em;
+}
+
+nav a {
+  color: #8b949e;
+  font-size: 14px;
+}
+
+nav a:hover,
+nav a.active {
+  color: #e6edf3;
+  text-decoration: none;
+}
+
+main {
+  padding: 24px;
+}
+
+h1 {
+  margin: 0 0 16px;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+h2 {
+  margin: 0 0 12px;
+  font-size: 16px;
+  font-weight: 600;
+  color: #8b949e;
+}
+
+/* React Flow canvas background override */
+.react-flow__background {
+  background: #0d1117 !important;
+}

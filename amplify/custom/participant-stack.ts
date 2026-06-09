@@ -272,6 +272,7 @@ export class ParticipantStack extends Stack {
         resources: [
           `${workshopBucket.bucketArn}/job-scripts/*`,
           `${workshopBucket.bucketArn}/bin/*`,
+          `${workshopBucket.bucketArn}/simulator/*`,
         ],
       })
     );
@@ -581,13 +582,16 @@ exports.handler = async (event) => {
       routeTableId: edgeRtb.ref,
     });
 
-    // Security group: allow outbound only (MQTT/TLS, HTTPS, SSM)
+    // Security group: intra-VPC all traffic (K3s cluster + MQTT broker) + outbound internet
     const edgeSg = new CfnSecurityGroup(this, "EdgeSg", {
       vpcId: edgeVpc.vpcId,
       groupDescription: `workshop-edge-${deploymentId}`,
+      securityGroupIngress: [
+        // Allow all traffic within the edge VPC subnet (K3s API, MQTT broker, Redpanda, RisingWave)
+        { ipProtocol: "-1", fromPort: -1, toPort: -1, cidrIp: edgeSubnetCidr },
+      ],
       securityGroupEgress: [
-        { ipProtocol: "tcp", fromPort: 443, toPort: 443, cidrIp: "0.0.0.0/0" },
-        { ipProtocol: "tcp", fromPort: 8883, toPort: 8883, cidrIp: "0.0.0.0/0" },
+        { ipProtocol: "-1", fromPort: -1, toPort: -1, cidrIp: "0.0.0.0/0" },
       ],
       tags: [{ key: "Name", value: `workshop-edge-${deploymentId}-sg` }],
     });
@@ -785,6 +789,59 @@ systemctl start aws-iot-device-client workshop-telemetry
         ],
       });
     }
+
+    // ── Sensor Simulator EC2 (Session 5 — Step 5B) ──────────────────────────
+    // A 4th EC2 instance running the Python sensor simulator and Mosquitto MQTT broker.
+    // Publishes to mosquitto:1883; Redpanda Connect in K3s reads from there.
+    const simulatorUserData = `#!/bin/bash
+set -euxo pipefail
+
+yum install -y amazon-ssm-agent mosquitto python3-pip 2>/dev/null || true
+systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent
+systemctl enable mosquitto && systemctl start mosquitto
+
+pip3 install paho-mqtt
+
+# Download sensor simulator from S3
+aws s3 cp s3://workshop-${deploymentId}/simulator/sensor-sim.py /usr/local/bin/sensor-sim.py --region ${this.region}
+chmod +x /usr/local/bin/sensor-sim.py
+
+cat > /etc/systemd/system/sensor-sim.service <<EOF
+[Unit]
+Description=Industrial Sensor Simulator
+After=mosquitto.service network.target
+Requires=mosquitto.service
+
+[Service]
+Type=simple
+Environment=MQTT_HOST=localhost
+Environment=MQTT_PORT=1883
+Environment=SITE_ID=${deploymentId}-sim
+ExecStart=/usr/bin/python3 /usr/local/bin/sensor-sim.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable sensor-sim
+systemctl start sensor-sim
+`;
+
+    new CfnInstance(this, "SensorSimulatorInstance", {
+      instanceType: "t3.medium",
+      imageId: amiId,
+      subnetId: edgeSubnet.ref,
+      securityGroupIds: [edgeSg.ref],
+      iamInstanceProfile: instanceProfile.ref,
+      userData: Fn.base64(simulatorUserData),
+      tags: [
+        { key: "WorkshopDeploymentId", value: deploymentId },
+        { key: "Name", value: `workshop-${deploymentId}-sensor-sim` },
+      ],
+    });
 
     // ── MSK Provisioned cluster ──────────────────────────────────────────────
     const mskSg = new SecurityGroup(this, "MskSg", {

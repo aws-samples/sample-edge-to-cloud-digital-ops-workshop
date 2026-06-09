@@ -61,7 +61,11 @@ echo ">>> Starting Amplify sandbox --identifier $DEPLOYMENT_ID"
 nvm use 22 --silent
 npx ampx sandbox --identifier "$DEPLOYMENT_ID" --once
 
-# ── Upload binary to S3 after CDK creates the bucket ────────────────────────
+# ── Upload binary and simulator to S3 after CDK creates the bucket ──────────
 echo ">>> Uploading IoT Device Client binary to s3://${S3_BUCKET}/bin/aws-iot-device-client…"
 aws s3 cp "$LOCAL_BINARY_CACHE" "s3://${S3_BUCKET}/bin/aws-iot-device-client"
+
+echo ">>> Uploading sensor simulator to s3://${S3_BUCKET}/simulator/sensor-sim.py…"
+aws s3 cp simulator/sensor-sim.py "s3://${S3_BUCKET}/simulator/sensor-sim.py"
+
 echo ">>> Upload complete."

@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rp-connect-relay-config
+  labels:
+    {{- include "edge-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rp-connect-relay
+data:
+  config.yaml: |
+    # ──────────────────────────────────────────────────────────────────────────
+    # Redpanda Connect pipeline: Redpanda sensors.raw.* → MSK WAN relay
+    # ──────────────────────────────────────────────────────────────────────────
+    input:
+      kafka_franz:
+        seed_brokers:
+          - redpanda:9092
+        topics:
+          - ~^sensors\.raw\..*$
+        consumer_group: relay-group-{{ .Values.deploymentId }}
+        # Start from the earliest unread offset on first boot, then track commits
+        start_from_oldest: true
+        checkpoint_limit: 1024
+
+    pipeline:
+      processors:
+        # No transformation — relay records verbatim.
+        # Preserve the original Kafka topic via metadata so the output
+        # can pass it through without hardcoding.
+        - mapping: |
+            meta relay_topic = meta("kafka_topic")
+            root = this
+
+    output:
+      kafka_franz:
+        seed_brokers:
+          {{- range (splitList "," .Values.mskBootstrapServers) }}
+          - {{ . | trim }}
+          {{- end }}
+        topic: ${! meta("relay_topic") }
+        # TLS is required for MSK
+        tls:
+          enabled: true
+        # SASL/SCRAM credentials are expected to be injected via environment
+        # variables MSK_USERNAME and MSK_PASSWORD (set in a Secret by the
+        # workshop provisioning scripts).
+        sasl:
+          - mechanism: SCRAM-SHA-512
+            username: ${MSK_USERNAME:relay}
+            password: ${MSK_PASSWORD:""}
+        acks_required: leader
+        compression: snappy
+        max_in_flight: 64

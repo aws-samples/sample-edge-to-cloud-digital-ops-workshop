@@ -24,7 +24,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install MkDocs dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r workshop/requirements.txt
 
       - name: Build and deploy to GitHub Pages
         run: mkdocs gh-deploy --force

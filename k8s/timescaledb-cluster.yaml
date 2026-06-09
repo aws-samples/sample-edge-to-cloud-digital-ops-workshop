@@ -1,0 +1,73 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# TimescaleDB Cluster — managed by CloudNativePG operator
+#
+# Apply after the CNPG operator is running:
+#   kubectl apply -f k8s/timescaledb-cluster.yaml -n edge
+#
+# The CNPG operator is deployed by the edge-stack Helm chart (cnpg subchart).
+# Wait for the operator pod to be Ready before applying this manifest.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: timescaledb
+  namespace: edge
+  labels:
+    app.kubernetes.io/part-of: edge-stack
+    app.kubernetes.io/component: timescaledb
+spec:
+  # Single instance for workshop — no standby replicas.
+  instances: 1
+
+  # PostgreSQL 16 with TimescaleDB installed via the community TimescaleDB
+  # container image (includes the extension binaries).
+  imageName: timescale/timescaledb-ha:pg16
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # PostgreSQL configuration
+  # ────────────────────────────────────────────────────────────────────────────
+  postgresql:
+    parameters:
+      # Load TimescaleDB before other extensions.
+      shared_preload_libraries: "timescaledb"
+
+      # Workshop-appropriate sizing for a t3.medium node.
+      max_connections: "100"
+      shared_buffers: "256MB"
+      effective_cache_size: "768MB"
+      maintenance_work_mem: "64MB"
+      work_mem: "4MB"
+      wal_level: logical
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Bootstrap — create the workshop user and database on first start
+  # ────────────────────────────────────────────────────────────────────────────
+  bootstrap:
+    initdb:
+      database: edge
+      owner: workshop
+      # CNPG creates a Secret named "<cluster>-app" with the generated password.
+      # To use a fixed password, create a Secret manually and reference it:
+      #   secret:
+      #     name: timescaledb-workshop-credentials
+
+      # Enable TimescaleDB extension in the bootstrap database.
+      postInitSQL:
+        - CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Storage — 10 Gi for workshop data
+  # ────────────────────────────────────────────────────────────────────────────
+  storage:
+    size: 10Gi
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Resource limits — sized for a t3.medium node (2 vCPU / 4 GB RAM)
+  # ────────────────────────────────────────────────────────────────────────────
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
