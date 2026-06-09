@@ -13,7 +13,7 @@
 
 ## Steps
 
-1. Create an IoT Job targeting Thing Group `ws-{DEPLOYMENT_ID}`
+1. Create an IoT Job targeting Thing Group `{DEPLOYMENT_ID}-devices`
 2. The job script adds two new `systemd` timer units:
    - `shadow-app-deployment.timer` — reports compose version and image tags
    - `shadow-device-health.timer` — reports CPU/mem/disk %, container count, uptime, `last_heartbeat`

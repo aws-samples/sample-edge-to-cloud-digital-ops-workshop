@@ -34,6 +34,11 @@ import {
   Secret,
 } from "aws-cdk-lib/aws-secretsmanager";
 import {
+  AwsCustomResource,
+  AwsCustomResourcePolicy,
+  PhysicalResourceId,
+} from "aws-cdk-lib/custom-resources";
+import {
   CfnCluster as MskCluster,
 } from "aws-cdk-lib/aws-msk";
 import {
@@ -57,6 +62,10 @@ import {
 import {
   CfnWorkGroup,
 } from "aws-cdk-lib/aws-athena";
+import {
+  CfnDatabase,
+  CfnTable,
+} from "aws-cdk-lib/aws-glue";
 import { Construct } from "constructs";
 
 export interface ParticipantStackProps extends StackProps {
@@ -111,6 +120,52 @@ export class ParticipantStack extends Stack {
       },
     });
 
+    // ── Glue database + telemetry table (queried by Athena) ──────────────────
+    // Glue DB name uses underscores (Athena identifier rules).
+    const glueDbName = `workshop_${deploymentId.replace(/-/g, "_")}`;
+    const glueDb = new CfnDatabase(this, "GlueDatabase", {
+      catalogId: this.account,
+      databaseInput: {
+        name: glueDbName,
+        description: `Workshop telemetry database for ${deploymentId}`,
+      },
+    });
+
+    // Pre-create the Glue table so Athena queries work as soon as telemetry arrives.
+    // Schema matches the IoT Rule SQL: SELECT *, topic() AS mqtt_topic, timestamp() AS ingest_ts
+    new CfnTable(this, "GlueTelemetryTable", {
+      catalogId: this.account,
+      databaseName: glueDbName,
+      tableInput: {
+        name: "telemetry",
+        tableType: "EXTERNAL_TABLE",
+        parameters: {
+          "classification": "json",
+          "has_encrypted_data": "false",
+        },
+        storageDescriptor: {
+          location: `s3://${workshopBucket.bucketName}/telemetry/`,
+          inputFormat: "org.apache.hadoop.mapred.TextInputFormat",
+          outputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+          serdeInfo: {
+            serializationLibrary: "org.openx.data.jsonserde.JsonSerDe",
+            parameters: { "serialization.format": "1" },
+          },
+          columns: [
+            { name: "thing_name", type: "string" },
+            { name: "cpu_pct", type: "double" },
+            { name: "mem_used_pct", type: "double" },
+            { name: "disk_used_pct", type: "double" },
+            { name: "net_io_bytes_sent", type: "bigint" },
+            { name: "net_io_bytes_recv", type: "bigint" },
+            { name: "message_timestamp", type: "bigint" },
+            { name: "mqtt_topic", type: "string" },
+            { name: "ingest_ts", type: "bigint" },
+          ],
+        },
+      },
+    }).addDependency(glueDb);
+
     // ── IAM roles ────────────────────────────────────────────────────────────
     // EC2 instance profile
     const ec2Role = new Role(this, "EdgeEc2Role", {
@@ -127,6 +182,63 @@ export class ParticipantStack extends Stack {
       removalPolicy: RemovalPolicy.DESTROY,
     });
     claimSecret.grantRead(ec2Role);
+
+    // Create the IoT claim certificate and populate the secret.
+    // CreateKeysAndCertificate returns the cert + private key only at creation time,
+    // so we use AwsCustomResource to call it once and store the result in Secrets Manager.
+    // onDelete intentionally omitted — teardown.sh deactivates and deletes the cert.
+    // Omitting onDelete avoids a self-referential initializer (cert ID not yet available).
+    const createClaimCert = new AwsCustomResource(this, "CreateClaimCert", {
+      onCreate: {
+        service: "IoT",
+        action: "createKeysAndCertificate",
+        parameters: { setAsActive: true },
+        physicalResourceId: PhysicalResourceId.fromResponse("certificateId"),
+      },
+      policy: AwsCustomResourcePolicy.fromSdkCalls({ resources: AwsCustomResourcePolicy.ANY_RESOURCE }),
+    });
+
+    // Attach the claim policy to the newly created certificate
+    new AwsCustomResource(this, "AttachClaimPolicy", {
+      onCreate: {
+        service: "IoT",
+        action: "attachPolicy",
+        parameters: {
+          policyName: `workshop-${deploymentId}-claim-policy`,
+          target: createClaimCert.getResponseField("certificateArn"),
+        },
+        physicalResourceId: PhysicalResourceId.of("attach-claim-policy"),
+      },
+      onDelete: {
+        service: "IoT",
+        action: "detachPolicy",
+        parameters: {
+          policyName: `workshop-${deploymentId}-claim-policy`,
+          target: createClaimCert.getResponseField("certificateArn"),
+        },
+        ignoreErrorCodesMatching: "ResourceNotFoundException",
+      },
+      policy: AwsCustomResourcePolicy.fromSdkCalls({ resources: AwsCustomResourcePolicy.ANY_RESOURCE }),
+    });
+
+    // Write the cert + key JSON into the secret so EC2 user data can retrieve it
+    new AwsCustomResource(this, "PopulateClaimSecret", {
+      onCreate: {
+        service: "SecretsManager",
+        action: "putSecretValue",
+        parameters: {
+          SecretId: claimSecret.secretArn,
+          SecretString: JSON.stringify({
+            certificate: createClaimCert.getResponseField("certificatePem"),
+            privateKey: createClaimCert.getResponseField("keyPair.PrivateKey"),
+            certificateArn: createClaimCert.getResponseField("certificateArn"),
+            certificateId: createClaimCert.getResponseField("certificateId"),
+          }),
+        },
+        physicalResourceId: PhysicalResourceId.of("populate-claim-secret"),
+      },
+      policy: AwsCustomResourcePolicy.fromSdkCalls({ resources: [claimSecret.secretArn] }),
+    });
 
     // Allow Device Client to assume the role for shadow/job operations
     ec2Role.addToPolicy(
@@ -457,12 +569,14 @@ exports.handler = async (event) => {
     const userDataScript = `#!/bin/bash
 set -euxo pipefail
 
-# Install SSM Agent (should be pre-installed on Amazon Linux 2023, but ensure)
+# Install SSM Agent (pre-installed on Amazon Linux 2023, but ensure it's running)
 yum install -y amazon-ssm-agent 2>/dev/null || true
 systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent
 
-# Install AWS IoT Device Client
-yum install -y cmake git openssl-devel
+# Install Docker
+yum install -y docker
+systemctl enable docker && systemctl start docker
+
 INSTANCE_ID=$(ec2-metadata --instance-id | cut -d' ' -f2)
 
 # Retrieve claim cert from Secrets Manager (no hardcoded secrets in user data)
@@ -485,10 +599,7 @@ IOT_ENDPOINT=$(aws iot describe-endpoint \
   --endpoint-type iot:Data-ATS \
   --query endpointAddress --output text)
 
-# Install IoT Device Client binary
-curl -Lo /usr/local/bin/aws-iot-device-client \
-  "https://github.com/awslabs/aws-iot-device-client/releases/latest/download/aws-iot-device-client-aarch64"
-chmod +x /usr/local/bin/aws-iot-device-client
+mkdir -p /etc/aws-iot-device-client/jobs
 
 # Write Device Client config for fleet provisioning
 cat > /etc/aws-iot-device-client/aws-iot-device-client.conf <<EOF
@@ -522,9 +633,9 @@ cat > /etc/aws-iot-device-client/aws-iot-device-client.conf <<EOF
 }
 EOF
 
-mkdir -p /etc/aws-iot-device-client/jobs
-
-# Generic IoT Job handler: downloads and runs an S3-hosted script
+# Generic IoT Job handler: downloads and runs an S3-hosted script.
+# Runs on the host (bind-mounted into the container) so job scripts can
+# interact with host services (systemd, K3s, etc.).
 cat > /etc/aws-iot-device-client/jobs/run-script.sh <<'HANDLER'
 #!/bin/bash
 set -euo pipefail
@@ -535,15 +646,31 @@ chmod +x /tmp/job-script.sh
 HANDLER
 chmod +x /etc/aws-iot-device-client/jobs/run-script.sh
 
-# Systemd unit for Device Client
+# Pull the Device Client image (AWS-managed on GHCR, no build step needed)
+docker pull ghcr.io/awslabs/aws-iot-device-client/amazonlinux:latest
+
+# Systemd unit: run Device Client in Docker
+# --network host    → reaches IoT Core MQTT endpoint without NAT
+# -v /tmp:/tmp      → claim cert files written above are visible inside container
+# -v /etc/aws-iot-device-client → config, certs, and job handlers shared with host
+# -v /var/log:/var/log → log file lands on host for SSM/CloudWatch access
 cat > /etc/systemd/system/aws-iot-device-client.service <<EOF
 [Unit]
 Description=AWS IoT Device Client
-After=network.target
+After=docker.service network.target
+Requires=docker.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/aws-iot-device-client --config-file /etc/aws-iot-device-client/aws-iot-device-client.conf
+ExecStartPre=-/usr/bin/docker rm -f aws-iot-device-client
+ExecStart=/usr/bin/docker run --rm \\
+  --name aws-iot-device-client \\
+  --network host \\
+  -v /etc/aws-iot-device-client:/etc/aws-iot-device-client \\
+  -v /tmp:/tmp \\
+  -v /var/log:/var/log \\
+  ghcr.io/awslabs/aws-iot-device-client/amazonlinux:latest \\
+  --config-file /etc/aws-iot-device-client/aws-iot-device-client.conf
 Restart=on-failure
 RestartSec=10
 

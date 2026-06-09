@@ -8,7 +8,7 @@ Launch both steps simultaneously — they run independently and must both comple
 
 ## Step 5A: IoT Job → K3s Cluster
 
-1. Create an IoT Job targeting Thing Group `ws-{DEPLOYMENT_ID}`:
+1. Create an IoT Job targeting Thing Group `{DEPLOYMENT_ID}-devices`:
    - Job document: `deploy-k3s-v1`
    - In-progress timer: **45 minutes** (K3s install ≈ 10–20 min; 45 min gives a safe margin)
    - Device 1 handler: stands up the K3s server node

@@ -20,7 +20,7 @@ PRIVATE_IP=$(ec2-metadata --local-ipv4 | cut -d' ' -f2)
 # Get all devices in the group (sorted) to determine ordering
 GROUP_THINGS=$(aws iot list-things-in-thing-group \
   --region "$REGION" \
-  --thing-group-name "ws-${DEPLOYMENT_ID}" \
+  --thing-group-name "${DEPLOYMENT_ID}-devices" \
   --query "things" --output text | tr '\t' '\n' | sort)
 
 FIRST_THING=$(echo "$GROUP_THINGS" | head -1)

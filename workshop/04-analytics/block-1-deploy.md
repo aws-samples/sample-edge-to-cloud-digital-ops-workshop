@@ -2,9 +2,22 @@
 
 **Duration:** 45 min
 
+!!! warning "Session 4 — Work in Progress"
+    The EKS cluster, Helm values files (`helm/risingwave-values.yaml`, `helm/rp-connect-timescaledb.yaml`), and Kubernetes manifests (`k8s/timescaledb-cluster.yaml`) are not yet deployed or committed to the repository. This session is **conceptual** until those assets are added.
+    
+    Facilitators: deploy the EKS cluster via CDK (`ParticipantStack` — add `eks.Cluster` construct) and commit the `helm/` and `k8s/` directories before this session.
+
 ---
 
 ## Steps
+
+First, configure `kubectl` access to the pre-deployed EKS cluster:
+
+```bash
+aws eks update-kubeconfig \
+  --region us-east-1 \
+  --name workshop-{DEPLOYMENT_ID}-eks
+```
 
 Run Helm deployments against the pre-configured EKS cluster. All values files are pre-staged in the repository; MSK credentials are injected from Secrets Manager via EKS pod identity.
 
