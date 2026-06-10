@@ -1,0 +1,45 @@
+{{- if .Values.cnpg.enabled }}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: timescaledb
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: timescaledb
+spec:
+  instances: 1
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.8
+  postgresql:
+    parameters:
+      max_connections: "100"
+      shared_buffers: "256MB"
+      effective_cache_size: "768MB"
+      maintenance_work_mem: "64MB"
+      work_mem: "4MB"
+      wal_level: logical
+  bootstrap:
+    initdb:
+      database: edge
+      owner: workshop
+      postInitApplicationSQL:
+        - |
+          CREATE TABLE IF NOT EXISTS sensor_readings (
+            ts_ms          BIGINT          NOT NULL,
+            sensor         TEXT            NOT NULL,
+            site_id        TEXT            NOT NULL,
+            value          DOUBLE PRECISION,
+            unit           TEXT,
+            partition_time TIMESTAMPTZ     NOT NULL
+          );
+        - CREATE INDEX IF NOT EXISTS idx_sr_sensor ON sensor_readings(sensor, partition_time DESC);
+  storage:
+    size: 10Gi
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+{{- end }}

@@ -18,22 +18,29 @@ dependencies:
   # Redpanda Connect — MQTT ingest pipeline
   - name: connect
     alias: rp-connect-ingest
-    version: "0.*"
+    version: "3.*"
     repository: https://charts.redpanda.com
     condition: rpConnectIngest.enabled
 
   # Redpanda Connect — MSK relay pipeline
   - name: connect
     alias: rp-connect-relay
-    version: "0.*"
+    version: "3.*"
     repository: https://charts.redpanda.com
     condition: rpConnectRelay.enabled
 
   # RisingWave streaming SQL engine
   - name: risingwave
-    version: "2.*"
+    version: "0.*"
     repository: https://risingwavelabs.github.io/helm-charts
     condition: risingwave.enabled
+
+  # Redpanda Connect — PostgreSQL sink pipeline (Redpanda → TimescaleDB)
+  - name: connect
+    alias: rp-connect-tsdb
+    version: "3.*"
+    repository: https://charts.redpanda.com
+    condition: rpConnectTsdb.enabled
 
   # CloudNativePG operator (manages the TimescaleDB Cluster CR)
   - name: cloudnative-pg

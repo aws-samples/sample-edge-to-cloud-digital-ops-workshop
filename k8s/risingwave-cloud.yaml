@@ -1,13 +1,15 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # risingwave-cloud.yaml — RisingWave CR for the shared cloud EKS cluster
+# Schema: risingwave-operator v2.x (risingwavelabs/helm-charts)
 #
 # Prerequisites:
 #   1. risingwave-operator is running (helm/risingwave-values.yaml, in risingwave-system ns)
 #   2. Participant namespace exists: kubectl create namespace ws-slotNN
 #   3. Secret named "msk-credentials" exists in your participant namespace with:
-#        MSK_USERNAME  — SASL/SCRAM username
-#        MSK_PASSWORD  — SASL/SCRAM password
-#        MSK_BOOTSTRAP_SERVERS — comma-separated host:port list
+#        MSK_USERNAME, MSK_PASSWORD, MSK_BOOTSTRAP_SERVERS
+#   4. Service account "risingwave-cloud" exists in your participant namespace with
+#      IRSA annotation: eks.amazonaws.com/role-arn=arn:aws:iam::ACCT:role/workshop-risingwave-s3
+#   5. S3 bucket workshop-${DEPLOYMENT_ID}-risingwave-state exists
 #
 # Apply (substitute your deployment ID):
 #   sed "s/\${DEPLOYMENT_ID}/ws-slot00/g" k8s/risingwave-cloud.yaml | kubectl apply -n ws-slot00 -f -
@@ -21,80 +23,90 @@ metadata:
     app.kubernetes.io/part-of: edge-digital-ops-cloud
     app.kubernetes.io/component: risingwave
 spec:
-  # ────────────────────────────────────────────────────────────────────────────
-  # State store — S3 bucket, credentials from IRSA (no static keys needed)
-  # Replace {deploymentId} with your actual deployment ID before applying.
-  # ────────────────────────────────────────────────────────────────────────────
+  image: "docker.risingwave.com/risingwavelabs/risingwave:v2.8.4"
+
+  # ── State store: S3 via IRSA
   stateStore:
     s3:
-      bucket: workshop-${DEPLOYMENT_ID}-risingwave-state   # TODO: substitute deployment ID
+      bucket: workshop-${DEPLOYMENT_ID}-risingwave-state
       region: us-east-1
+      credentials:
+        useServiceAccount: true
 
-  # ────────────────────────────────────────────────────────────────────────────
-  # Meta store — etcd backed (operator deploys a sidecar etcd for workshop use)
-  # ────────────────────────────────────────────────────────────────────────────
+  # ── Meta store: in-memory (sufficient for workshop; resets on pod restart)
   metaStore:
-    etcd:
-      endpoint: "etcd:2388"
+    memory: true
 
-  # ────────────────────────────────────────────────────────────────────────────
-  # Service account — created separately; carries the IRSA role annotation so
-  # pods can access S3 without static credentials.
-  # ────────────────────────────────────────────────────────────────────────────
-  serviceAccountName: risingwave-cloud
-
-  # ────────────────────────────────────────────────────────────────────────────
-  # Env vars injected into every RisingWave component pod from the MSK Secret
-  # ────────────────────────────────────────────────────────────────────────────
-  global:
-    envFrom:
-      - secretRef:
-          name: msk-credentials
-
-  # ────────────────────────────────────────────────────────────────────────────
-  # Component sizing — ~2 CPU / 4 GB total across all pods (workshop)
-  # ────────────────────────────────────────────────────────────────────────────
+  # ── Component node groups — v2 schema: resources/envFrom at template.spec level
   components:
     meta:
-      replicas: 1
-      resources:
-        requests:
-          cpu: 100m
-          memory: 512Mi
-        limits:
-          cpu: 500m
-          memory: 1Gi
+      nodeGroups:
+        - name: default
+          replicas: 1
+          template:
+            spec:
+              serviceAccountName: risingwave-cloud
+              envFrom:
+                - secretRef:
+                    name: msk-credentials
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 512Mi
+                limits:
+                  cpu: 500m
+                  memory: 1Gi
 
     frontend:
-      replicas: 1
-      resources:
-        requests:
-          cpu: 100m
-          memory: 512Mi
-        limits:
-          cpu: 500m
-          memory: 1Gi
-      # Expose the Postgres wire protocol inside the cluster.
-      service:
-        type: ClusterIP
-        port: 4566
+      nodeGroups:
+        - name: default
+          replicas: 1
+          template:
+            spec:
+              serviceAccountName: risingwave-cloud
+              envFrom:
+                - secretRef:
+                    name: msk-credentials
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 512Mi
+                limits:
+                  cpu: 500m
+                  memory: 1Gi
 
     compute:
-      replicas: 1
-      resources:
-        requests:
-          cpu: 500m
-          memory: 1Gi
-        limits:
-          cpu: 1000m
-          memory: 2Gi
+      nodeGroups:
+        - name: default
+          replicas: 1
+          template:
+            spec:
+              serviceAccountName: risingwave-cloud
+              envFrom:
+                - secretRef:
+                    name: msk-credentials
+              resources:
+                requests:
+                  cpu: 500m
+                  memory: 1Gi
+                limits:
+                  cpu: 1000m
+                  memory: 2Gi
 
     compactor:
-      replicas: 1
-      resources:
-        requests:
-          cpu: 100m
-          memory: 256Mi
-        limits:
-          cpu: 500m
-          memory: 512Mi
+      nodeGroups:
+        - name: default
+          replicas: 1
+          template:
+            spec:
+              serviceAccountName: risingwave-cloud
+              envFrom:
+                - secretRef:
+                    name: msk-credentials
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi

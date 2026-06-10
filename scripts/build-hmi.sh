@@ -6,6 +6,7 @@
 # imports it into every K3s edge EC2 node (tagged *edge-[0-2]) via SSM.
 
 set -euo pipefail
+trap 'rm -f /tmp/ssm-params-*.json' EXIT
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
 DEPLOYMENT_ID="ws-slot00"
@@ -34,7 +35,7 @@ echo ">>> S3 bucket     : s3://${S3_BUCKET}/${S3_KEY}"
 
 # ── 1. Build the Docker image ────────────────────────────────────────────────
 echo ">>> Building Docker image ${IMAGE_TAG} from ./hmi …"
-docker build -t "${IMAGE_TAG}" ./hmi
+docker buildx build --platform linux/amd64 -t "${IMAGE_TAG}" ./hmi --load
 echo ">>> Docker image built."
 
 # ── 2. Save and compress the image ──────────────────────────────────────────
@@ -53,7 +54,7 @@ echo ">>> Looking up K3s edge instances tagged WorkshopDeploymentId=${DEPLOYMENT
 INSTANCE_IDS=$(aws ec2 describe-instances \
   --filters \
     "Name=tag:WorkshopDeploymentId,Values=${DEPLOYMENT_ID}" \
-    "Name=tag:Name,Values=*edge-[0-2]" \
+    "Name=tag:Name,Values=*edge-?" \
     "Name=instance-state-name,Values=running" \
   --query "Reservations[].Instances[].InstanceId" \
   --output text)
@@ -66,14 +67,13 @@ fi
 echo ">>> Found instances: ${INSTANCE_IDS}"
 
 # ── 5. Import image on each instance via SSM ────────────────────────────────
-SSM_COMMAND=$(cat <<'ENDJSON'
-aws s3 cp s3://BUCKET/images/workshop-hmi.tar.gz /tmp/hmi.tar.gz \
-  && k3s ctr images import /tmp/hmi.tar.gz \
-  && rm /tmp/hmi.tar.gz
-ENDJSON
-)
-# Substitute the real bucket name
-SSM_COMMAND="${SSM_COMMAND//BUCKET/${S3_BUCKET}}"
+SSM_PARAMS_FILE=$(mktemp /tmp/ssm-params-XXXXXX.json)
+# Write parameters JSON to a temp file to preserve newlines/special chars
+python3 -c "
+import json, sys
+cmd = 'aws s3 cp s3://${S3_BUCKET}/images/workshop-hmi.tar.gz /tmp/hmi.tar.gz && k3s ctr images import /tmp/hmi.tar.gz && rm /tmp/hmi.tar.gz'
+print(json.dumps({'commands': [cmd]}))
+" > "${SSM_PARAMS_FILE}"
 
 OVERALL_SUCCESS=true
 
@@ -84,7 +84,7 @@ for INSTANCE_ID in ${INSTANCE_IDS}; do
   COMMAND_ID=$(aws ssm send-command \
     --instance-ids "${INSTANCE_ID}" \
     --document-name "AWS-RunShellScript" \
-    --parameters "commands=[\"${SSM_COMMAND}\"]" \
+    --parameters "file://${SSM_PARAMS_FILE}" \
     --comment "Import workshop-hmi image" \
     --query "Command.CommandId" \
     --output text)

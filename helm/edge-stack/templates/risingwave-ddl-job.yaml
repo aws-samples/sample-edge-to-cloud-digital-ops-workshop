@@ -28,12 +28,12 @@ spec:
             - -c
             - |
               echo "Waiting for RisingWave to be ready..."
-              until pg_isready -h {{ .Values.risingwave.serviceName | default "edge-stack-risingwave" }} -p 4566 -U root; do
+              until pg_isready -h {{ .Values.risingwave.serviceName | default "edge-stack-risingwave" }} -p 4567 -U root; do
                 sleep 3
               done
               echo "Running DDL..."
               psql -h {{ .Values.risingwave.serviceName | default "edge-stack-risingwave" }} \
-                   -p 4566 -U root -f /ddl/ddl.sql
+                   -p 4567 -U root -d dev -f /ddl/ddl.sql
               echo "DDL complete."
           volumeMounts:
             - name: ddl
@@ -55,5 +55,44 @@ metadata:
     "helm.sh/hook-weight": "5"
 data:
   ddl.sql: |
-{{ .Files.Get "files/ddl.sql" | indent 4 }}
+    -- Source: raw sensor messages from local Redpanda cluster.
+    CREATE SOURCE IF NOT EXISTS sensors_raw (
+        sensor    VARCHAR,
+        site_id   VARCHAR,
+        value     DOUBLE,
+        unit      VARCHAR,
+        ts_ms     BIGINT
+    )
+    WITH (
+        connector                   = 'kafka',
+        topic                       = 'sensors.raw.sim',
+        properties.bootstrap.server = '{{ include "edge-stack.fullname" . }}-0.{{ include "edge-stack.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:9093',
+        scan.startup.mode           = 'latest'
+    )
+    FORMAT PLAIN ENCODE JSON;
+
+    -- Latest reading per sensor per site.
+    CREATE MATERIALIZED VIEW IF NOT EXISTS mv_sensor_latest AS
+    SELECT
+        sensor,
+        site_id,
+        (array_agg(value ORDER BY ts_ms DESC))[1]  AS value,
+        (array_agg(unit  ORDER BY ts_ms DESC))[1]  AS unit,
+        MAX(ts_ms)                                  AS ts_ms
+    FROM sensors_raw
+    GROUP BY sensor, site_id;
+
+    -- 1-minute bucket averages (used by Digital Ops page).
+    CREATE MATERIALIZED VIEW IF NOT EXISTS mv_sensor_1min_avg AS
+    SELECT
+        sensor,
+        site_id,
+        AVG(value)                                            AS avg_value,
+        MIN(value)                                            AS min_value,
+        MAX(value)                                            AS max_value,
+        COUNT(*)                                              AS sample_count,
+        to_timestamp((ts_ms / 60000) * 60)                   AS window_start,
+        to_timestamp((ts_ms / 60000) * 60 + 60)              AS window_end
+    FROM sensors_raw
+    GROUP BY sensor, site_id, (ts_ms / 60000);
 {{- end }}

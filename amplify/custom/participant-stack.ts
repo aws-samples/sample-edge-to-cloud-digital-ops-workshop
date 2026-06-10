@@ -1,4 +1,4 @@
-import { Stack, StackProps, RemovalPolicy, Duration, CfnOutput, Fn, CfnDeletionPolicy } from "aws-cdk-lib";
+import { Stack, StackProps, RemovalPolicy, Duration, CfnOutput, Fn, CfnDeletionPolicy, CustomResource } from "aws-cdk-lib";
 import {
   Vpc,
   SubnetType,
@@ -33,11 +33,6 @@ import {
 import {
   Secret,
 } from "aws-cdk-lib/aws-secretsmanager";
-import {
-  AwsCustomResource,
-  AwsCustomResourcePolicy,
-  PhysicalResourceId,
-} from "aws-cdk-lib/custom-resources";
 import {
   CfnCluster as MskCluster,
 } from "aws-cdk-lib/aws-msk";
@@ -183,61 +178,48 @@ export class ParticipantStack extends Stack {
     });
     claimSecret.grantRead(ec2Role);
 
-    // Create the IoT claim certificate and populate the secret.
-    // CreateKeysAndCertificate returns the cert + private key only at creation time,
-    // so we use AwsCustomResource to call it once and store the result in Secrets Manager.
-    // onDelete intentionally omitted — teardown.sh deactivates and deletes the cert.
-    // Omitting onDelete avoids a self-referential initializer (cert ID not yet available).
-    const createClaimCert = new AwsCustomResource(this, "CreateClaimCert", {
-      onCreate: {
-        service: "IoT",
-        action: "createKeysAndCertificate",
-        parameters: { setAsActive: true },
-        physicalResourceId: PhysicalResourceId.fromResponse("certificateId"),
-      },
-      policy: AwsCustomResourcePolicy.fromSdkCalls({ resources: AwsCustomResourcePolicy.ANY_RESOURCE }),
+    // Lambda-backed custom resource: creates the IoT claim cert + stores it in Secrets Manager.
+    // Using a real Lambda avoids two AwsCustomResource pitfalls:
+    //   1. 4KB CFn response-size limit (cert PEM + private key exceeds it)
+    //   2. PEM newlines becoming literal control characters in CFn token substitution
+    const claimCertProvisionerRole = new Role(this, "ClaimCertProvisionerRole", {
+      assumedBy: new ServicePrincipal("lambda.amazonaws.com"),
+      managedPolicies: [
+        ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaBasicExecutionRole"),
+      ],
+    });
+    claimCertProvisionerRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: [
+        "iot:CreateKeysAndCertificate",
+        "iot:AttachPolicy",
+        "iot:DetachPolicy",
+        "iot:DescribeCertificate",
+        "iot:UpdateCertificate",
+        "iot:DeleteCertificate",
+      ],
+      resources: ["*"],
+    }));
+    claimCertProvisionerRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["secretsmanager:PutSecretValue"],
+      resources: [claimSecret.secretArn],
+    }));
+
+    const claimCertProvisionerFn = new LambdaFn(this, "ClaimCertProvisioner", {
+      runtime: Runtime.NODEJS_22_X,
+      handler: "index.handler",
+      code: Code.fromAsset("amplify/lambda/claim-cert-provisioner"),
+      timeout: Duration.seconds(60),
+      role: claimCertProvisionerRole,
     });
 
-    // Attach the claim policy to the newly created certificate
-    new AwsCustomResource(this, "AttachClaimPolicy", {
-      onCreate: {
-        service: "IoT",
-        action: "attachPolicy",
-        parameters: {
-          policyName: `workshop-${deploymentId}-claim-policy`,
-          target: createClaimCert.getResponseField("certificateArn"),
-        },
-        physicalResourceId: PhysicalResourceId.of("attach-claim-policy"),
+    const claimCertResource = new CustomResource(this, "ClaimCertResource", {
+      serviceToken: claimCertProvisionerFn.functionArn,
+      properties: {
+        PolicyName: `workshop-${deploymentId}-claim-policy`,
+        SecretArn: claimSecret.secretArn,
       },
-      onDelete: {
-        service: "IoT",
-        action: "detachPolicy",
-        parameters: {
-          policyName: `workshop-${deploymentId}-claim-policy`,
-          target: createClaimCert.getResponseField("certificateArn"),
-        },
-        ignoreErrorCodesMatching: "ResourceNotFoundException",
-      },
-      policy: AwsCustomResourcePolicy.fromSdkCalls({ resources: AwsCustomResourcePolicy.ANY_RESOURCE }),
-    });
-
-    // Write the cert + key JSON into the secret so EC2 user data can retrieve it
-    new AwsCustomResource(this, "PopulateClaimSecret", {
-      onCreate: {
-        service: "SecretsManager",
-        action: "putSecretValue",
-        parameters: {
-          SecretId: claimSecret.secretArn,
-          SecretString: JSON.stringify({
-            certificate: createClaimCert.getResponseField("certificatePem"),
-            privateKey: createClaimCert.getResponseField("keyPair.PrivateKey"),
-            certificateArn: createClaimCert.getResponseField("certificateArn"),
-            certificateId: createClaimCert.getResponseField("certificateId"),
-          }),
-        },
-        physicalResourceId: PhysicalResourceId.of("populate-claim-secret"),
-      },
-      policy: AwsCustomResourcePolicy.fromSdkCalls({ resources: [claimSecret.secretArn] }),
     });
 
     // Allow Device Client to look up the IoT data endpoint and perform MQTT/shadow/jobs operations
@@ -273,6 +255,8 @@ export class ParticipantStack extends Stack {
           `${workshopBucket.bucketArn}/job-scripts/*`,
           `${workshopBucket.bucketArn}/bin/*`,
           `${workshopBucket.bucketArn}/simulator/*`,
+          `${workshopBucket.bucketArn}/scripts/*`,
+          `${workshopBucket.bucketArn}/images/*`,
         ],
       })
     );
@@ -783,6 +767,13 @@ systemctl start aws-iot-device-client workshop-telemetry
         securityGroupIds: [edgeSg.ref],
         iamInstanceProfile: instanceProfile.ref,
         userData: encodedUserData,
+        // 30 GB root volume — K3s + Redpanda + RisingWave + MinIO images need ~15 GB
+        blockDeviceMappings: [
+          {
+            deviceName: "/dev/xvda",
+            ebs: { volumeSize: 30, volumeType: "gp3", deleteOnTermination: true },
+          },
+        ],
         tags: [
           { key: "WorkshopDeploymentId", value: deploymentId },
           { key: "Name", value: `workshop-${deploymentId}-edge-${i}` },
@@ -793,20 +784,60 @@ systemctl start aws-iot-device-client workshop-telemetry
     // ── Sensor Simulator EC2 (Session 5 — Step 5B) ──────────────────────────
     // A 4th EC2 instance running the Python sensor simulator and Mosquitto MQTT broker.
     // Publishes to mosquitto:1883; Redpanda Connect in K3s reads from there.
+    // Note: Amazon Linux 2023 does not ship mosquitto in its default repos, so
+    // we build it from source (gcc + cmake are available, g++ needed for mosquitto 2.x).
     const simulatorUserData = `#!/bin/bash
 set -euxo pipefail
 
-yum install -y amazon-ssm-agent mosquitto python3-pip 2>/dev/null || true
+# SSM agent (pre-installed on AL2023, ensure it's running)
 systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent
-systemctl enable mosquitto && systemctl start mosquitto
 
+# Build mosquitto from source — not in AL2023 default repos
+dnf install -y gcc gcc-c++ make cmake openssl-devel
+
+cd /tmp
+wget -q https://mosquitto.org/files/source/mosquitto-2.0.18.tar.gz -O mosquitto.tar.gz
+tar xf mosquitto.tar.gz
+cd mosquitto-2.0.18
+cmake -B build -DWITH_WEBSOCKETS=OFF -DWITH_DOCS=OFF -DDOCUMENTATION=OFF -DCMAKE_INSTALL_PREFIX=/usr/local
+cmake --build build -j$(nproc)
+cmake --install build
+ldconfig
+
+# Install paho-mqtt for the sensor simulator (AL2023 uses python3 -m ensurepip)
+python3 -m ensurepip --upgrade
 pip3 install paho-mqtt
+
+# Create mosquitto config
+mkdir -p /etc/mosquitto
+cat > /etc/mosquitto/mosquitto.conf <<'MQTTCONF'
+listener 1883 0.0.0.0
+allow_anonymous true
+MQTTCONF
+
+cat > /etc/systemd/system/mosquitto.service <<'SVC'
+[Unit]
+Description=Mosquitto MQTT Broker
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/mosquitto -c /etc/mosquitto/mosquitto.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SVC
+
+systemctl daemon-reload
+systemctl enable mosquitto && systemctl start mosquitto
 
 # Download sensor simulator from S3
 aws s3 cp s3://workshop-${deploymentId}/simulator/sensor-sim.py /usr/local/bin/sensor-sim.py --region ${this.region}
 chmod +x /usr/local/bin/sensor-sim.py
 
-cat > /etc/systemd/system/sensor-sim.service <<EOF
+cat > /etc/systemd/system/sensor-sim.service <<'SVC'
 [Unit]
 Description=Industrial Sensor Simulator
 After=mosquitto.service network.target
@@ -823,7 +854,7 @@ RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
-EOF
+SVC
 
 systemctl daemon-reload
 systemctl enable sensor-sim
