@@ -36,7 +36,7 @@ helm repo update
 ```bash
 # Get the auto-generated MSK password from Secrets Manager
 aws secretsmanager get-secret-value \
-  --secret-id /workshop/{DEPLOYMENT_ID}/msk-credentials \
+  --secret-id AmazonMSK_workshop-{DEPLOYMENT_ID} \
   --query SecretString --output text | python3 -m json.tool
 
 # Get MSK bootstrap brokers (SASL/SCRAM endpoint, port 9096)
@@ -55,7 +55,7 @@ Create a Kubernetes Secret with these values (used by Redpanda Connect and Risin
 kubectl create namespace {DEPLOYMENT_ID}
 
 MSK_PASS=$(aws secretsmanager get-secret-value \
-  --secret-id /workshop/{DEPLOYMENT_ID}/msk-credentials \
+  --secret-id AmazonMSK_workshop-{DEPLOYMENT_ID} \
   --query SecretString --output text | python3 -c 'import sys,json; print(json.load(sys.stdin)["password"])')
 MSK_BOOTSTRAP=$(aws kafka get-bootstrap-brokers \
   --cluster-arn "$MSK_CLUSTER_ARN" --region us-east-1 \
