@@ -2,16 +2,24 @@
 import { Pool } from "pg";
 import { NextResponse } from "next/server";
 
-const pool = new Pool({
-  host: process.env.TIMESCALE_HOST ?? "timescaledb-rw",
-  port: parseInt(process.env.TIMESCALE_PORT ?? "5432", 10),
-  database: process.env.TIMESCALE_DB ?? "edge",
-  user: process.env.TIMESCALE_USER ?? "workshop",
-  password: process.env.TIMESCALE_PASSWORD ?? "workshop",
-  ssl: false,
-  max: 4,
-  idleTimeoutMillis: 30_000,
-});
+export const dynamic = "force-dynamic";
+
+let pool: Pool | null = null;
+function getPool(): Pool {
+  if (!pool) {
+    pool = new Pool({
+      host: process.env.TIMESCALE_HOST ?? "timescaledb-rw",
+      port: parseInt(process.env.TIMESCALE_PORT ?? "5432", 10),
+      database: process.env.TIMESCALE_DB ?? "edge",
+      user: process.env.TIMESCALE_USER ?? "workshop",
+      password: process.env.TIMESCALE_PASSWORD ?? "workshop",
+      ssl: false,
+      max: 4,
+      idleTimeoutMillis: 30_000,
+    });
+  }
+  return pool;
+}
 
 export interface SensorStats {
   sensor: string;
@@ -37,7 +45,7 @@ export async function GET(): Promise<NextResponse> {
   const t0 = Date.now();
 
   try {
-    const result = await pool.query<
+    const result = await getPool().query<
       SensorStats & { avg: string; min: string; max: string; count: string }
     >(`
       SELECT

@@ -8,6 +8,8 @@ CLAUDE.md
 cdk.out
 *.js.map
 
+workshop-site.zip
+
 # Python / MkDocs
 .venv
 __pycache__

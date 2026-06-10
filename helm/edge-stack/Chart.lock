@@ -1,0 +1,24 @@
+dependencies:
+- name: redpanda
+  repository: https://charts.redpanda.com
+  version: 5.10.7
+- name: connect
+  repository: https://charts.redpanda.com
+  version: 3.2.11
+- name: connect
+  repository: https://charts.redpanda.com
+  version: 3.2.11
+- name: risingwave
+  repository: https://risingwavelabs.github.io/helm-charts
+  version: 0.2.53
+- name: connect
+  repository: https://charts.redpanda.com
+  version: 3.2.11
+- name: cloudnative-pg
+  repository: https://cloudnative-pg.github.io/charts
+  version: 0.28.3
+- name: minio
+  repository: https://charts.min.io
+  version: 5.4.0
+digest: sha256:7b8c40b3eab3951e8a4602264d8c005f87b3310644d820f6f341b7133e843184
+generated: "2026-06-10T10:17:51.042766-05:00"

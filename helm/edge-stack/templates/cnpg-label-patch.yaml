@@ -1,0 +1,82 @@
+{{- if .Values.cnpg.enabled }}
+# CNPG 1.29 looks for its own Deployment by label app.kubernetes.io/name=cloudnative-pg.
+# When installed as a subchart with alias "cnpg", Helm sets that label to "cnpg" instead.
+# This post-install hook patches the metadata label so the operator can find itself.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "edge-stack.fullname" . }}-cnpg-label-patch
+  labels:
+    {{- include "edge-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cnpg-label-patch
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    "helm.sh/hook-weight": "-5"
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "edge-stack.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cnpg-label-patch
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ include "edge-stack.fullname" . }}-cnpg-patcher
+      containers:
+        - name: patcher
+          image: bitnami/kubectl:latest
+          command:
+            - sh
+            - -c
+            - |
+              kubectl patch deployment {{ include "edge-stack.fullname" . }}-cnpg \
+                -n {{ .Release.Namespace }} \
+                --type=json \
+                -p='[{"op":"add","path":"/metadata/labels/app.kubernetes.io~1name","value":"cloudnative-pg"}]'
+              echo "CNPG label patched."
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "edge-stack.fullname" . }}-cnpg-patcher
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-stack.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    "helm.sh/hook-weight": "-10"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "edge-stack.fullname" . }}-cnpg-patcher
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    "helm.sh/hook-weight": "-10"
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "edge-stack.fullname" . }}-cnpg-patcher
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    "helm.sh/hook-weight": "-10"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "edge-stack.fullname" . }}-cnpg-patcher
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "edge-stack.fullname" . }}-cnpg-patcher
+    namespace: {{ .Release.Namespace }}
+{{- end }}

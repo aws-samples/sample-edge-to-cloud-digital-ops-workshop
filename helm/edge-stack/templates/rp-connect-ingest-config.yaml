@@ -25,24 +25,18 @@ data:
 
     pipeline:
       processors:
-        # Derive a Redpanda topic name from the MQTT topic path.
-        # MQTT topic:  sensors/raw/<sensor_name>
-        # Kafka topic: sensors.raw.<sensor_name>
-        # The metadata key "mqtt_topic" is set automatically by the MQTT input.
+        # All MQTT sensor messages funnel into the single sensors.raw.sim topic.
+        # The JSON payload already carries sensor, site_id, value, unit, ts_ms.
         - mapping: |
-            # Replace slashes with dots to form the Kafka topic name.
-            let mqtt_topic = meta("mqtt_topic")
-            meta kafka_topic = $mqtt_topic.replace_all("/", ".")
-
-            # Forward the raw payload unchanged.
             root = this
 
     output:
       kafka_franz:
         seed_brokers:
-          - redpanda:9092
-        topic: ${! meta("kafka_topic") }
+          - {{ include "edge-stack.fullname" . }}-0.{{ include "edge-stack.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:9093
+        topic: sensors.raw.sim
         # Deliver at least once — acceptable for workshop ingest
-        acks_required: leader
+        acks: all
+        idempotent_write: false
         compression: snappy
         max_in_flight: 64

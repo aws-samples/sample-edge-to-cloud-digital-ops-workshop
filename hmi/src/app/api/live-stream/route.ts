@@ -1,8 +1,7 @@
 // --8<-- [start:live-stream-route]
 import { Client } from "pg";
 
-const RW_HOST = process.env.RISINGWAVE_HOST ?? "edge-risingwave";
-const RW_PORT = parseInt(process.env.RISINGWAVE_PORT ?? "4566", 10);
+export const dynamic = "force-dynamic";
 
 /**
  * GET /api/live-stream
@@ -37,6 +36,9 @@ export async function GET(): Promise<Response> {
     controller.enqueue(encoder.encode(`: ${msg}\n\n`));
   }
 
+  const RW_HOST = process.env.RISINGWAVE_HOST ?? "edge-risingwave";
+  const RW_PORT = parseInt(process.env.RISINGWAVE_PORT ?? "4567", 10);
+
   const client = new Client({
     host: RW_HOST,
     port: RW_PORT,
@@ -58,7 +60,7 @@ export async function GET(): Promise<Response> {
       const subName = "hmi_live_stream";
       const curName = "hmi_cursor";
       await client.query(
-        `CREATE SUBSCRIPTION IF NOT EXISTS ${subName} ON mv_sensor_latest`
+        `CREATE SUBSCRIPTION IF NOT EXISTS ${subName} FROM mv_sensor_latest WITH (retention = '1D')`
       );
       await client.query(
         `DECLARE ${curName} SUBSCRIPTION CURSOR FOR ${subName}`
@@ -71,8 +73,10 @@ export async function GET(): Promise<Response> {
 
         for (const row of result.rows) {
           // row: { op, ts_ms, sensor, site_id, value, unit }
-          // op = 1 (insert/upsert). Skip deletes/retracts (op = 2).
-          if (row.op !== undefined && row.op !== 1) continue;
+          // RisingWave 2.8+ returns op as "Insert"/"Delete" string (older: 1/2 int).
+          // Skip deletes/retracts; forward inserts/upserts.
+          const opStr = String(row.op ?? "Insert");
+          if (opStr === "Delete" || opStr === "2") continue;
 
           send(
             "sensor",

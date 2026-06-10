@@ -10,18 +10,14 @@
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Slot identifier — printed in UI, used as Kafka consumer-group suffix.
-deploymentId: workshop-slot00   # TODO: set per participant, e.g. workshop-slot01
+deploymentId: ws-slot00
 
-# MSK bootstrap servers for the WAN relay (TODO: fill in your MSK endpoint)
-mskBootstrapServers: "b-1.replace-me.kafka.us-east-1.amazonaws.com:9092,b-2.replace-me.kafka.us-east-1.amazonaws.com:9092"
+# MSK bootstrap servers for the WAN relay
+mskBootstrapServers: "b-2.workshopwsslot00msk.gb4nxb.c17.kafka.us-east-1.amazonaws.com:9096,b-1.workshopwsslot00msk.gb4nxb.c17.kafka.us-east-1.amazonaws.com:9096"
 
 # MQTT broker — Mosquitto runs on the sensor simulator EC2, NOT in K3s.
-# Set host to the private IP of the workshop-{DEPLOYMENT_ID}-sensor-sim EC2 instance.
-# Retrieve it with:
-#   aws ec2 describe-instances --filters "Name=tag:Name,Values=workshop-{DEPLOYMENT_ID}-sensor-sim" \
-#     --query "Reservations[0].Instances[0].PrivateIpAddress" --output text
 mqtt:
-  host: "0.0.0.0"  # TODO: replace with sensor-sim EC2 private IP
+  host: "10.0.0.5"
   port: 1883
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -80,6 +76,10 @@ redpanda:
   rackAwareness:
     enabled: false
 
+  config:
+    cluster:
+      auto_create_topics_enabled: true
+
   console:
     enabled: true
     service:
@@ -100,6 +100,7 @@ rpConnectIngest:
   enabled: true
 
 rp-connect-ingest:
+  fullnameOverride: edge-stack-rp-connect-ingest
   replicaCount: 1
   extraVolumes:
     - name: pipeline-config
@@ -127,6 +128,7 @@ rpConnectRelay:
   enabled: true
 
 rp-connect-relay:
+  fullnameOverride: edge-stack-rp-connect-relay
   replicaCount: 1
   extraVolumes:
     - name: pipeline-config
@@ -139,6 +141,40 @@ rp-connect-relay:
   args:
     - run
     - /connect/config.yaml
+  envFrom:
+    - secretRef:
+        name: msk-credentials
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Redpanda Connect — TimescaleDB sink (Redpanda → local PostgreSQL)
+# ──────────────────────────────────────────────────────────────────────────────
+rpConnectTsdb:
+  enabled: true
+
+rp-connect-tsdb:
+  fullnameOverride: edge-stack-rp-connect-tsdb
+  replicaCount: 1
+  extraVolumes:
+    - name: pipeline-config
+      configMap:
+        name: rp-connect-tsdb-config
+  extraVolumeMounts:
+    - name: pipeline-config
+      mountPath: /connect/config.yaml
+      subPath: config.yaml
+  args:
+    - run
+    - /connect/config.yaml
+  envFrom:
+    - secretRef:
+        name: timescaledb-dsn
   resources:
     requests:
       cpu: 50m
@@ -166,8 +202,11 @@ risingwave:
       bucket: risingwave
       endpoint: "http://edge-stack-minio:9000"
       region: us-east-1
-      accessKey: minioadmin
-      secretKey: minioadmin
+      forcePathStyle: true
+      authentication:
+        useServiceAccount: false
+        accessKey: minioadmin
+        secretAccessKey: minioadmin
 
   resources:
     requests:

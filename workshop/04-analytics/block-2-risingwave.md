@@ -6,85 +6,88 @@
 
 ## Connect to RisingWave
 
+RisingWave's PostgreSQL wire protocol listens on **port 4567** (not 4566, which is the HTTP dashboard).
+
 ```bash
-kubectl port-forward -n {DEPLOYMENT_ID} svc/risingwave 4566:4566 &
-psql -h localhost -p 4566 -U root
+# In one terminal — keep this running
+kubectl port-forward -n {DEPLOYMENT_ID} svc/risingwave-cloud-frontend 4567:4567
+
+# In another terminal — connect with psql
+psql -h localhost -p 4567 -U root -d dev
 ```
 
 ---
 
 ## Create the Kafka Source
 
-```sql
-CREATE SOURCE telemetry_raw (
-  thing_name          VARCHAR,
-  cpu_pct             FLOAT,
-  mem_used_pct        FLOAT,
-  disk_used_pct       FLOAT,
-  pump_rate_bbl_per_min FLOAT,
-  message_timestamp   TIMESTAMPTZ
-) WITH (
-  connector = 'kafka',
-  topic = 'raw.telemetry',
-  properties.bootstrap.server = '{MSK_BOOTSTRAP}',
-  scan.startup.mode = 'earliest'
-) FORMAT PLAIN ENCODE JSON;
+The MSK bootstrap servers and credentials are available from your Amplify-deployed secrets:
+
+```bash
+# Fetch MSK connection details
+MSK_BOOTSTRAP=$(aws kafka get-bootstrap-brokers \
+  --cluster-arn $(aws kafka list-clusters --region us-east-1 \
+    --query "ClusterInfoList[?ClusterName=='workshop-{DEPLOYMENT_ID}-msk'].ClusterArn" \
+    --output text) \
+  --region us-east-1 \
+  --query BootstrapBrokerStringSaslScram --output text)
+
+MSK_USER="workshop-{DEPLOYMENT_ID}"
+MSK_PASS=$(aws secretsmanager get-secret-value \
+  --secret-id /workshop/{DEPLOYMENT_ID}/msk-credentials \
+  --query SecretString --output text | python3 -c 'import sys,json; print(json.load(sys.stdin)["password"])')
+
+# Apply the DDL with values substituted
+sed -e "s|__MSK_BOOTSTRAP__|$MSK_BOOTSTRAP|g" \
+    -e "s|__MSK_USER__|$MSK_USER|g" \
+    -e "s|__MSK_PASS__|$MSK_PASS|g" \
+    risingwave/ddl-cloud.sql | psql -h localhost -p 4567 -U root -d dev
 ```
+
+??? example "View source — ddl-cloud.sql"
+    [:simple-github: Open in GitHub](https://github.com/energy-digital-operations/edge-digital-operations-workshop/blob/main/risingwave/ddl-cloud.sql){ .md-button target=_blank }
+
+    ```sql
+    --8<-- "risingwave/ddl-cloud.sql"
+    ```
 
 ---
 
-## Create Materialized Views
+## Verify the Source
+
+After running the DDL, confirm the source and views are created:
 
 ```sql
--- 5-minute rolling CPU window
-CREATE MATERIALIZED VIEW cpu_5min AS
-SELECT
-  thing_name,
-  window_start,
-  AVG(cpu_pct) AS avg_cpu,
-  MAX(cpu_pct) AS max_cpu
-FROM TUMBLE(telemetry_raw, message_timestamp, INTERVAL '5 MINUTES')
-GROUP BY thing_name, window_start;
+SHOW SOURCES;
+SHOW MATERIALIZED VIEWS;
+```
 
--- Per-device latest disk usage + status
-CREATE MATERIALIZED VIEW fleet_disk AS
-SELECT
-  thing_name,
-  disk_used_pct,
-  CASE WHEN disk_used_pct >= 80 THEN 'CRITICAL'
-       WHEN disk_used_pct >= 60 THEN 'WARNING'
-       ELSE 'OK'
-  END AS disk_status,
-  message_timestamp AS last_seen
-FROM (
-  SELECT DISTINCT ON (thing_name)
-    thing_name, disk_used_pct, message_timestamp
-  FROM telemetry_raw
-  ORDER BY thing_name, message_timestamp DESC
-);
+Once your edge nodes are running (Session 5), messages will appear in the views within seconds. You can also test now by querying directly:
 
--- Fleet-level summary
-CREATE MATERIALIZED VIEW fleet_disk_summary AS
-SELECT
-  MAX(disk_used_pct)                              AS max_disk_pct,
-  AVG(disk_used_pct)                              AS avg_disk_pct,
-  COUNT(*) FILTER (WHERE disk_used_pct >= 80)     AS critical_count,
-  COUNT(*) FILTER (WHERE disk_used_pct >= 60
-                     AND disk_used_pct < 80)      AS warning_count,
-  COUNT(*)                                        AS device_count
-FROM fleet_disk;
+```sql
+-- Poll for incoming messages
+SELECT sensor, site_id, value, unit FROM sensors_raw_cloud LIMIT 10;
 
--- Fleet pump rate (used in Session 4 freshness comparison)
-CREATE MATERIALIZED VIEW current_pump_rate AS
-SELECT SUM(pump_rate_bbl_per_min) AS total_rate
-FROM telemetry_raw
-WHERE message_timestamp > NOW() - INTERVAL '5 seconds';
+-- Latest reading per sensor per site
+SELECT sensor, site_id, round(value::numeric, 2) AS value, unit
+FROM mv_sensor_fleet_latest
+ORDER BY sensor;
+
+-- 1-minute bucket averages
+SELECT sensor, site_id, round(avg_value::numeric, 2) AS avg_v,
+       sample_count, window_start
+FROM mv_fleet_1min_avg
+ORDER BY sensor, window_start DESC;
 ```
 
 Query the views and observe **sub-100 ms response times**.
 
 !!! info "Why is the MV always fast?"
     RisingWave incrementally maintains each view using a streaming operator graph. On each new row, the aggregation is updated in memory — not recomputed from scratch. Read cost is always a single row lookup regardless of fleet size.
+
+!!! warning "RisingWave function compatibility (v2.8.x)"
+    - `MAX_BY(val, ts)` is not available — use `(array_agg(val ORDER BY ts DESC))[1]`
+    - `TUMBLE(src, proctime(), ...)` is only valid for tables with declared watermarks — use integer epoch-bucketing for sources without watermarks
+    - The Kafka topic must exist before `CREATE SOURCE` — wildcard topics are not supported
 
 ---
 

@@ -39,24 +39,42 @@ aws secretsmanager get-secret-value \
   --secret-id /workshop/{DEPLOYMENT_ID}/msk-credentials \
   --query SecretString --output text | python3 -m json.tool
 
-# Get MSK bootstrap brokers
+# Get MSK bootstrap brokers (SASL/SCRAM endpoint, port 9096)
+MSK_CLUSTER_ARN=$(aws kafka list-clusters --region us-east-1 \
+  --query "ClusterInfoList[?ClusterName=='workshop-{DEPLOYMENT_ID}-msk'].ClusterArn" \
+  --output text)
 aws kafka get-bootstrap-brokers \
-  --cluster-arn $(aws kafka list-clusters-v2 \
-    --filter-by-name "workshop-{DEPLOYMENT_ID}-msk" \
-    --query "ClusterInfoList[0].ClusterArn" --output text) \
-  --query BootstrapBrokerStringSaslScram512 --output text
+  --cluster-arn "$MSK_CLUSTER_ARN" \
+  --region us-east-1 \
+  --query BootstrapBrokerStringSaslScram --output text
 ```
 
 Create a Kubernetes Secret with these values (used by Redpanda Connect and RisingWave):
 
 ```bash
 kubectl create namespace {DEPLOYMENT_ID}
+
+MSK_PASS=$(aws secretsmanager get-secret-value \
+  --secret-id /workshop/{DEPLOYMENT_ID}/msk-credentials \
+  --query SecretString --output text | python3 -c 'import sys,json; print(json.load(sys.stdin)["password"])')
+MSK_BOOTSTRAP=$(aws kafka get-bootstrap-brokers \
+  --cluster-arn "$MSK_CLUSTER_ARN" --region us-east-1 \
+  --query BootstrapBrokerStringSaslScram --output text)
+
 kubectl create secret generic msk-credentials \
   --namespace {DEPLOYMENT_ID} \
-  --from-literal=username=workshop-{DEPLOYMENT_ID} \
-  --from-literal=password=<password-from-above> \
-  --from-literal=bootstrap-servers=<brokers-from-above>
+  --from-literal=MSK_USERNAME=workshop-{DEPLOYMENT_ID} \
+  --from-literal=MSK_PASSWORD="$MSK_PASS" \
+  --from-literal=MSK_BOOTSTRAP_SERVERS="$MSK_BOOTSTRAP"
 ```
+
+!!! warning "MSK auto-create topics is disabled"
+    Create the sensor topics before running the DDL:
+    ```bash
+    # Run from a pod in the cluster (e.g. the kafkatools helper)
+    # or use the AWS CLI kafka-topics wrapper if you have network access.
+    # Topics needed: sensors.raw.sim, sensors.raw.{DEPLOYMENT_ID}-edge-0, etc.
+    ```
 
 **4. Deploy RisingWave operator and instance**
 
@@ -102,12 +120,17 @@ helm upgrade --install rp-connect-timescaledb redpanda/connect \
 
 **7. Bootstrap RisingWave DDL**
 
+RisingWave's PostgreSQL wire protocol is on port **4567** (the HTTP dashboard is 4560):
+
 ```bash
-kubectl port-forward -n {DEPLOYMENT_ID} svc/risingwave 4566:4566 &
-psql -h localhost -p 4566 -U root \
-  -v msk_username=workshop-{DEPLOYMENT_ID} \
-  -v msk_password=<password> \
-  -f risingwave/ddl-cloud.sql
+# Port-forward — keep running in a separate terminal
+kubectl port-forward -n {DEPLOYMENT_ID} svc/risingwave-cloud-frontend 4567:4567 &
+
+# Substitute credentials and apply
+sed -e "s|__MSK_BOOTSTRAP__|$MSK_BOOTSTRAP|g" \
+    -e "s|__MSK_USER__|workshop-{DEPLOYMENT_ID}|g" \
+    -e "s|__MSK_PASS__|$MSK_PASS|g" \
+    risingwave/ddl-cloud.sql | psql -h localhost -p 4567 -U root -d dev
 ```
 
 **8. Wait for all pods**

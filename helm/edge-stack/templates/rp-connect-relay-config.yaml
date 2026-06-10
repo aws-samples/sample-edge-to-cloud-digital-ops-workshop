@@ -13,9 +13,9 @@ data:
     input:
       kafka_franz:
         seed_brokers:
-          - redpanda:9092
+          - {{ include "edge-stack.fullname" . }}-0.{{ include "edge-stack.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:9093
         topics:
-          - ~^sensors\.raw\..*$
+          - sensors.raw.sim
         consumer_group: relay-group-{{ .Values.deploymentId }}
         # Start from the earliest unread offset on first boot, then track commits
         start_from_oldest: true
@@ -47,6 +47,7 @@ data:
           - mechanism: SCRAM-SHA-512
             username: ${MSK_USERNAME:relay}
             password: ${MSK_PASSWORD:""}
-        acks_required: leader
+        acks: all
+        idempotent_write: false
         compression: snappy
         max_in_flight: 64

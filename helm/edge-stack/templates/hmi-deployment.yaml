@@ -31,7 +31,7 @@ spec:
             - name: RISINGWAVE_HOST
               value: {{ .Values.risingwave.serviceName | default "edge-stack-risingwave" | quote }}
             - name: RISINGWAVE_PORT
-              value: "4566"
+              value: "4567"
             - name: TIMESCALE_HOST
               value: "timescaledb-rw"
             - name: TIMESCALE_PORT

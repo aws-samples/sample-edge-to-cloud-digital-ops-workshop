@@ -72,6 +72,16 @@ mkdocs serve
 mkdocs build --strict
 ```
 
+## Exporting for Offline / Email Distribution
+
+MkDocs' default directory-style URLs (`page/index.html`) don't work when opened from the local filesystem — browsers show a directory listing instead of the page. Use `--no-directory-urls` to generate flat `.html` files that work without a server:
+
+```bash
+workshop/.venv/bin/mkdocs build --no-directory-urls && zip -r workshop-site.zip site/
+```
+
+Recipients unzip and open `site/index.html` directly in any browser.
+
 ## CI
 
 PRs that touch `workshop/`, `job-scripts/`, `amplify/custom/participant-stack.ts`, or `mkdocs.yml` trigger `.github/workflows/docs-lint.yml`, which runs:

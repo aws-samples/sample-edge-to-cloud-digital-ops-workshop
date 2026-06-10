@@ -49,7 +49,8 @@ config:
       seed_brokers:
         - "${MSK_BOOTSTRAP_SERVERS}"
       topics:
-        - "sensors.raw.*"
+        - "^sensors\\.raw\\."
+      regexp_topics: true
       consumer_group: timescaledb-sink
       tls:
         enabled: true
@@ -64,7 +65,7 @@ config:
     processors:
       - mapping: |
           root = this
-          root.partition_time = (this.ts_ms / 1000).floor().ts_unix().ts_round("1m").string()
+          root.partition_time = ((this.ts_ms / 60000).floor() * 60).ts_unix().format_timestamp("2006-01-02T15:04:00Z07:00")
 
   # Output: batch-insert into TimescaleDB sensor_readings table
   output:

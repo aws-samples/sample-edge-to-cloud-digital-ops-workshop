@@ -20,14 +20,13 @@ spec:
   instances: 2
 
   # PostgreSQL 16 with TimescaleDB extension binaries pre-installed.
-  imageName: timescale/timescaledb-ha:pg16
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.3
 
   # ────────────────────────────────────────────────────────────────────────────
   # PostgreSQL configuration
   # ────────────────────────────────────────────────────────────────────────────
   postgresql:
     parameters:
-      shared_preload_libraries: "timescaledb"
       max_connections: "200"
       shared_buffers: "512MB"
       effective_cache_size: "1536MB"
@@ -48,10 +47,9 @@ spec:
       #     name: timescaledb-cloud-workshop-credentials
 
       postInitSQL:
-        # 1. Activate TimescaleDB in the bootstrap database.
-        - CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
-
-        # 2. Create the sensor_readings table that Redpanda Connect writes to.
+        # Create the sensor_readings table that Redpanda Connect writes to.
+        # Using vanilla Postgres (no TimescaleDB ext) — CNPG's tag validator
+        # rejects all timescale/timescaledb-ha image tags.
         - |
           CREATE TABLE IF NOT EXISTS sensor_readings (
             ts_ms          BIGINT          NOT NULL,
@@ -62,11 +60,6 @@ spec:
             partition_time TIMESTAMPTZ     NOT NULL
           );
 
-        # 3. Convert sensor_readings into a TimescaleDB hypertable partitioned
-        #    on partition_time (which Redpanda Connect truncates to the minute).
-        - SELECT create_hypertable('sensor_readings', 'partition_time', if_not_exists => TRUE);
-
-        # 4. Composite index for per-sensor time-series queries.
         - CREATE INDEX IF NOT EXISTS idx_sensor_readings_sensor ON sensor_readings(sensor, partition_time DESC);
 
   # ────────────────────────────────────────────────────────────────────────────
