@@ -117,7 +117,7 @@ run aws athena delete-work-group --region "$REGION" \
   --work-group "workshop-${DEPLOYMENT_ID}" --recursive-delete-option 2>/dev/null || true
 
 # ── 10. Delete Secrets Manager secrets ───────────────────────────────────────
-for SECRET in "/workshop/${DEPLOYMENT_ID}/claim-cert" "/workshop/${DEPLOYMENT_ID}/msk-credentials"; do
+for SECRET in "/workshop/${DEPLOYMENT_ID}/claim-cert" "AmazonMSK_workshop-${DEPLOYMENT_ID}"; do
   run aws secretsmanager delete-secret --region "$REGION" \
     --secret-id "$SECRET" \
     --force-delete-without-recovery 2>/dev/null || true

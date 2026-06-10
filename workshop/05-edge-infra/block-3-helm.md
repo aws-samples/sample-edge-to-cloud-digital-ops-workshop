@@ -31,7 +31,7 @@ The WAN relay needs MSK credentials to authenticate to the cloud MSK cluster. Re
 ```bash
 # Get MSK credentials from Secrets Manager
 MSK_CREDS=$(aws secretsmanager get-secret-value \
-  --secret-id /workshop/{DEPLOYMENT_ID}/msk-credentials \
+  --secret-id AmazonMSK_workshop-{DEPLOYMENT_ID} \
   --query SecretString --output text)
 MSK_USER=$(echo "$MSK_CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)['username'])")
 MSK_PASS=$(echo "$MSK_CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")

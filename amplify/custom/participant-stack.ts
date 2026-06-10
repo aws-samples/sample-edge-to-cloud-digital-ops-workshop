@@ -58,6 +58,12 @@ import {
   CfnWorkGroup,
 } from "aws-cdk-lib/aws-athena";
 import {
+  AwsCustomResource,
+  AwsSdkCall,
+  PhysicalResourceId,
+  AwsCustomResourcePolicy,
+} from "aws-cdk-lib/custom-resources";
+import {
   CfnDatabase,
   CfnTable,
 } from "aws-cdk-lib/aws-glue";
@@ -1047,9 +1053,11 @@ systemctl start sensor-sim
       resources: [mskCluster.attrArn],
     }));
 
-    // MSK SASL credentials stored in Secrets Manager; Lambda reads at runtime
+    // MSK SASL credentials stored in Secrets Manager; Lambda reads at runtime.
+    // Secret name must be prefixed "AmazonMSK_" for MSK to accept BatchAssociateScramSecret.
+    // The /workshop/{id}/msk-credentials alias is added as a second name in the retrieval docs.
     const mskCredSecret = new Secret(this, "MskCredSecret", {
-      secretName: `/workshop/${deploymentId}/msk-credentials`,
+      secretName: `AmazonMSK_workshop-${deploymentId}`,
       description: `MSK SASL/SCRAM credentials for ${deploymentId}`,
       removalPolicy: RemovalPolicy.DESTROY,
       generateSecretString: {
@@ -1059,6 +1067,33 @@ systemctl start sensor-sim
       },
     });
     mskCredSecret.grantRead(mskBridgeRole);
+
+    // Register the SCRAM secret with MSK so the broker accepts it for authentication.
+    // Must run after both the cluster and the secret exist.
+    const mskAssociateScram = new AwsCustomResource(this, "MskAssociateScram", {
+      onCreate: {
+        service: "Kafka",
+        action: "batchAssociateScramSecret",
+        parameters: {
+          ClusterArn: mskCluster.attrArn,
+          SecretArnList: [mskCredSecret.secretArn],
+        },
+        physicalResourceId: PhysicalResourceId.of("MskScramAssoc"),
+      } as AwsSdkCall,
+      onDelete: {
+        service: "Kafka",
+        action: "batchDisassociateScramSecret",
+        parameters: {
+          ClusterArn: mskCluster.attrArn,
+          SecretArnList: [mskCredSecret.secretArn],
+        },
+      } as AwsSdkCall,
+      policy: AwsCustomResourcePolicy.fromSdkCalls({
+        resources: [mskCluster.attrArn, mskCredSecret.secretArn, `${mskCredSecret.secretArn}-*`],
+      }),
+    });
+    mskAssociateScram.node.addDependency(mskCluster);
+    mskAssociateScram.node.addDependency(mskCredSecret);
 
     const mskBridgeFn = new LambdaFn(this, "MskBridge", {
       functionName: `workshop-${deploymentId}-msk-bridge`,
