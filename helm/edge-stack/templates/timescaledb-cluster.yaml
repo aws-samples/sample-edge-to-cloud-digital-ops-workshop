@@ -1,4 +1,4 @@
-{{- if .Values.cnpg.enabled }}
+{{- if or .Values.timescaledb.enabled .Values.cnpg.enabled }}
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -33,6 +33,7 @@ spec:
             partition_time TIMESTAMPTZ     NOT NULL
           );
         - CREATE INDEX IF NOT EXISTS idx_sr_sensor ON sensor_readings(sensor, partition_time DESC);
+        - "GRANT SELECT, INSERT, UPDATE ON sensor_readings TO workshop;"
   storage:
     size: 10Gi
   resources:

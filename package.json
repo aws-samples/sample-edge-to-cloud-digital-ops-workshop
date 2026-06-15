@@ -9,7 +9,10 @@
     "sandbox:delete": "npx ampx sandbox delete --identifier ${WORKSHOP_DEPLOYMENT_ID:-ws-slot00} --yes",
     "sandbox:delete-all": "bash scripts/sandbox-delete-all.sh",
     "pipeline-deploy": "npx ampx pipeline-deploy",
-    "test": "node scripts/smoke-test.mjs"
+    "test": "node scripts/smoke-test.mjs",
+    "e2e": "pnpm --filter edge-digital-ops-e2e test",
+    "e2e:no-deploy": "pnpm --filter edge-digital-ops-e2e test -- --skip-deploy",
+    "e2e:no-teardown": "pnpm --filter edge-digital-ops-e2e test -- --skip-teardown"
   },
   "devDependencies": {
     "@aws-amplify/backend": "^1.23.0",
