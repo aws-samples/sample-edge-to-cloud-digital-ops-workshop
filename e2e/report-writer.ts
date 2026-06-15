@@ -10,7 +10,7 @@
  */
 
 import { writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 
 // ── Types (mirrored from runner.ts — keep in sync) ────────────────────────────
 
@@ -80,13 +80,15 @@ function details(summary: string, body: string): string {
   return `<details>\n<summary>${summary}</summary>\n\n${body}\n\n</details>\n`;
 }
 
-function screenshotImg(b64: string, alt: string): string {
-  return `<img alt="${alt}" src="data:image/png;base64,${b64}" style="max-width:100%;border:1px solid #ccc;border-radius:4px;" />\n`;
+function saveScreenshot(b64: string, filename: string, reportDir: string): string {
+  const pngPath = join(reportDir, filename);
+  writeFileSync(pngPath, Buffer.from(b64, "base64"));
+  return basename(filename);
 }
 
 // ── Phase-level section writers ───────────────────────────────────────────────
 
-function renderCheck(c: CheckResult): string {
+function renderCheck(c: CheckResult, reportDir: string, slug: string): string {
   const lines: string[] = [];
   const dataStr = c.data
     ? Object.entries(c.data).map(([k, v]) => `\`${k}\`=\`${v}\``).join(" · ")
@@ -101,18 +103,15 @@ function renderCheck(c: CheckResult): string {
 
   if (c.evidence) {
     for (const [label, value] of Object.entries(c.evidence)) {
-      if (label === "screenshot") {
+      if (label === "screenshot" || label === "screenshot_dashboard") {
+        const suffix = label === "screenshot_dashboard" ? "-dashboard" : "";
+        const filename = `${slug}${suffix}.png`;
+        const rel = saveScreenshot(value, filename, reportDir);
+        const caption = label === "screenshot_dashboard" ? "HMI — Digital Operations dashboard" : "HMI — Home page";
         lines.push("");
-        lines.push(details(
-          "🖥 Screenshot",
-          screenshotImg(value, c.name),
-        ));
-      } else if (label === "screenshot_dashboard") {
+        lines.push(`**${caption}**`);
         lines.push("");
-        lines.push(details(
-          "🖥 Screenshot — Dashboard page",
-          screenshotImg(value, "Dashboard"),
-        ));
+        lines.push(`![${caption}](./${rel})`);
       } else {
         // Try to pretty-print JSON; fall back to plain text block
         let rendered: string;
@@ -131,7 +130,7 @@ function renderCheck(c: CheckResult): string {
   return lines.join("\n");
 }
 
-function renderPhase(phase: PhaseResult, checks: CheckResult[]): string {
+function renderPhase(phase: PhaseResult, checks: CheckResult[], reportDir: string, slug: string): string {
   const lines: string[] = [];
   const statusIcon = phase.checksFailed > 0 ? "❌" : "✅";
 
@@ -145,7 +144,7 @@ function renderPhase(phase: PhaseResult, checks: CheckResult[]): string {
   lines.push("");
 
   for (const c of checks) {
-    lines.push(renderCheck(c));
+    lines.push(renderCheck(c, reportDir, slug));
   }
 
   return lines.join("\n");
@@ -184,17 +183,18 @@ export function writeMarkdownReport(report: RunReport, reportDir: string): strin
   lines.push("");
 
   // ── Per-phase detail ───────────────────────────────────────────────────────
+  mkdirSync(reportDir, { recursive: true });
+  const slug = `run-${report.deploymentId}-${report.startedAt.slice(0, 19).replace(/:/g, "-")}`;
+
   for (const phase of report.phases) {
     const phaseChecks = report.checks.filter((c) => c.phase === phase.name);
-    lines.push(renderPhase(phase, phaseChecks));
+    lines.push(renderPhase(phase, phaseChecks, reportDir, slug));
     lines.push("---");
     lines.push("");
   }
 
   const md = lines.join("\n");
-  mkdirSync(reportDir, { recursive: true });
-  const slug = report.startedAt.slice(0, 19).replace(/:/g, "-");
-  const mdPath = join(reportDir, `run-${report.deploymentId}-${slug}.md`);
+  const mdPath = join(reportDir, `${slug}.md`);
   writeFileSync(mdPath, md);
   return mdPath;
 }

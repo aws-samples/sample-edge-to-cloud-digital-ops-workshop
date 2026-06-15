@@ -1398,9 +1398,9 @@ try {
     await page.waitForTimeout(4_000);
     const homePng = await page.screenshot({ fullPage: true });
     capture("screenshot", homePng.toString("base64"));
-    // Also try the digital-ops route if it exists at a sub-path
+    // Also capture the /ops (Digital Operations) dashboard page
     try {
-      await page.goto("http://localhost:30080/digital-ops", { waitUntil: "domcontentloaded", timeout: 10_000 });
+      await page.goto("http://localhost:30080/ops", { waitUntil: "domcontentloaded", timeout: 10_000 });
       await page.waitForTimeout(3_000);
       const dashPng = await page.screenshot({ fullPage: true });
       capture("screenshot_dashboard", dashPng.toString("base64"));
