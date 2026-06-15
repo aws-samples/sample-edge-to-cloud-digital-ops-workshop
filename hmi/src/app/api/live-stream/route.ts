@@ -62,6 +62,9 @@ export async function GET(): Promise<Response> {
       await client.query(
         `CREATE SUBSCRIPTION IF NOT EXISTS ${subName} FROM mv_sensor_latest WITH (retention = '1D')`
       );
+      // Drop cursor first — it may persist from a prior connection on the same RisingWave
+      // instance, and DECLARE fails if the cursor name already exists.
+      await client.query(`CLOSE ${curName}`).catch(() => {});
       await client.query(
         `DECLARE ${curName} SUBSCRIPTION CURSOR FOR ${subName}`
       );

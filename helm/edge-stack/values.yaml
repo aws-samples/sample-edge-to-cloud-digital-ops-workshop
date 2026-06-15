@@ -201,6 +201,9 @@ risingwave:
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CloudNativePG operator
+# Set cnpg.enabled=false when the operator is pre-installed separately (so the
+# CRDs already exist) — but set timescaledb.enabled=true to still create the
+# TimescaleDB Cluster CR and the companion DSN secret job.
 # ──────────────────────────────────────────────────────────────────────────────
 cnpg:
   enabled: true
@@ -212,6 +215,13 @@ cnpg:
     limits:
       cpu: 200m
       memory: 256Mi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# TimescaleDB Cluster CR (requires CNPG CRDs — either via cnpg.enabled or
+# a separately pre-installed CNPG operator)
+# ──────────────────────────────────────────────────────────────────────────────
+timescaledb:
+  enabled: true
 
 # ──────────────────────────────────────────────────────────────────────────────
 # MinIO — standalone single-node

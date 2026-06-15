@@ -34,6 +34,9 @@ import {
   Secret,
 } from "aws-cdk-lib/aws-secretsmanager";
 import {
+  Key as KmsKey,
+} from "aws-cdk-lib/aws-kms";
+import {
   CfnCluster as MskCluster,
 } from "aws-cdk-lib/aws-msk";
 import {
@@ -1056,9 +1059,16 @@ systemctl start sensor-sim
     // MSK SASL credentials stored in Secrets Manager; Lambda reads at runtime.
     // Secret name must be prefixed "AmazonMSK_" for MSK to accept BatchAssociateScramSecret.
     // The /workshop/{id}/msk-credentials alias is added as a second name in the retrieval docs.
+    // MSK requires SCRAM secrets to be encrypted with a customer-managed KMS key
+    // (not the default AWS-managed key). The workshop CMK is created once and shared.
+    const mskScramKey = KmsKey.fromLookup(this, "MskScramKey", {
+      aliasName: "alias/workshop-msk-scram",
+    });
+
     const mskCredSecret = new Secret(this, "MskCredSecret", {
       secretName: `AmazonMSK_workshop-${deploymentId}`,
       description: `MSK SASL/SCRAM credentials for ${deploymentId}`,
+      encryptionKey: mskScramKey,
       removalPolicy: RemovalPolicy.DESTROY,
       generateSecretString: {
         secretStringTemplate: JSON.stringify({ username: `workshop-${deploymentId}` }),
