@@ -775,6 +775,7 @@ aws ssm get-parameter --name /workshop/{DEPLOYMENT_ID}/kubeconfig \
 export KUBECONFIG=~/.kube/edge-config
 
 # Deploy edge stack (all components in one Helm umbrella chart)
+helm dependency update helm/edge-stack
 helm upgrade --install edge-stack ./helm/edge-stack \
   --namespace edge --create-namespace \
   -f helm/edge-stack-values.yaml \

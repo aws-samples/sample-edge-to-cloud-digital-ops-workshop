@@ -56,4 +56,9 @@ for i in "${!PIDS[@]}"; do
   fi
 done
 
+if [[ $FAILED -eq 0 ]]; then
+  echo ">>> All sandboxes deployed. Generating deployment summary..."
+  bash "$(dirname "$0")/deployment-summary.sh" "${DEPLOYMENT_IDS[@]}"
+fi
+
 exit $FAILED

@@ -49,6 +49,14 @@ To deploy a single slot for testing:
 WORKSHOP_SLOT_COUNT=1 npx ampx sandbox --once
 ```
 
+After all sandboxes finish, `scripts/deployment-summary.sh` runs automatically and writes **`DEPLOYMENT_SUMMARY.md`** in the repo root. It lists every slot's Deployment ID, S3 bucket, MSK ARN, AppSync endpoints, and secret ARNs, plus ready-to-run commands for smoke tests, user creation, and teardown.
+
+To regenerate it manually at any time:
+
+```bash
+scripts/deployment-summary.sh ws-slot00 ws-slot01 ws-slot02
+```
+
 ### Smoke tests
 
 ```bash

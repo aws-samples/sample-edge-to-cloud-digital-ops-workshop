@@ -99,6 +99,9 @@ import {
 import {
   AthenaClient,
   GetWorkGroupCommand,
+  StartQueryExecutionCommand,
+  GetQueryExecutionCommand,
+  GetQueryResultsCommand,
 } from "@aws-sdk/client-athena";
 import pg from "pg";
 
@@ -517,6 +520,7 @@ let thingGroupArn = "";
 let mskArn: string | undefined;
 let mskBootstrap = "";
 let mskCreds: { username: string; password: string } = { username: "", password: "" };
+let cloudKcPath = "";
 
 try {
   console.log("");
@@ -915,7 +919,7 @@ try {
   if (phaseEnabled("Phase 5")) {
   beginPhase("Phase 5 — Session 4: Analytics (cloud EKS)");
 
-  const cloudKcPath = join(tmpdir(), `e2e-cloud-kc-${Date.now()}.yaml`);
+  cloudKcPath = join(tmpdir(), `e2e-cloud-kc-${Date.now()}.yaml`);
   shell(
     `aws eks update-kubeconfig --region ${REGION} --name workshop-eks --kubeconfig ${cloudKcPath}`
   );
@@ -1027,14 +1031,15 @@ try {
     // RisingWave's CREATE SOURCE fails if the topic is absent, so we pre-create it.
     // MSK is only accessible from within the cloud VPC, so we run a short-lived
     // Python pod inside EKS (same VPC) that installs kafka-python-ng and creates the topic.
-    log("Creating MSK topic sensors.raw.sim via EKS pod (idempotent)...");
+    log("Creating MSK topics (sensors.raw.sim, raw.telemetry) via EKS pod (idempotent)...");
     const mskTopicScript =
       `import subprocess,sys; subprocess.check_call([sys.executable,'-m','pip','install','-q','--root-user-action=ignore','kafka-python-ng'])\n` +
       `from kafka.admin import KafkaAdminClient,NewTopic\n` +
       `import ssl\n` +
       `a=KafkaAdminClient(bootstrap_servers=${JSON.stringify(mskBootstrap)},security_protocol='SASL_SSL',sasl_mechanism='SCRAM-SHA-512',sasl_plain_username=${JSON.stringify(`workshop-${DEPLOYMENT_ID}`)},sasl_plain_password=${JSON.stringify(mskCreds.password)},ssl_context=ssl.create_default_context())\n` +
       `e=a.list_topics()\n` +
-      `[a.create_topics([NewTopic('sensors.raw.sim',4,2)]) or print('Created') if 'sensors.raw.sim' not in e else print('Exists')]\n` +
+      `[a.create_topics([NewTopic('sensors.raw.sim',4,2)]) or print('Created sensors.raw.sim') if 'sensors.raw.sim' not in e else print('Exists sensors.raw.sim')]\n` +
+      `[a.create_topics([NewTopic('raw.telemetry',4,2)]) or print('Created raw.telemetry') if 'raw.telemetry' not in e else print('Exists raw.telemetry')]\n` +
       `a.close()`;
     try {
       shellOutput(
@@ -1093,6 +1098,167 @@ try {
       tunnels.splice(tunnels.indexOf(rwPfTunnel), 1);
     }
   }
+
+    // ── Data freshness comparison: Datalake / TimescaleDB / RisingWave ─────────
+    // All three tiers query the same source data: IoT node telemetry (cpu_pct,
+    // mem_used_pct) arriving via IoT Core → MSK raw.telemetry.
+    // Athena reads S3 directly from the IoT S3 rule; TimescaleDB and RisingWave
+    // consume raw.telemetry via rp-connect and DDL respectively.
+    //
+    // Expected freshness ladder (per workshop docs):
+    //   RisingWave MV  ~100–400 ms
+    //   TimescaleDB    ~100 ms–3 s
+    //   Datalake/Athena ~30–90 s
+
+    log("Running data freshness comparison: Datalake / TimescaleDB / RisingWave...");
+
+    // ── 1. Athena (cloud datalake) ───────────────────────────────────────────
+    let athenaFreshnessMs: number | undefined;
+    await check("Cloud datalake (Athena) freshness — free compute/mem aggregation", async () => {
+      const t0 = Date.now();
+      const startResp = await athena.send(new StartQueryExecutionCommand({
+        QueryString: `
+          SELECT
+            AVG(100.0 - cpu_pct)      AS avg_free_cpu_pct,
+            AVG(100.0 - mem_used_pct) AS avg_free_mem_pct,
+            MAX(message_timestamp)    AS latest_msg_ts_ms
+          FROM "workshop_${DEPLOYMENT_ID.replace(/-/g, "_")}"."telemetry"
+        `,
+        WorkGroup: `workshop-${DEPLOYMENT_ID}`,
+      }));
+      const execId = startResp.QueryExecutionId!;
+      const athenaDeadline = Date.now() + 120_000;
+      let state = "RUNNING";
+      while (Date.now() < athenaDeadline && (state === "RUNNING" || state === "QUEUED")) {
+        await sleep(2_000);
+        const execResp = await athena.send(new GetQueryExecutionCommand({ QueryExecutionId: execId }));
+        state = execResp.QueryExecution?.Status?.State ?? "FAILED";
+      }
+      if (state !== "SUCCEEDED") throw new Error(`Athena query ${execId} ended with state: ${state}`);
+      const resultsResp = await athena.send(new GetQueryResultsCommand({ QueryExecutionId: execId }));
+      const row = resultsResp.ResultSet?.Rows?.[1]?.Data; // row 0 is the header
+      const freeCpu = parseFloat(row?.[0]?.VarCharValue ?? "NaN");
+      const freeMem = parseFloat(row?.[1]?.VarCharValue ?? "NaN");
+      const latestTs = parseFloat(row?.[2]?.VarCharValue ?? "0");
+      const athenaQueryMs = Date.now() - t0;
+      athenaFreshnessMs = Date.now() - latestTs;
+      capture("Athena freshness result", JSON.stringify({ freeCpu, freeMem, latestTs, freshnessMs: athenaFreshnessMs }, null, 2));
+      return { freshnessMs: athenaFreshnessMs, avgFreeCpuPct: freeCpu, avgFreeMemPct: freeMem, queryMs: athenaQueryMs };
+    }, { data: (r) => ({ freshnessMs: r.freshnessMs, avgFreeCpuPct: r.avgFreeCpuPct, avgFreeMemPct: r.avgFreeMemPct, queryMs: r.queryMs }) });
+
+    // ── 2. Cloud RisingWave ──────────────────────────────────────────────────
+    let rwCloudFreshnessMs: number | undefined;
+    if (cloudKcPath) {
+      log("Port-forwarding to cloud RisingWave for freshness comparison...");
+      const rwCloudPf2 = spawn(
+        "kubectl",
+        ["--kubeconfig", cloudKcPath, "port-forward", "-n", DEPLOYMENT_ID,
+         "svc/risingwave-cloud-frontend", "14567:4567"],
+        { stdio: "ignore" }
+      );
+      const rwCloudTunnel2 = { localPort: 14567, proc: rwCloudPf2, close: () => { try { rwCloudPf2.kill(); } catch { /* */ } } };
+      tunnels.push(rwCloudTunnel2);
+      await sleep(6_000);
+
+      let rwCloudClient2: pg.Client | undefined;
+      try {
+        rwCloudClient2 = new pg.Client({ host: "localhost", port: 14567, user: "root", database: "dev", password: "" });
+        await rwCloudClient2.connect();
+        await check("Cloud RisingWave freshness — fleet sensor MAX(ts_ms)", async () => {
+          const { rows, durationMs } = await pgQuery(
+            rwCloudClient2!,
+            `SELECT
+               AVG(CASE WHEN sensor = 'cpu_pct'      THEN 100.0 - value END) AS avg_free_cpu_pct,
+               AVG(CASE WHEN sensor = 'mem_used_pct' THEN 100.0 - value END) AS avg_free_mem_pct,
+               MAX(ts_ms)                                                     AS latest_ts_ms
+             FROM mv_sensor_fleet_latest`
+          );
+          const latestTs = Number(rows[0]?.latest_ts_ms ?? 0);
+          rwCloudFreshnessMs = Date.now() - latestTs;
+          const freeCpu = rows[0]?.avg_free_cpu_pct != null ? parseFloat(rows[0].avg_free_cpu_pct) : null;
+          const freeMem = rows[0]?.avg_free_mem_pct != null ? parseFloat(rows[0].avg_free_mem_pct) : null;
+          capture("Cloud RisingWave freshness result", JSON.stringify({ freeCpu, freeMem, latestTs, freshnessMs: rwCloudFreshnessMs }, null, 2));
+          return { freshnessMs: rwCloudFreshnessMs, avgFreeCpuPct: freeCpu, avgFreeMemPct: freeMem, queryMs: durationMs };
+        }, { data: (r) => ({ freshnessMs: r.freshnessMs, avgFreeCpuPct: r.avgFreeCpuPct, avgFreeMemPct: r.avgFreeMemPct, queryMs: r.queryMs }) });
+      } finally {
+        await rwCloudClient2?.end().catch(() => {});
+        rwCloudTunnel2.close();
+        tunnels.splice(tunnels.indexOf(rwCloudTunnel2), 1);
+      }
+    }
+
+    // ── 3. Cloud TimescaleDB ─────────────────────────────────────────────────
+    let tsdbCloudFreshnessMs: number | undefined;
+    if (cloudKcPath) {
+      log("Port-forwarding to cloud TimescaleDB for freshness comparison...");
+      let tsdbPassword = "";
+      try {
+        const tsdbSecret = shellOutput(
+          `kubectl --kubeconfig ${cloudKcPath} get secret timescaledb-cloud-app -n ${DEPLOYMENT_ID} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d`
+        );
+        tsdbPassword = tsdbSecret.trim();
+      } catch { /* if secret is missing, connect will fail and the check will report it */ }
+
+      const tsdbCloudPf = spawn(
+        "kubectl",
+        ["--kubeconfig", cloudKcPath, "port-forward", "-n", DEPLOYMENT_ID,
+         "svc/timescaledb-cloud-rw", "15432:5432"],
+        { stdio: "ignore" }
+      );
+      const tsdbCloudTunnel = { localPort: 15432, proc: tsdbCloudPf, close: () => { try { tsdbCloudPf.kill(); } catch { /* */ } } };
+      tunnels.push(tsdbCloudTunnel);
+      await sleep(4_000);
+
+      let tsdbCloudClient: pg.Client | undefined;
+      try {
+        tsdbCloudClient = new pg.Client({ host: "localhost", port: 15432, user: "workshop", database: "edge", password: tsdbPassword });
+        await tsdbCloudClient.connect();
+        await check("Cloud TimescaleDB freshness — sensor_readings MAX(ts_ms)", async () => {
+          const { rows, durationMs } = await pgQuery(
+            tsdbCloudClient!,
+            `SELECT
+               AVG(CASE WHEN sensor = 'cpu_pct'      THEN 100.0 - value END) AS avg_free_cpu_pct,
+               AVG(CASE WHEN sensor = 'mem_used_pct' THEN 100.0 - value END) AS avg_free_mem_pct,
+               MAX(ts_ms)                                                     AS latest_ts_ms
+             FROM sensor_readings`
+          );
+          const latestTs = Number(rows[0]?.latest_ts_ms ?? 0);
+          tsdbCloudFreshnessMs = Date.now() - latestTs;
+          const freeCpu = rows[0]?.avg_free_cpu_pct != null ? parseFloat(rows[0].avg_free_cpu_pct) : null;
+          const freeMem = rows[0]?.avg_free_mem_pct != null ? parseFloat(rows[0].avg_free_mem_pct) : null;
+          capture("Cloud TimescaleDB freshness result", JSON.stringify({ freeCpu, freeMem, latestTs, freshnessMs: tsdbCloudFreshnessMs }, null, 2));
+          return { freshnessMs: tsdbCloudFreshnessMs, avgFreeCpuPct: freeCpu, avgFreeMemPct: freeMem, queryMs: durationMs };
+        }, { data: (r) => ({ freshnessMs: r.freshnessMs, avgFreeCpuPct: r.avgFreeCpuPct, avgFreeMemPct: r.avgFreeMemPct, queryMs: r.queryMs }) });
+      } finally {
+        await tsdbCloudClient?.end().catch(() => {});
+        tsdbCloudTunnel.close();
+        tunnels.splice(tunnels.indexOf(tsdbCloudTunnel), 1);
+      }
+    }
+
+    // ── 4. Freshness comparison summary ─────────────────────────────────────
+    await check("Freshness ladder: RisingWave < TimescaleDB < Datalake", async () => {
+      const summary = {
+        risingwave_freshness_ms:      rwCloudFreshnessMs   ?? null,
+        timescaledb_freshness_ms:     tsdbCloudFreshnessMs ?? null,
+        datalake_athena_freshness_ms: athenaFreshnessMs    ?? null,
+      };
+      capture("Data freshness comparison (all tiers)", JSON.stringify(summary, null, 2));
+      if (
+        rwCloudFreshnessMs != null &&
+        tsdbCloudFreshnessMs != null &&
+        athenaFreshnessMs != null
+      ) {
+        if (rwCloudFreshnessMs > athenaFreshnessMs) {
+          console.warn(`  ⚠  Freshness inversion: RisingWave (${rwCloudFreshnessMs}ms) > Athena (${athenaFreshnessMs}ms)`);
+        }
+      }
+      return summary;
+    }, { data: (r) => ({
+      rw_ms:   r.risingwave_freshness_ms       ?? -1,
+      tsdb_ms: r.timescaledb_freshness_ms      ?? -1,
+      s3_ms:   r.datalake_athena_freshness_ms  ?? -1,
+    }) });
   } // end Phase 5
 
   // ── Phase 6: Session 5 — Edge Infrastructure ──────────────────────────────
