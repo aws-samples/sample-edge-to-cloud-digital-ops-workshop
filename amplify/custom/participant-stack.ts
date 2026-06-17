@@ -52,6 +52,7 @@ import {
 } from "aws-cdk-lib/aws-lambda";
 import {
   CfnTopicRule,
+  CfnTopicRuleDestination,
 } from "aws-cdk-lib/aws-iot";
 import {
   CfnApi as CfnAppSyncApi,
@@ -1032,33 +1033,7 @@ systemctl start sensor-sim
       },
     });
 
-    // ── IoT Rule → MSK (Session 4 — raw telemetry to Kafka) ─────────────────
-    // A second rule on the same topic feeds MSK alongside the existing S3 rule.
-    // IoT's Kafka action uses a VPC destination; this approach uses a Lambda bridge
-    // to keep setup simple (no VPC destination confirmation flow).
-    const mskBridgeRole = new Role(this, "MskBridgeRole", {
-      assumedBy: new ServicePrincipal("lambda.amazonaws.com"),
-      managedPolicies: [
-        ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaBasicExecutionRole"),
-        ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaVPCAccessExecutionRole"),
-      ],
-    });
-
-    mskBridgeRole.addToPolicy(new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: ["kafka-cluster:Connect", "kafka-cluster:WriteData", "kafka-cluster:DescribeTopic"],
-      resources: [`${mskCluster.attrArn}`, `${mskCluster.attrArn}/topic/raw.telemetry`],
-    }));
-
-    mskBridgeRole.addToPolicy(new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: ["kafka:GetBootstrapBrokers", "kafka:DescribeCluster"],
-      resources: [mskCluster.attrArn],
-    }));
-
-    // MSK SASL credentials stored in Secrets Manager; Lambda reads at runtime.
-    // Secret name must be prefixed "AmazonMSK_" for MSK to accept BatchAssociateScramSecret.
-    // The /workshop/{id}/msk-credentials alias is added as a second name in the retrieval docs.
+    // ── MSK SASL/SCRAM credentials ────────────────────────────────────────────
     // MSK requires SCRAM secrets to be encrypted with a customer-managed KMS key
     // (not the default AWS-managed key). The workshop CMK is created once and shared.
     const mskScramKey = KmsKey.fromLookup(this, "MskScramKey", {
@@ -1076,7 +1051,6 @@ systemctl start sensor-sim
         excludePunctuation: true,
       },
     });
-    mskCredSecret.grantRead(mskBridgeRole);
 
     // Register the SCRAM secret with MSK so the broker accepts it for authentication.
     // Must run after both the cluster and the secret exist.
@@ -1105,28 +1079,69 @@ systemctl start sensor-sim
     mskAssociateScram.node.addDependency(mskCluster);
     mskAssociateScram.node.addDependency(mskCredSecret);
 
-    const mskBridgeFn = new LambdaFn(this, "MskBridge", {
-      functionName: `workshop-${deploymentId}-msk-bridge`,
-      runtime: Runtime.NODEJS_22_X,
-      architecture: Architecture.ARM_64,
-      // ESM handler: amplify/lambda/msk-bridge/ — install deps before deploy (pnpm install)
-      handler: "index.handler",
-      role: mskBridgeRole,
-      timeout: Duration.seconds(10),
-      vpc: cloudVpc,
-      vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
-      securityGroups: [mskSg],
-      environment: {
-        MSK_CLUSTER_ARN: mskCluster.attrArn,
-        MSK_CRED_SECRET: mskCredSecret.secretName,
-        REGION: this.region,
-      },
-      code: Code.fromAsset("amplify/lambda/msk-bridge"),
+    // ── IoT Rule → MSK (Session 4 — native Apache Kafka rule action) ─────────
+    // A second rule on the same topic feeds MSK via the native Kafka action with
+    // a VPC destination pointing at the MSK cluster subnets.
+    const iotKafkaVpcRole = new Role(this, "IotKafkaVpcRole", {
+      assumedBy: new ServicePrincipal("iot.amazonaws.com"),
     });
 
-    mskBridgeFn.addPermission("AllowIoTInvokeMsk", {
-      principal: new ServicePrincipal("iot.amazonaws.com"),
+    iotKafkaVpcRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: [
+        "ec2:CreateNetworkInterface", "ec2:DescribeNetworkInterfaces",
+        "ec2:CreateNetworkInterfacePermission", "ec2:DeleteNetworkInterface",
+        "ec2:DescribeSubnets", "ec2:DescribeVpcs",
+        "ec2:DescribeVpcAttribute", "ec2:DescribeSecurityGroups",
+      ],
+      resources: ["*"],
+    }));
+
+    iotKafkaVpcRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"],
+      resources: [mskCredSecret.secretArn],
+    }));
+
+    iotKafkaVpcRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["kms:Decrypt"],
+      resources: [mskScramKey.keyArn],
+    }));
+
+    const kafkaVpcDest = new CfnTopicRuleDestination(this, "KafkaVpcDest", {
+      vpcProperties: {
+        vpcId: cloudVpc.vpcId,
+        subnetIds: cloudVpc.selectSubnets({ subnetType: SubnetType.PRIVATE_WITH_EGRESS }).subnetIds.slice(0, 2),
+        securityGroups: [mskSg.securityGroupId],
+        roleArn: iotKafkaVpcRole.roleArn,
+      },
     });
+    // AWS::MSK::Cluster only exposes Arn and CurrentVersion via Fn::GetAtt.
+    // Bootstrap broker addresses require a separate SDK call via custom resource.
+    const getBootstrapBrokers = new AwsCustomResource(this, "GetMskBootstrapBrokers", {
+      onCreate: {
+        service: "Kafka",
+        action: "getBootstrapBrokers",
+        parameters: { ClusterArn: mskCluster.attrArn },
+        physicalResourceId: PhysicalResourceId.of(`MskBootstrapBrokers-${deploymentId}`),
+      } as AwsSdkCall,
+      onUpdate: {
+        service: "Kafka",
+        action: "getBootstrapBrokers",
+        parameters: { ClusterArn: mskCluster.attrArn },
+        physicalResourceId: PhysicalResourceId.of(`MskBootstrapBrokers-${deploymentId}`),
+      } as AwsSdkCall,
+      policy: AwsCustomResourcePolicy.fromSdkCalls({
+        resources: [mskCluster.attrArn],
+      }),
+    });
+    getBootstrapBrokers.node.addDependency(mskCluster);
+    const bootstrapBrokersSaslScram = getBootstrapBrokers.getResponseField("BootstrapBrokersSaslScram");
+
+    // Must wait for the role's policy to be attached before IoT can validate permissions
+    kafkaVpcDest.node.addDependency(iotKafkaVpcRole);
+    kafkaVpcDest.node.addDependency(mskCluster);
 
     new CfnTopicRule(this, "IotToMskRule", {
       ruleName: `workshop_${deploymentId.replace(/-/g, "_")}_to_msk`,
@@ -1134,17 +1149,23 @@ systemctl start sensor-sim
         sql: `SELECT *, topic() AS mqtt_topic, timestamp() AS ingest_ts FROM 'edge/${deploymentId}/+/telemetry'`,
         actions: [
           {
-            lambda: {
-              functionArn: mskBridgeFn.functionArn,
+            kafka: {
+              destinationArn: kafkaVpcDest.attrArn,
+              topic: "raw.telemetry",
+              clientProperties: {
+                "bootstrap.servers": bootstrapBrokersSaslScram,
+                "security.protocol": "SASL_SSL",
+                "sasl.mechanism": "SCRAM-SHA-512",
+                // \${...} produces literal ${...} for IoT substitution templates at rule-fire time
+                "sasl.jaas.config": `org.apache.kafka.common.security.scram.ScramLoginModule required username="\${get_secret('${mskCredSecret.secretName}', 'SecretString', 'username', 'AWS', '${this.region}')}" password="\${get_secret('${mskCredSecret.secretName}', 'SecretString', 'password', 'AWS', '${this.region}')}";`,
+                "acks": "1",
+              },
             },
           },
         ],
         ruleDisabled: false,
       },
     });
-
-    // Allow MSK security group ingress from the Lambda (shares mskSg, so already open)
-    mskSg.addIngressRule(Peer.ipv4(cloudVpc.vpcCidrBlock), Port.tcp(9096), "MSK SASL/SCRAM from VPC (Lambda bridge)");
 
     // ── Outputs ──────────────────────────────────────────────────────────────
     new CfnOutput(this, "DeploymentId", {

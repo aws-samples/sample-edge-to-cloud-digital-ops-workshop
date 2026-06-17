@@ -38,14 +38,26 @@ LOCAL_BINARY_CACHE="$HOME/.cache/workshop/aws-iot-device-client"
 S3_BUCKET="workshop-${DEPLOYMENT_ID}"
 
 if [[ ! -f "$LOCAL_BINARY_CACHE" ]]; then
-  echo ">>> Building AWS IoT Device Client using the official GHCR build image (one-time, ~8 min)…"
+  echo ">>> Building AWS IoT Device Client using ECR Public amazonlinux image (one-time, ~8 min)…"
   DC_SRC=$(mktemp -d)
   git clone --depth 1 --branch v1.10.1 \
     https://github.com/awslabs/aws-iot-device-client "$DC_SRC"
-  docker pull ghcr.io/awslabs/aws-iot-device-client/amazonlinux:latest
+  # Use public.ecr.aws/amazonlinux/amazonlinux instead of the GHCR build image.
+  # Run cmake install + build steps directly inside the container.
   docker run --rm \
     -v "$DC_SRC:/root/aws-iot-device-client" \
-    ghcr.io/awslabs/aws-iot-device-client/amazonlinux:latest
+    public.ecr.aws/amazonlinux/amazonlinux:2 \
+    bash -c "
+      yum install -y cmake3 gcc gcc-c++ openssl-devel \
+        libcurl-devel git make zip unzip tar && \
+      ln -sf /usr/bin/cmake3 /usr/local/bin/cmake && \
+      cd /root/aws-iot-device-client && \
+      cmake -B build -DCMAKE_BUILD_TYPE=Release \
+        -DEXCLUDE_JOBS=ON -DEXCLUDE_NAMED_SHADOW=ON \
+        -DEXCLUDE_TUNNELING=ON -DEXCLUDE_DEVICE_DEFENDER=ON \
+        -DEXCLUDE_FLEET_PROVISIONING=OFF && \
+      cmake --build build --target aws-iot-device-client -j\$(nproc)
+    "
   mkdir -p "$(dirname "$LOCAL_BINARY_CACHE")"
   cp "$DC_SRC/build/aws-iot-device-client" "$LOCAL_BINARY_CACHE"
   rm -rf "$DC_SRC"
@@ -53,10 +65,6 @@ if [[ ! -f "$LOCAL_BINARY_CACHE" ]]; then
 else
   echo ">>> Using cached IoT Device Client binary."
 fi
-
-# ── Install Lambda dependencies (required before CDK bundles the asset) ─────
-echo ">>> Installing MSK bridge Lambda dependencies…"
-(cd amplify/lambda/msk-bridge && pnpm install --prod --frozen-lockfile 2>/dev/null || pnpm install --prod)
 
 # ── Start Amplify sandbox for this participant ───────────────────────────────
 export WORKSHOP_DEPLOYMENT_ID="$DEPLOYMENT_ID"
@@ -73,3 +81,7 @@ echo ">>> Uploading sensor simulator to s3://${S3_BUCKET}/simulator/sensor-sim.p
 aws s3 cp simulator/sensor-sim.py "s3://${S3_BUCKET}/simulator/sensor-sim.py"
 
 echo ">>> Upload complete."
+
+# ── Write deployment summary ──────────────────────────────────────────────────
+echo ">>> Generating deployment summary..."
+bash "$(dirname "$0")/deployment-summary.sh" "$DEPLOYMENT_ID"

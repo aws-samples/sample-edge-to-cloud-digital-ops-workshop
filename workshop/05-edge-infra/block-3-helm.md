@@ -49,6 +49,7 @@ kubectl create secret generic msk-credentials \
 ## Deploy the Edge Stack
 
 ```bash
+helm dependency update helm/edge-stack
 helm upgrade --install edge-stack ./helm/edge-stack \
   --namespace edge --create-namespace \
   -f helm/edge-stack-values.yaml \

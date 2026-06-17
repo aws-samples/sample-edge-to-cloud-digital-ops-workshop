@@ -1,5 +1,8 @@
 tmp
 .claude
+
+# Helm chart tarballs — run `helm dependency update helm/edge-stack` to regenerate
+helm/edge-stack/charts/*.tgz
 node_modules
 .DS_Store
 .amplify
@@ -9,6 +12,9 @@ cdk.out
 *.js.map
 
 workshop-site.zip
+
+# Generated deployment artifact (contains account-specific ARNs)
+DEPLOYMENT_SUMMARY.md
 
 # E2E test reports
 e2e/reports/
