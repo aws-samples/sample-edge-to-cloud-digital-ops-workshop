@@ -50,7 +50,8 @@ CREATE SOURCE IF NOT EXISTS sensors_raw_telemetry (
     disk_used_pct      DOUBLE,
     net_io_bytes_sent  BIGINT,
     net_io_bytes_recv  BIGINT,
-    message_timestamp  BIGINT
+    message_timestamp  BIGINT,
+    ingest_ts          BIGINT
 )
 WITH (
     connector                        = 'kafka',
@@ -80,15 +81,15 @@ SELECT
 FROM (
     SELECT sensor, site_id, value, unit, ts_ms FROM sensors_raw_cloud
     UNION ALL
-    SELECT 'cpu_pct'           AS sensor, thing_name AS site_id, cpu_pct                    AS value, 'percent' AS unit, message_timestamp AS ts_ms FROM sensors_raw_telemetry
+    SELECT 'cpu_pct'           AS sensor, thing_name AS site_id, cpu_pct                    AS value, 'percent' AS unit, ingest_ts AS ts_ms FROM sensors_raw_telemetry
     UNION ALL
-    SELECT 'mem_used_pct'      AS sensor, thing_name AS site_id, mem_used_pct               AS value, 'percent' AS unit, message_timestamp AS ts_ms FROM sensors_raw_telemetry
+    SELECT 'mem_used_pct'      AS sensor, thing_name AS site_id, mem_used_pct               AS value, 'percent' AS unit, ingest_ts AS ts_ms FROM sensors_raw_telemetry
     UNION ALL
-    SELECT 'disk_used_pct'     AS sensor, thing_name AS site_id, disk_used_pct              AS value, 'percent' AS unit, message_timestamp AS ts_ms FROM sensors_raw_telemetry
+    SELECT 'disk_used_pct'     AS sensor, thing_name AS site_id, disk_used_pct              AS value, 'percent' AS unit, ingest_ts AS ts_ms FROM sensors_raw_telemetry
     UNION ALL
-    SELECT 'net_io_bytes_sent' AS sensor, thing_name AS site_id, net_io_bytes_sent::DOUBLE  AS value, 'bytes'   AS unit, message_timestamp AS ts_ms FROM sensors_raw_telemetry
+    SELECT 'net_io_bytes_sent' AS sensor, thing_name AS site_id, net_io_bytes_sent::DOUBLE  AS value, 'bytes'   AS unit, ingest_ts AS ts_ms FROM sensors_raw_telemetry
     UNION ALL
-    SELECT 'net_io_bytes_recv' AS sensor, thing_name AS site_id, net_io_bytes_recv::DOUBLE  AS value, 'bytes'   AS unit, message_timestamp AS ts_ms FROM sensors_raw_telemetry
+    SELECT 'net_io_bytes_recv' AS sensor, thing_name AS site_id, net_io_bytes_recv::DOUBLE  AS value, 'bytes'   AS unit, ingest_ts AS ts_ms FROM sensors_raw_telemetry
 ) combined
 GROUP BY sensor, site_id;
 
@@ -109,14 +110,14 @@ SELECT
 FROM (
     SELECT sensor, site_id, value, ts_ms FROM sensors_raw_cloud
     UNION ALL
-    SELECT 'cpu_pct'           AS sensor, thing_name AS site_id, cpu_pct                   AS value, message_timestamp AS ts_ms FROM sensors_raw_telemetry
+    SELECT 'cpu_pct'           AS sensor, thing_name AS site_id, cpu_pct                   AS value, ingest_ts AS ts_ms FROM sensors_raw_telemetry
     UNION ALL
-    SELECT 'mem_used_pct'      AS sensor, thing_name AS site_id, mem_used_pct              AS value, message_timestamp AS ts_ms FROM sensors_raw_telemetry
+    SELECT 'mem_used_pct'      AS sensor, thing_name AS site_id, mem_used_pct              AS value, ingest_ts AS ts_ms FROM sensors_raw_telemetry
     UNION ALL
-    SELECT 'disk_used_pct'     AS sensor, thing_name AS site_id, disk_used_pct             AS value, message_timestamp AS ts_ms FROM sensors_raw_telemetry
+    SELECT 'disk_used_pct'     AS sensor, thing_name AS site_id, disk_used_pct             AS value, ingest_ts AS ts_ms FROM sensors_raw_telemetry
     UNION ALL
-    SELECT 'net_io_bytes_sent' AS sensor, thing_name AS site_id, net_io_bytes_sent::DOUBLE AS value, message_timestamp AS ts_ms FROM sensors_raw_telemetry
+    SELECT 'net_io_bytes_sent' AS sensor, thing_name AS site_id, net_io_bytes_sent::DOUBLE AS value, ingest_ts AS ts_ms FROM sensors_raw_telemetry
     UNION ALL
-    SELECT 'net_io_bytes_recv' AS sensor, thing_name AS site_id, net_io_bytes_recv::DOUBLE AS value, message_timestamp AS ts_ms FROM sensors_raw_telemetry
+    SELECT 'net_io_bytes_recv' AS sensor, thing_name AS site_id, net_io_bytes_recv::DOUBLE AS value, ingest_ts AS ts_ms FROM sensors_raw_telemetry
 ) combined
 GROUP BY sensor, site_id, (ts_ms / 60000);
