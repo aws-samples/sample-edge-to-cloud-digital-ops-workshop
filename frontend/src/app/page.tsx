@@ -18,6 +18,12 @@ export default function Home() {
             <p style={{ color: "#666", fontSize: "0.9rem" }}>Compare live data freshness across RisingWave, TimescaleDB, and Hudi/Athena.</p>
           </div>
         </Link>
+        <Link href="/dashboard" style={{ textDecoration: "none" }}>
+          <div className="card" style={{ cursor: "pointer" }}>
+            <h2 style={{ marginBottom: "0.5rem" }}>Live Analytics Dashboard</h2>
+            <p style={{ color: "#666", fontSize: "0.9rem" }}>Real-time charts: data freshness (log scale), fleet free CPU &amp; memory, and time-since-last-message per node.</p>
+          </div>
+        </Link>
       </div>
     </div>
   );
