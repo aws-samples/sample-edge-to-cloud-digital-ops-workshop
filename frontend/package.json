@@ -9,17 +9,21 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@aws-amplify/ui-react": "^6.9.0",
+    "@aws-sdk/client-iot": "^3.1071.0",
+    "@aws-sdk/client-iot-data-plane": "^3.1071.0",
+    "aws-amplify": "^6.13.0",
     "next": "^14.2.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
-    "aws-amplify": "^6.13.0",
-    "@aws-amplify/ui-react": "^6.9.0",
+    "recharts": "^3.8.1",
     "swr": "^2.3.0"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.20.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
-    "@types/node": "^22.0.0",
     "typescript": "^5.5.0"
   }
 }
