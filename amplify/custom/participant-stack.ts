@@ -1137,7 +1137,7 @@ systemctl start sensor-sim
       }),
     });
     getBootstrapBrokers.node.addDependency(mskCluster);
-    const bootstrapBrokersSaslScram = getBootstrapBrokers.getResponseField("BootstrapBrokersSaslScram");
+    const bootstrapBrokersSaslScram = getBootstrapBrokers.getResponseField("BootstrapBrokerStringSaslScram");
 
     // Must wait for the role's policy to be attached before IoT can validate permissions
     kafkaVpcDest.node.addDependency(iotKafkaVpcRole);
@@ -1156,8 +1156,11 @@ systemctl start sensor-sim
                 "bootstrap.servers": bootstrapBrokersSaslScram,
                 "security.protocol": "SASL_SSL",
                 "sasl.mechanism": "SCRAM-SHA-512",
-                // \${...} produces literal ${...} for IoT substitution templates at rule-fire time
-                "sasl.jaas.config": `org.apache.kafka.common.security.scram.ScramLoginModule required username="\${get_secret('${mskCredSecret.secretName}', 'SecretString', 'username', 'AWS', '${this.region}')}" password="\${get_secret('${mskCredSecret.secretName}', 'SecretString', 'password', 'AWS', '${this.region}')}";`,
+                // IoT Kafka action uses explicit username/password properties (sasl.jaas.config not supported).
+                // \${get_secret(...)} is an IoT substitution template evaluated at rule-fire time.
+                // Requires 4 args: (secretId, SecretString, key, roleArn).
+                "sasl.scram.username": `\${get_secret('AmazonMSK_workshop-${deploymentId}', 'SecretString', 'username', '${iotKafkaVpcRole.roleArn}')}`,
+                "sasl.scram.password": `\${get_secret('AmazonMSK_workshop-${deploymentId}', 'SecretString', 'password', '${iotKafkaVpcRole.roleArn}')}`,
                 "acks": "1",
               },
             },

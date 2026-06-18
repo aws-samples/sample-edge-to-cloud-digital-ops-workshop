@@ -75,18 +75,20 @@ config:
   pipeline:
     processors:
       - switch:
-          - check: 'meta("kafka_topic") == "raw.telemetry"'
+          # Flat IoT node telemetry: contains thing_name + message_timestamp instead of sensor/ts_ms
+          - check: 'this.exists("thing_name")'
             processors:
               - mapping: |
                   root = [
-                    {"sensor": "cpu_pct",          "site_id": this.thing_name, "value": this.cpu_pct,                    "unit": "percent", "ts_ms": this.message_timestamp},
-                    {"sensor": "mem_used_pct",      "site_id": this.thing_name, "value": this.mem_used_pct,               "unit": "percent", "ts_ms": this.message_timestamp},
-                    {"sensor": "disk_used_pct",     "site_id": this.thing_name, "value": this.disk_used_pct,              "unit": "percent", "ts_ms": this.message_timestamp},
-                    {"sensor": "net_io_bytes_sent", "site_id": this.thing_name, "value": this.net_io_bytes_sent.double(), "unit": "bytes",   "ts_ms": this.message_timestamp},
-                    {"sensor": "net_io_bytes_recv", "site_id": this.thing_name, "value": this.net_io_bytes_recv.double(), "unit": "bytes",   "ts_ms": this.message_timestamp}
+                    {"sensor": "cpu_pct",          "site_id": this.thing_name, "value": (this.cpu_pct | 0).number(),           "unit": "percent", "ts_ms": this.message_timestamp},
+                    {"sensor": "mem_used_pct",      "site_id": this.thing_name, "value": (this.mem_used_pct | 0).number(),      "unit": "percent", "ts_ms": this.message_timestamp},
+                    {"sensor": "disk_used_pct",     "site_id": this.thing_name, "value": (this.disk_used_pct | 0).number(),     "unit": "percent", "ts_ms": this.message_timestamp},
+                    {"sensor": "net_io_bytes_sent", "site_id": this.thing_name, "value": (this.net_io_bytes_sent | 0).number(), "unit": "bytes",   "ts_ms": this.message_timestamp},
+                    {"sensor": "net_io_bytes_recv", "site_id": this.thing_name, "value": (this.net_io_bytes_recv | 0).number(), "unit": "bytes",   "ts_ms": this.message_timestamp}
                   ]
               - unarchive:
                   format: json_array
+          # Pre-normalised industrial sensor messages — pass through unchanged
           - check: 'true'
             processors:
               - mapping: 'root = this'
