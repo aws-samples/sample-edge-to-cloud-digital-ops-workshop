@@ -952,23 +952,6 @@ try {
       return { brokerCount: mskBootstrap.split(",").length, bootstrap: mskBootstrap.split(",")[0] };
     }, { data: (r) => ({ brokerCount: r.brokerCount }) });
 
-    // Clear stale RisingWave S3 state so a fresh cluster can start (idempotent on first run)
-    log("Clearing RisingWave S3 state bucket (idempotent)...");
-    shellOutput(
-      `aws s3 rm s3://workshop-${DEPLOYMENT_ID}-risingwave-state/ --recursive --region ${REGION} 2>/dev/null || true`
-    );
-    // Restart RisingWave pods after clearing S3 state so they start fresh.
-    // Without a restart the pods hold stale in-memory state and DROP/CREATE DDL can block
-    // indefinitely waiting for a checkpoint flush to the now-empty S3 bucket.
-    shellOutput(
-      `kubectl --kubeconfig ${cloudKcPath} rollout restart ` +
-      `deployment/risingwave-cloud-frontend-default ` +
-      `statefulset/risingwave-cloud-meta-default ` +
-      `statefulset/risingwave-cloud-compute-default ` +
-      `deployment/risingwave-cloud-compactor-default ` +
-      `-n ${DEPLOYMENT_ID} 2>/dev/null || true`
-    );
-
     // Create cloud namespace, MSK secret, and IRSA service account
     shell(
       `kubectl --kubeconfig ${cloudKcPath} create namespace ${DEPLOYMENT_ID} --dry-run=client -o yaml | kubectl --kubeconfig ${cloudKcPath} apply -f -`
@@ -998,7 +981,22 @@ try {
       `--namespace risingwave-system --create-namespace --wait --timeout 3m`
     );
 
-    // Deploy RisingWave instance
+    // Delete the RisingWave CR and wait for all pods to terminate before clearing S3.
+    // This avoids two problems: (1) cluster_id conflicts when pods restart into an empty bucket,
+    // and (2) DROP MATERIALIZED VIEW blocking indefinitely on stale streaming state.
+    shellOutput(
+      `kubectl --kubeconfig ${cloudKcPath} delete risingwave risingwave-cloud -n ${DEPLOYMENT_ID} --ignore-not-found 2>&1 || true`
+    );
+    shellOutput(
+      `kubectl --kubeconfig ${cloudKcPath} wait pod -n ${DEPLOYMENT_ID} ` +
+      `-l risingwave.risingwavelabs.com/cr-name=risingwave-cloud ` +
+      `--for=delete --timeout=120s 2>/dev/null || true`
+    );
+    shellOutput(
+      `aws s3 rm s3://workshop-${DEPLOYMENT_ID}-risingwave-state/ --recursive --region ${REGION} 2>/dev/null || true`
+    );
+
+    // Deploy RisingWave instance (fresh start — no stale S3 state or streaming DDL)
     const rwManifest = readFileSync(`${REPO_ROOT}/k8s/risingwave-cloud.yaml`, "utf8").replace(
       /\$\{DEPLOYMENT_ID\}/g,
       DEPLOYMENT_ID
@@ -1108,20 +1106,9 @@ try {
 
     let rwCloudClient: pg.Client | undefined;
     try {
-      // Use query_timeout so DROP statements don't block indefinitely.
-      // After the S3-state clear + pod restart above, objects should not exist so
-      // the drops are no-ops; the timeout is a safety net if the restart is still in progress.
-      rwCloudClient = new pg.Client({ host: "localhost", port: 14567, user: "root", database: "dev", password: "", query_timeout: 30_000 });
+      // Cluster is always fresh (CR deleted + S3 cleared above), so no stale objects to drop.
+      rwCloudClient = new pg.Client({ host: "localhost", port: 14567, user: "root", database: "dev", password: "", query_timeout: 60_000 });
       await rwCloudClient.connect();
-      // Drop stale objects before applying DDL so schema changes (e.g. new UNION ALL arms) take effect.
-      for (const stmt of [
-        "DROP MATERIALIZED VIEW IF EXISTS mv_fleet_1min_avg",
-        "DROP MATERIALIZED VIEW IF EXISTS mv_sensor_fleet_latest",
-        "DROP SOURCE IF EXISTS sensors_raw_telemetry",
-        "DROP SOURCE IF EXISTS sensors_raw_cloud",
-      ]) {
-        await pgQuery(rwCloudClient, stmt).catch(() => { /* ignore if not exists or timed out */ });
-      }
       const { durationMs } = await pgQuery(rwCloudClient, ddl);
       log(`  Cloud DDL applied in ${durationMs}ms`);
 
@@ -1343,26 +1330,23 @@ try {
 
     // ── 4. Freshness comparison summary ─────────────────────────────────────
     await check("Freshness ladder: RisingWave < TimescaleDB < Datalake", async () => {
-      const summary = {
-        risingwave_freshness_ms:      rwCloudFreshnessMs   ?? null,
-        timescaledb_freshness_ms:     tsdbCloudFreshnessMs ?? null,
-        datalake_athena_freshness_ms: athenaFreshnessMs    ?? null,
-      };
-      capture("Data freshness comparison (all tiers)", JSON.stringify(summary, null, 2));
-      if (
-        rwCloudFreshnessMs != null &&
-        tsdbCloudFreshnessMs != null &&
-        athenaFreshnessMs != null
-      ) {
-        if (rwCloudFreshnessMs > athenaFreshnessMs) {
-          console.warn(`  ⚠  Freshness inversion: RisingWave (${rwCloudFreshnessMs}ms) > Athena (${athenaFreshnessMs}ms)`);
-        }
+      const rw   = rwCloudFreshnessMs;
+      const tsdb = tsdbCloudFreshnessMs;
+      const s3   = athenaFreshnessMs;
+      if (rw == null || tsdb == null || s3 == null) {
+        throw new Error(`Missing freshness readings — rw=${rw} tsdb=${tsdb} s3=${s3}`);
       }
-      return summary;
+      if (!(rw < tsdb && tsdb < s3)) {
+        throw new Error(
+          `Freshness ladder violated: expected rw < tsdb < s3, got rw=${rw}ms tsdb=${tsdb}ms s3=${s3}ms`
+        );
+      }
+      capture("Data freshness comparison (all tiers)", JSON.stringify({ rw, tsdb, s3 }, null, 2));
+      return { risingwave_freshness_ms: rw, timescaledb_freshness_ms: tsdb, datalake_athena_freshness_ms: s3 };
     }, { data: (r) => ({
-      rw_ms:   r.risingwave_freshness_ms       ?? -1,
-      tsdb_ms: r.timescaledb_freshness_ms      ?? -1,
-      s3_ms:   r.datalake_athena_freshness_ms  ?? -1,
+      rw_ms:   r.risingwave_freshness_ms,
+      tsdb_ms: r.timescaledb_freshness_ms,
+      s3_ms:   r.datalake_athena_freshness_ms,
     }) });
   } // end mskArn
   } // end Phase 5
