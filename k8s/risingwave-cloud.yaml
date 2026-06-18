@@ -49,6 +49,9 @@ spec:
               envFrom:
                 - secretRef:
                     name: msk-credentials
+              env:
+                - name: RW_BARRIER_INTERVAL_MS
+                  value: "50"
               resources:
                 requests:
                   cpu: 100m
@@ -85,6 +88,9 @@ spec:
               envFrom:
                 - secretRef:
                     name: msk-credentials
+              env:
+                - name: RW_BARRIER_INTERVAL_MS
+                  value: "50"
               resources:
                 requests:
                   cpu: 500m

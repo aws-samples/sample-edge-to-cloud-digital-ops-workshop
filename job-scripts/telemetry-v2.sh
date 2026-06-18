@@ -16,13 +16,11 @@ cat > "$TELEMETRY_SCRIPT" <<'TELEMETRY'
 INSTANCE_ID=$(ec2-metadata --instance-id | cut -d' ' -f2)
 DEPLOYMENT_ID="${DEPLOYMENT_ID:-ws-slot00}"
 IOT_ENDPOINT=$(aws iot describe-endpoint --endpoint-type iot:Data-ATS --query endpointAddress --output text)
-INTERVAL_S=1  # 1 Hz
-
 PREV_SENT=0
 PREV_RECV=0
 
 while true; do
-  TS=$(date -u +%s%3N)
+  # Collect measurements first (top -bn1 takes ~100ms to sample CPU)
   CPU=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | tr -d '%us,')
   MEM=$(free | awk '/Mem:/ {printf "%.1f", $3/$2*100}')
   DISK=$(df / | awk 'NR==2 {print $5}' | tr -d '%')
@@ -36,6 +34,8 @@ while true; do
   PREV_RECV=$NET_RECV
   PREV_SENT=$NET_SENT
 
+  # Stamp timestamp immediately before publish so message_timestamp reflects when data leaves the node
+  TS=$(date -u +%s%3N)
   PAYLOAD=$(printf \
     '{"thing_name":"%s","message_timestamp":%s,"cpu_pct":%s,"mem_used_pct":%s,"disk_used_pct":%s,"net_io_bytes_sent":%s,"net_io_bytes_recv":%s}' \
     "$INSTANCE_ID" "$TS" "$CPU" "$MEM" "$DISK" "$NET_IO_SENT" "$NET_IO_RECV")
@@ -47,7 +47,7 @@ while true; do
     --cli-binary-format raw-in-base64-out \
     2>/dev/null || true
 
-  sleep $INTERVAL_S
+  sleep 1
 done
 TELEMETRY
 
