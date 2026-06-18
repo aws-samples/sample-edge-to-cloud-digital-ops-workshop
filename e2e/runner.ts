@@ -957,6 +957,17 @@ try {
     shellOutput(
       `aws s3 rm s3://workshop-${DEPLOYMENT_ID}-risingwave-state/ --recursive --region ${REGION} 2>/dev/null || true`
     );
+    // Restart RisingWave pods after clearing S3 state so they start fresh.
+    // Without a restart the pods hold stale in-memory state and DROP/CREATE DDL can block
+    // indefinitely waiting for a checkpoint flush to the now-empty S3 bucket.
+    shellOutput(
+      `kubectl --kubeconfig ${cloudKcPath} rollout restart ` +
+      `deployment/risingwave-cloud-frontend-default ` +
+      `statefulset/risingwave-cloud-meta-default ` +
+      `statefulset/risingwave-cloud-compute-default ` +
+      `deployment/risingwave-cloud-compactor-default ` +
+      `-n ${DEPLOYMENT_ID} 2>/dev/null || true`
+    );
 
     // Create cloud namespace, MSK secret, and IRSA service account
     shell(
@@ -1006,6 +1017,14 @@ try {
     // Deploy TimescaleDB
     shell(`kubectl --kubeconfig ${cloudKcPath} apply -f ${REPO_ROOT}/k8s/timescaledb-cloud-cluster.yaml -n ${DEPLOYMENT_ID}`);
 
+    // Deploy cloud Redpanda Connect sink (MSK → TimescaleDB).
+    // Needs timescaledb-credentials secret — we'll create/update it after CNPG generates the password.
+    // For now register the repo; the secret and helm install happen after CNPG is ready below.
+    try {
+      shellOutput(`helm repo add redpanda https://charts.redpanda.com 2>/dev/null || true`);
+      shellOutput(`helm repo update redpanda 2>/dev/null || true`);
+    } catch { /* best-effort */ }
+
     log("Waiting for cloud namespace pods...");
     await waitForPods(cloudKcPath, DEPLOYMENT_ID, HELM_TIMEOUT_MS).catch(() =>
       log("⚠  Some cloud pods not yet Running — continuing")
@@ -1032,26 +1051,42 @@ try {
     // MSK is only accessible from within the cloud VPC, so we run a short-lived
     // Python pod inside EKS (same VPC) that installs kafka-python-ng and creates the topic.
     log("Creating MSK topics (sensors.raw.sim, raw.telemetry) via EKS pod (idempotent)...");
-    const mskTopicScript =
-      `import subprocess,sys; subprocess.check_call([sys.executable,'-m','pip','install','-q','--root-user-action=ignore','kafka-python-ng'])\n` +
-      `from kafka.admin import KafkaAdminClient,NewTopic\n` +
-      `import ssl\n` +
-      `a=KafkaAdminClient(bootstrap_servers=${JSON.stringify(mskBootstrap)},security_protocol='SASL_SSL',sasl_mechanism='SCRAM-SHA-512',sasl_plain_username=${JSON.stringify(`workshop-${DEPLOYMENT_ID}`)},sasl_plain_password=${JSON.stringify(mskCreds.password)},ssl_context=ssl.create_default_context())\n` +
-      `e=a.list_topics()\n` +
-      `[a.create_topics([NewTopic('sensors.raw.sim',4,2)]) or print('Created sensors.raw.sim') if 'sensors.raw.sim' not in e else print('Exists sensors.raw.sim')]\n` +
-      `[a.create_topics([NewTopic('raw.telemetry',4,2)]) or print('Created raw.telemetry') if 'raw.telemetry' not in e else print('Exists raw.telemetry')]\n` +
-      `a.close()`;
-    try {
-      shellOutput(
-        `kubectl --kubeconfig ${cloudKcPath} run msk-topic-init ` +
-        `--rm -i --restart=Never -n ${DEPLOYMENT_ID} ` +
-        `--image=python:3.12-slim ` +
-        `--command -- python3 -c ${JSON.stringify(mskTopicScript)} 2>&1 ; true`
-      );
-      log("  MSK topic creation complete");
-    } catch (err: unknown) {
-      log(`  ⚠ MSK topic creation step failed — topic may already exist, continuing`);
-    }
+    const REQUIRED_TOPICS = ["sensors.raw.sim", "raw.telemetry"];
+    // Build the script as real Python source (newlines preserved) then base64-encode it
+    // so it survives being passed through kubectl --command -- python3 -c "..."
+    // without indentation/continuation errors.
+    const mskTopicSource = [
+      `import subprocess,sys`,
+      `subprocess.check_call([sys.executable,'-m','pip','install','-q','--root-user-action=ignore','kafka-python-ng'])`,
+      `from kafka.admin import KafkaAdminClient,NewTopic`,
+      `import ssl,time`,
+      `a=KafkaAdminClient(bootstrap_servers=${JSON.stringify(mskBootstrap)},security_protocol='SASL_SSL',sasl_mechanism='SCRAM-SHA-512',sasl_plain_username=${JSON.stringify(`workshop-${DEPLOYMENT_ID}`)},sasl_plain_password=${JSON.stringify(mskCreds.password)},ssl_context=ssl.create_default_context())`,
+      `for t in ${JSON.stringify(REQUIRED_TOPICS)}:`,
+      `    if t not in a.list_topics():`,
+      `        a.create_topics([NewTopic(t,4,2)])`,
+      `        print('Created',t)`,
+      `    else:`,
+      `        print('Exists',t)`,
+      `deadline=time.time()+60`,
+      `while time.time()<deadline:`,
+      `    present=a.list_topics()`,
+      `    missing=[t for t in ${JSON.stringify(REQUIRED_TOPICS)} if t not in present]`,
+      `    if not missing: break`,
+      `    print('Waiting for topics:',missing)`,
+      `    time.sleep(3)`,
+      `else:`,
+      `    raise RuntimeError('Topics not available after 60s: '+str(missing))`,
+      `print('All topics confirmed:',sorted([t for t in a.list_topics() if t in ${JSON.stringify(REQUIRED_TOPICS)}]))`,
+      `a.close()`,
+    ].join("\n");
+    const mskTopicB64 = Buffer.from(mskTopicSource).toString("base64");
+    shellOutput(
+      `kubectl --kubeconfig ${cloudKcPath} run msk-topic-init ` +
+      `--rm -i --restart=Never -n ${DEPLOYMENT_ID} ` +
+      `--image=python:3.12-slim ` +
+      `--command -- python3 -c "exec(__import__('base64').b64decode('${mskTopicB64}').decode())" 2>&1`
+    );
+    log("  MSK topic creation complete");
 
     // Apply RisingWave DDL via kubectl port-forward to the EKS frontend service
     log("Applying cloud RisingWave DDL...");
@@ -1073,8 +1108,20 @@ try {
 
     let rwCloudClient: pg.Client | undefined;
     try {
-      rwCloudClient = new pg.Client({ host: "localhost", port: 14567, user: "root", database: "dev", password: "" });
+      // Use query_timeout so DROP statements don't block indefinitely.
+      // After the S3-state clear + pod restart above, objects should not exist so
+      // the drops are no-ops; the timeout is a safety net if the restart is still in progress.
+      rwCloudClient = new pg.Client({ host: "localhost", port: 14567, user: "root", database: "dev", password: "", query_timeout: 30_000 });
       await rwCloudClient.connect();
+      // Drop stale objects before applying DDL so schema changes (e.g. new UNION ALL arms) take effect.
+      for (const stmt of [
+        "DROP MATERIALIZED VIEW IF EXISTS mv_fleet_1min_avg",
+        "DROP MATERIALIZED VIEW IF EXISTS mv_sensor_fleet_latest",
+        "DROP SOURCE IF EXISTS sensors_raw_telemetry",
+        "DROP SOURCE IF EXISTS sensors_raw_cloud",
+      ]) {
+        await pgQuery(rwCloudClient, stmt).catch(() => { /* ignore if not exists or timed out */ });
+      }
       const { durationMs } = await pgQuery(rwCloudClient, ddl);
       log(`  Cloud DDL applied in ${durationMs}ms`);
 
@@ -1097,7 +1144,42 @@ try {
       rwPfTunnel.close();
       tunnels.splice(tunnels.indexOf(rwPfTunnel), 1);
     }
-  }
+
+    // ── Deploy cloud rp-connect-timescaledb sink ─────────────────────────────
+    // Wait for CNPG to generate the timescaledb-cloud-app secret, then create
+    // the timescaledb-credentials secret and deploy the Helm chart.
+    log("Waiting for TimescaleDB CNPG secret to be available...");
+    let tsdbInitPassword = "";
+    const tsdbSecretDeadline = Date.now() + 120_000;
+    while (Date.now() < tsdbSecretDeadline) {
+      try {
+        const raw = shellOutput(
+          `kubectl --kubeconfig ${cloudKcPath} get secret timescaledb-cloud-app ` +
+          `-n ${DEPLOYMENT_ID} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d`
+        ).trim();
+        if (raw) { tsdbInitPassword = raw; break; }
+      } catch { /* not ready yet */ }
+      await sleep(5_000);
+    }
+    if (tsdbInitPassword) {
+      const tsdbDsn = `postgres://workshop:${tsdbInitPassword}@timescaledb-cloud-rw.${DEPLOYMENT_ID}.svc:5432/edge`;
+      shell(
+        `kubectl --kubeconfig ${cloudKcPath} create secret generic timescaledb-credentials ` +
+        `-n ${DEPLOYMENT_ID} ` +
+        `--from-literal=TIMESCALE_DSN=${JSON.stringify(tsdbDsn)} ` +
+        `--dry-run=client -o yaml | kubectl --kubeconfig ${cloudKcPath} apply -f -`
+      );
+      log("Deploying cloud rp-connect-timescaledb...");
+      await shellRetry(
+        `helm --kubeconfig ${cloudKcPath} upgrade --install rp-connect-timescaledb redpanda/connect ` +
+        `-n ${DEPLOYMENT_ID} ` +
+        `-f ${REPO_ROOT}/helm/rp-connect-timescaledb.yaml ` +
+        `--wait --timeout 3m`
+      );
+      log("  rp-connect-timescaledb deployed");
+    } else {
+      log("  ⚠  TimescaleDB secret not ready in 120s — skipping rp-connect deploy");
+    }
 
     // ── Data freshness comparison: Datalake / TimescaleDB / RisingWave ─────────
     // All three tiers query the same source data: IoT node telemetry (cpu_pct,
@@ -1109,6 +1191,10 @@ try {
     //   RisingWave MV  ~100–400 ms
     //   TimescaleDB    ~100 ms–3 s
     //   Datalake/Athena ~30–90 s
+
+    // Give RisingWave and TimescaleDB sinks time to receive messages before sampling freshness.
+    log("Waiting 30s for data to flow into RisingWave and TimescaleDB...");
+    await sleep(30_000);
 
     log("Running data freshness comparison: Datalake / TimescaleDB / RisingWave...");
 
@@ -1153,16 +1239,16 @@ try {
       const rwCloudPf2 = spawn(
         "kubectl",
         ["--kubeconfig", cloudKcPath, "port-forward", "-n", DEPLOYMENT_ID,
-         "svc/risingwave-cloud-frontend", "14567:4567"],
+         "svc/risingwave-cloud-frontend", "14568:4567"],
         { stdio: "ignore" }
       );
-      const rwCloudTunnel2 = { localPort: 14567, proc: rwCloudPf2, close: () => { try { rwCloudPf2.kill(); } catch { /* */ } } };
+      const rwCloudTunnel2 = { localPort: 14568, proc: rwCloudPf2, close: () => { try { rwCloudPf2.kill(); } catch { /* */ } } };
       tunnels.push(rwCloudTunnel2);
-      await sleep(6_000);
+      await sleep(8_000);
 
       let rwCloudClient2: pg.Client | undefined;
       try {
-        rwCloudClient2 = new pg.Client({ host: "localhost", port: 14567, user: "root", database: "dev", password: "" });
+        rwCloudClient2 = new pg.Client({ host: "localhost", port: 14568, user: "root", database: "dev", password: "" });
         await rwCloudClient2.connect();
         await check("Cloud RisingWave freshness — fleet sensor MAX(ts_ms)", async () => {
           const { rows, durationMs } = await pgQuery(
@@ -1213,6 +1299,25 @@ try {
       try {
         tsdbCloudClient = new pg.Client({ host: "localhost", port: 15432, user: "workshop", database: "edge", password: tsdbPassword });
         await tsdbCloudClient.connect();
+        // Ensure schema exists — CNPG postInitSQL only runs on fresh cluster init,
+        // so on recycled clusters we must create idempotently.
+        await tsdbCloudClient.query(`
+          CREATE TABLE IF NOT EXISTS sensor_readings (
+            ts_ms          BIGINT           NOT NULL,
+            sensor         TEXT             NOT NULL,
+            site_id        TEXT             NOT NULL,
+            value          DOUBLE PRECISION,
+            unit           TEXT,
+            partition_time TIMESTAMPTZ      NOT NULL
+          )
+        `);
+        await tsdbCloudClient.query(
+          `CREATE INDEX IF NOT EXISTS idx_sensor_readings_sensor ON sensor_readings(sensor, partition_time DESC)`
+        );
+        await tsdbCloudClient.end().catch(() => {});
+        tsdbCloudClient = undefined;
+        tsdbCloudClient = new pg.Client({ host: "localhost", port: 15432, user: "workshop", database: "edge", password: tsdbPassword });
+        await tsdbCloudClient.connect();
         await check("Cloud TimescaleDB freshness — sensor_readings MAX(ts_ms)", async () => {
           const { rows, durationMs } = await pgQuery(
             tsdbCloudClient!,
@@ -1259,6 +1364,7 @@ try {
       tsdb_ms: r.timescaledb_freshness_ms      ?? -1,
       s3_ms:   r.datalake_athena_freshness_ms  ?? -1,
     }) });
+  } // end mskArn
   } // end Phase 5
 
   // ── Phase 6: Session 5 — Edge Infrastructure ──────────────────────────────
