@@ -23,10 +23,10 @@
 
 This is what happened when the CDK stack deployed the 3 devices:
 
-1. **CDK creates a provisioning template** ([`participant-stack.ts`](https://github.com/energy-digital-operations/edge-digital-operations-workshop/blob/main/amplify/custom/participant-stack.ts)) — defines what IoT resources to create when a device presents a claim cert (Thing name derived from EC2 instance ID, policy attached, permanent cert activated)
+1. **CDK creates a provisioning template** ([`participant-stack.ts`](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/amplify/custom/participant-stack.ts)) — defines what IoT resources to create when a device presents a claim cert (Thing name derived from EC2 instance ID, policy attached, permanent cert activated)
 
     ??? example "View CDK source — provisioning template"
-        [:simple-github: Open in GitHub](https://github.com/energy-digital-operations/edge-digital-operations-workshop/blob/main/amplify/custom/participant-stack.ts){ .md-button target=_blank }
+        [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/amplify/custom/participant-stack.ts){ .md-button target=_blank }
 
         ```typescript
         --8<-- "amplify/custom/participant-stack.ts:provisioning-template"
@@ -43,7 +43,7 @@ This is what happened when the CDK stack deployed the 3 devices:
 6. **Pre-provisioning hook Lambda** validates the request before IoT Core acts — rejects duplicate registrations and verifies the requesting instance exists in EC2 with the expected deployment tags
 
     ??? example "View CDK source — pre-provisioning hook"
-        [:simple-github: Open in GitHub](https://github.com/energy-digital-operations/edge-digital-operations-workshop/blob/main/amplify/custom/participant-stack.ts){ .md-button target=_blank }
+        [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/amplify/custom/participant-stack.ts){ .md-button target=_blank }
 
         ```typescript
         --8<-- "amplify/custom/participant-stack.ts:pre-provision-hook"
@@ -77,12 +77,12 @@ By-claim is used here purely because the CDK deployment is fully automated with 
 
 ## Console Tour
 
-Navigate to each of these in the IoT Core console:
+Open each link and walk through what's shown:
 
-- **Connect → Fleet Provisioning** → show the provisioning template JSON
-- **Security → Certificates** → show the claim cert (status: `ACTIVE`, policy: provisioning-only)
-- **Manage → Things** → open one device → show its permanent cert and attached policy
-- **Security → Policies** → compare the claim cert policy (3 statements) vs the device operational policy (publish/subscribe on `edge/{DEPLOYMENT_ID}/#` and shadow topics)
+- [**IoT Core → Connect → Fleet Provisioning**](https://console.aws.amazon.com/iot/home#/provisioningtemplatehub) → show the provisioning template JSON
+- [**IoT Core → Security → Certificates**](https://console.aws.amazon.com/iot/home#/certificatehub) → show the claim cert (status: `ACTIVE`, policy: provisioning-only)
+- [**IoT Core → Manage → Things**](https://console.aws.amazon.com/iot/home#/thinghub) → open one device → show its permanent cert and attached policy
+- [**IoT Core → Security → Policies**](https://console.aws.amazon.com/iot/home#/policyhub) → compare the claim cert policy (3 statements) vs the device operational policy (publish/subscribe on `edge/{DEPLOYMENT_ID}/#` and shadow topics)
 
 ---
 

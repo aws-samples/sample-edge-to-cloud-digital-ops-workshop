@@ -103,7 +103,7 @@ export class ParticipantStack extends Stack {
 
     // ── S3 ──────────────────────────────────────────────────────────────────
     const workshopBucket = new Bucket(this, "WorkshopBucket", {
-      bucketName: `workshop-${deploymentId}`,
+      bucketName: `workshop-${deploymentId}-${this.account}`,
       removalPolicy: RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
       blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
@@ -624,7 +624,7 @@ IOT_ENDPOINT=$(aws iot describe-endpoint \
 
 # Download Device Client binary built by sandbox.sh and staged in S3.
 # sandbox.sh builds it once using the official GHCR build image and uploads here.
-aws s3 cp "s3://workshop-${deploymentId}/bin/aws-iot-device-client" /usr/local/bin/aws-iot-device-client --region ${this.region}
+aws s3 cp "s3://${workshopBucket.bucketName}/bin/aws-iot-device-client" /usr/local/bin/aws-iot-device-client --region ${this.region}
 chmod +x /usr/local/bin/aws-iot-device-client
 
 mkdir -p /etc/aws-iot-device-client/jobs
@@ -844,7 +844,7 @@ systemctl daemon-reload
 systemctl enable mosquitto && systemctl start mosquitto
 
 # Download sensor simulator from S3
-aws s3 cp s3://workshop-${deploymentId}/simulator/sensor-sim.py /usr/local/bin/sensor-sim.py --region ${this.region}
+aws s3 cp s3://${workshopBucket.bucketName}/simulator/sensor-sim.py /usr/local/bin/sensor-sim.py --region ${this.region}
 chmod +x /usr/local/bin/sensor-sim.py
 
 cat > /etc/systemd/system/sensor-sim.service <<'SVC'

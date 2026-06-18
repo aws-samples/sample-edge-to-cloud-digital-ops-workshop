@@ -44,7 +44,7 @@ sed -e "s|__MSK_BOOTSTRAP__|$MSK_BOOTSTRAP|g" \
 ```
 
 ??? example "View source — ddl-cloud.sql"
-    [:simple-github: Open in GitHub](https://github.com/energy-digital-operations/edge-digital-operations-workshop/blob/main/risingwave/ddl-cloud.sql){ .md-button target=_blank }
+    [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/risingwave/ddl-cloud.sql){ .md-button target=_blank }
 
     ```sql
     --8<-- "risingwave/ddl-cloud.sql"

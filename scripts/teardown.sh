@@ -21,6 +21,7 @@ if [ -z "$DEPLOYMENT_ID" ]; then
 fi
 
 REGION=$(aws configure get region)
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
 run() {
   if $DRY_RUN; then echo "DRY-RUN: $*"; else "$@"; fi
@@ -105,7 +106,7 @@ fi
 
 # ── 8. Empty and delete S3 bucket ─────────────────────────────────────────────
 echo "--- S3 ---"
-BUCKET="workshop-${DEPLOYMENT_ID}"
+BUCKET="workshop-${DEPLOYMENT_ID}-${ACCOUNT_ID}"
 if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
   echo "  Emptying $BUCKET"
   run aws s3 rm "s3://${BUCKET}" --recursive

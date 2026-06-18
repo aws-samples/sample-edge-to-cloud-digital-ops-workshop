@@ -8,11 +8,11 @@
 #   3. Secret named "msk-credentials" exists in your participant namespace with:
 #        MSK_USERNAME, MSK_PASSWORD, MSK_BOOTSTRAP_SERVERS
 #   4. Service account "risingwave-cloud" exists in your participant namespace with
-#      IRSA annotation: eks.amazonaws.com/role-arn=arn:aws:iam::ACCT:role/workshop-risingwave-s3
-#   5. S3 bucket workshop-${DEPLOYMENT_ID}-risingwave-state exists
+#      IRSA annotation: eks.amazonaws.com/role-arn=arn:aws:iam::${ACCOUNT_ID}:role/workshop-risingwave-s3
+#   5. S3 bucket workshop-${DEPLOYMENT_ID}-${ACCOUNT_ID}-risingwave-state exists
 #
-# Apply (substitute your deployment ID):
-#   sed "s/\${DEPLOYMENT_ID}/ws-slot00/g" k8s/risingwave-cloud.yaml | kubectl apply -n ws-slot00 -f -
+# Apply (substitute your deployment ID and account ID):
+#   sed -e "s/\${DEPLOYMENT_ID}/ws-slot00/g" -e "s/\${ACCOUNT_ID}/123456789012/g" k8s/risingwave-cloud.yaml | kubectl apply -n ws-slot00 -f -
 # ──────────────────────────────────────────────────────────────────────────────
 apiVersion: risingwave.risingwavelabs.com/v1alpha1
 kind: RisingWave
@@ -28,7 +28,7 @@ spec:
   # ── State store: S3 via IRSA
   stateStore:
     s3:
-      bucket: workshop-${DEPLOYMENT_ID}-risingwave-state
+      bucket: workshop-${DEPLOYMENT_ID}-${ACCOUNT_ID}-risingwave-state
       region: us-east-1
       credentials:
         useServiceAccount: true

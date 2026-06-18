@@ -19,12 +19,18 @@ OUT_FILE="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)/DEPLOYMENT_SUMMA
 REGION="${AWS_DEFAULT_REGION:-$(aws configure get region)}"
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 GENERATED_AT=$(date -u '+%Y-%m-%d %H:%M UTC')
+DOCS_BASE_URL="https://aws-samples.github.io/sample-edge-to-cloud-digital-ops-workshop"
 
 # ── Helper: read one CloudFormation export value ─────────────────────────────
+# list-exports paginates; pipe through jq to get a single match across all pages.
 cfn_export() {
-  aws cloudformation list-exports \
-    --query "Exports[?Name=='$1'].Value | [0]" \
-    --output text 2>/dev/null || echo "—"
+  local val
+  val=$(aws cloudformation list-exports \
+    --output json \
+    --query "Exports[?Name=='$1'].Value" \
+    2>/dev/null \
+    | python3 -c "import json,sys; pages=json.load(sys.stdin); print(pages[0] if pages else '')" 2>/dev/null) || true
+  if [[ -z "$val" || "$val" == "None" ]]; then echo "—"; else echo "$val"; fi
 }
 
 # ── Build the markdown ────────────────────────────────────────────────────────
@@ -40,7 +46,8 @@ Region: \`${REGION}\`
 
 ## What to do with these IDs
 
-Each **Deployment ID** is the unique identifier for one participant slot.  Use it to:
+Each **Deployment ID** is the unique identifier for one participant slot.
+Share the **Workshop URL** with the participant — it pre-loads their slot ID into every code block in the docs.
 
 | Task | Command |
 |------|---------|
@@ -54,10 +61,21 @@ Each **Deployment ID** is the unique identifier for one participant slot.  Use i
 HEADER
 
   for ID in "${DEPLOYMENT_IDS[@]}"; do
-    # Stack name pattern used by Amplify Gen 2
-    STACK=$(aws cloudformation describe-stacks \
-      --query "Stacks[?contains(StackName, '${ID}')].StackName | [0]" \
-      --output text 2>/dev/null || echo "")
+    # Stack name: find the top-level Amplify sandbox stack for this deployment ID.
+    # The ExportingStackId on any CFN export for this slot contains the stack ARN.
+    STACK=$(aws cloudformation list-exports \
+      --output json \
+      --query "Exports[?Name=='workshop-${ID}-deployment-id'].ExportingStackId" \
+      2>/dev/null \
+      | python3 -c "
+import json, sys
+arns = json.load(sys.stdin)
+if arns:
+    # ARN format: arn:aws:cloudformation:region:account:stack/NAME/uuid
+    print(arns[0].split('/')[1])
+else:
+    print('—')
+" 2>/dev/null) || STACK="—"
 
     BUCKET=$(cfn_export "workshop-${ID}-bucket")
     MSK_ARN=$(cfn_export "workshop-${ID}-msk-arn")
@@ -70,9 +88,12 @@ HEADER
     cat <<SLOT
 ## \`${ID}\`
 
+**Share with participant:** ${DOCS_BASE_URL}/?did=${ID}&aid=${ACCOUNT}
+
 | Key | Value |
 |-----|-------|
 | Deployment ID | \`${ID}\` |
+| Workshop URL | [${DOCS_BASE_URL}/?did=${ID}&aid=${ACCOUNT}](${DOCS_BASE_URL}/?did=${ID}&aid=${ACCOUNT}) |
 | CloudFormation stack | \`${STACK:-—}\` |
 | S3 bucket | \`${BUCKET}\` |
 | MSK cluster ARN | \`${MSK_ARN}\` |

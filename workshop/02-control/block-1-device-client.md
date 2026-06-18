@@ -6,7 +6,9 @@
 
 ## Overview
 
-The AWS IoT Device Client is an open-source reference implementation that runs directly on edge devices. It supports a broad range of hardware architectures — **x86_64, aarch64, armv7, PowerPC64, PowerPC64le, MIPS32** — and runs on Ubuntu, Amazon Linux, and Red Hat UBI8. Docker images for the most common architectures (x86_64, aarch64, armv7) are available through ECR, making it straightforward to deploy via containers on capable devices.
+The AWS IoT Device Client is an open-source reference implementation written in C++ that runs directly on edge devices. It supports a broad range of hardware architectures — **x86_64, aarch64, armv7, PowerPC64, PowerPC64le, MIPS32** — and runs on Ubuntu, Amazon Linux, and Red Hat UBI8.
+
+Because it is a compiled C++ binary, **you must build the artifact for the specific architecture and OS you intend to run it on.** The GitHub repository includes CMake toolchain files for cross-compilation (aarch64, armhf, MIPS, PowerPC) and Dockerfiles with the AWS IoT SDK pre-installed to use as build environments. The [GitHub Releases](https://github.com/awslabs/aws-iot-device-client/releases) page contains source code archives only — there are no pre-compiled binaries or publicly reachable Docker images.
 
 Review how AWS IoT Device Client works as a `systemd` service alongside the EC2 application:
 
@@ -17,11 +19,11 @@ Review how AWS IoT Device Client works as a `systemd` service alongside the EC2 
 
 ## Steps
 
-1. Navigate to **Systems Manager → Session Manager** → start a session on one of the 3 EC2 instances (no SSH required)
+1. Navigate to [**Systems Manager → Session Manager**](https://console.aws.amazon.com/systems-manager/session-manager/sessions) → start a session on one of the 3 EC2 instances (no SSH required)
 2. Inspect the Device Client service:
    ```bash
    systemctl status aws-iot-device-client
-   journalctl -u aws-iot-device-client -n 50
+   sudo journalctl -u aws-iot-device-client -n 50
    ```
 3. Inspect the job handler directory:
    ```bash

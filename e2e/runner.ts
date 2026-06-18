@@ -447,7 +447,7 @@ async function createIotJob(
           type: "runHandler",
           input: {
             handler: "run-script.sh",
-            args: [`s3://workshop-${DEPLOYMENT_ID}/job-scripts/${s3ScriptKey}`],
+            args: [`s3://${BUCKET_NAME}/job-scripts/${s3ScriptKey}`],
           },
           runAsUser: "",
         },
@@ -521,14 +521,20 @@ let mskArn: string | undefined;
 let mskBootstrap = "";
 let mskCreds: { username: string; password: string } = { username: "", password: "" };
 let cloudKcPath = "";
+let ACCOUNT_ID = "";
+let BUCKET_NAME = "";
 
 try {
   console.log("");
   console.log("╔══════════════════════════════════════════════════════════╗");
   console.log("║   Edge Digital Ops Workshop — End-to-End Test Suite      ║");
   console.log("╚══════════════════════════════════════════════════════════╝");
+  ACCOUNT_ID = (await sts.send(new GetCallerIdentityCommand({}))).Account!;
+  BUCKET_NAME = `workshop-${DEPLOYMENT_ID}-${ACCOUNT_ID}`;
+
   console.log(`  Deployment ID           : ${DEPLOYMENT_ID}`);
   console.log(`  Region                  : ${REGION}`);
+  console.log(`  S3 bucket               : ${BUCKET_NAME}`);
   console.log(`  Skip deploy             : ${SKIP_DEPLOY}`);
   console.log(`  Skip teardown           : ${SKIP_TEARDOWN}`);
   console.log(`  Skip platform teardown  : ${SKIP_PLATFORM_TEARDOWN}`);
@@ -538,8 +544,7 @@ try {
   // populated during their respective phases. When --session skips earlier phases,
   // we look them up here so later phases can use them.
   if (SESSION_ARG) {
-    const accountId = (await sts.send(new GetCallerIdentityCommand({}))).Account!;
-    thingGroupArn = `arn:aws:iot:${REGION}:${accountId}:thinggroup/${DEPLOYMENT_ID}-devices`;
+    thingGroupArn = `arn:aws:iot:${REGION}:${ACCOUNT_ID}:thinggroup/${DEPLOYMENT_ID}-devices`;
 
     const edgeInstancesResp = await ec2.send(
       new DescribeInstancesCommand({
@@ -767,7 +772,7 @@ try {
     { data: (r) => ({ thingCount: r.thingCount, sdkLatencyMs: r.durationMs }) }
   );
 
-  thingGroupArn = `arn:aws:iot:${REGION}:${(await sts.send(new GetCallerIdentityCommand({}))).Account}:thinggroup/${DEPLOYMENT_ID}-devices`;
+  thingGroupArn = `arn:aws:iot:${REGION}:${ACCOUNT_ID}:thinggroup/${DEPLOYMENT_ID}-devices`;
 
   await check("IoT provisioning template exists", async () => {
     const t0 = Date.now();
@@ -785,9 +790,9 @@ try {
     return { ruleArn: resp.ruleArn!, durationMs: Date.now() - t0 };
   }, { data: (r) => ({ sdkLatencyMs: r.durationMs }) });
 
-  await check(`S3 bucket workshop-${DEPLOYMENT_ID} exists`, async () => {
+  await check(`S3 bucket ${BUCKET_NAME} exists`, async () => {
     const t0 = Date.now();
-    await s3.send(new HeadBucketCommand({ Bucket: `workshop-${DEPLOYMENT_ID}` }));
+    await s3.send(new HeadBucketCommand({ Bucket: BUCKET_NAME }));
     return { durationMs: Date.now() - t0 };
   }, { data: (r) => ({ sdkLatencyMs: r.durationMs }) });
 
@@ -813,7 +818,7 @@ try {
   const s3Deadline = Date.now() + 300_000;
   while (Date.now() < s3Deadline) {
     const resp = await s3.send(
-      new ListObjectsV2Command({ Bucket: `workshop-${DEPLOYMENT_ID}`, Prefix: "telemetry/", MaxKeys: 10 })
+      new ListObjectsV2Command({ Bucket: BUCKET_NAME, Prefix: "telemetry/", MaxKeys: 10 })
     ).catch(() => null);
     s3ObjectCount = resp?.Contents?.length ?? 0;
     if (s3ObjectCount > 0) break;
@@ -825,7 +830,7 @@ try {
   await check("S3 telemetry objects exist (data is flowing)", async () => {
     if (s3ObjectCount === 0) throw new Error("No telemetry objects found in S3 after 5 min");
     const listing = await s3.send(
-      new ListObjectsV2Command({ Bucket: `workshop-${DEPLOYMENT_ID}`, Prefix: "telemetry/", MaxKeys: 5 })
+      new ListObjectsV2Command({ Bucket: BUCKET_NAME, Prefix: "telemetry/", MaxKeys: 5 })
     ).catch(() => null);
     s3SampleKey = listing?.Contents?.[0]?.Key;
     return { objectCount: s3ObjectCount };
@@ -835,7 +840,7 @@ try {
   if (s3SampleKey) {
     try {
       const obj = await s3.send(new GetObjectCommand({
-        Bucket: `workshop-${DEPLOYMENT_ID}`,
+        Bucket: BUCKET_NAME,
         Key: s3SampleKey,
       }));
       const body = await obj.Body?.transformToString("utf8") ?? "";
@@ -853,7 +858,7 @@ try {
 
   const telemetryJobId = "update-telemetry-v2-e2e";
   log(`Uploading job-scripts/telemetry-v2.sh to S3...`);
-  shell(`aws s3 cp job-scripts/telemetry-v2.sh s3://workshop-${DEPLOYMENT_ID}/job-scripts/telemetry-v2.sh`);
+  shell(`aws s3 cp job-scripts/telemetry-v2.sh s3://${BUCKET_NAME}/job-scripts/telemetry-v2.sh`);
 
   log(`Creating IoT Job ${telemetryJobId}...`);
   await createIotJob(telemetryJobId, thingGroupArn, "telemetry-v2.sh", 10);
@@ -870,7 +875,7 @@ try {
 
   const shadowJobId = "add-shadows-e2e";
   log(`Uploading job-scripts/add-shadows.sh to S3...`);
-  shell(`aws s3 cp job-scripts/add-shadows.sh s3://workshop-${DEPLOYMENT_ID}/job-scripts/add-shadows.sh`);
+  shell(`aws s3 cp job-scripts/add-shadows.sh s3://${BUCKET_NAME}/job-scripts/add-shadows.sh`);
 
   log(`Creating IoT Job ${shadowJobId}...`);
   await createIotJob(shadowJobId, thingGroupArn, "add-shadows.sh", 10);
@@ -965,12 +970,11 @@ try {
       `--dry-run=client -o yaml | kubectl --kubeconfig ${cloudKcPath} apply -f -`
     );
     // Service account with IRSA annotation — required for RisingWave pods to access S3
-    const accountId = (await sts.send(new GetCallerIdentityCommand({}))).Account!;
     shell(
       `kubectl --kubeconfig ${cloudKcPath} create serviceaccount risingwave-cloud ` +
       `--namespace ${DEPLOYMENT_ID} --dry-run=client -o yaml | ` +
       `kubectl --kubeconfig ${cloudKcPath} annotate -f - --local -o yaml ` +
-      `eks.amazonaws.com/role-arn=arn:aws:iam::${accountId}:role/workshop-risingwave-s3 | ` +
+      `eks.amazonaws.com/role-arn=arn:aws:iam::${ACCOUNT_ID}:role/workshop-risingwave-s3 | ` +
       `kubectl --kubeconfig ${cloudKcPath} apply -f -`
     );
 
@@ -993,14 +997,13 @@ try {
       `--for=delete --timeout=120s 2>/dev/null || true`
     );
     shellOutput(
-      `aws s3 rm s3://workshop-${DEPLOYMENT_ID}-risingwave-state/ --recursive --region ${REGION} 2>/dev/null || true`
+      `aws s3 rm s3://${BUCKET_NAME}-risingwave-state/ --recursive --region ${REGION} 2>/dev/null || true`
     );
 
     // Deploy RisingWave instance (fresh start — no stale S3 state or streaming DDL)
-    const rwManifest = readFileSync(`${REPO_ROOT}/k8s/risingwave-cloud.yaml`, "utf8").replace(
-      /\$\{DEPLOYMENT_ID\}/g,
-      DEPLOYMENT_ID
-    );
+    const rwManifest = readFileSync(`${REPO_ROOT}/k8s/risingwave-cloud.yaml`, "utf8")
+      .replace(/\$\{DEPLOYMENT_ID\}/g, DEPLOYMENT_ID)
+      .replace(/\$\{ACCOUNT_ID\}/g, ACCOUNT_ID);
     const rwManifestPath = join(tmpdir(), `risingwave-cloud-${DEPLOYMENT_ID}.yaml`);
     writeFileSync(rwManifestPath, rwManifest);
     shell(`kubectl --kubeconfig ${cloudKcPath} apply -n ${DEPLOYMENT_ID} -f ${rwManifestPath}`);
@@ -1096,7 +1099,19 @@ try {
     );
     const rwPfTunnel = { localPort: 14567, proc: rwPfProc, close: () => { try { rwPfProc.kill(); } catch { /* */ } } };
     tunnels.push(rwPfTunnel);
-    await sleep(6_000);
+    // Poll until port-forward is ready (up to 30s)
+    await (async () => {
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        try {
+          const c = new pg.Client({ host: "localhost", port: 14567, user: "root", database: "dev", password: "", connectionTimeoutMillis: 2000 });
+          await c.connect();
+          await c.end();
+          return;
+        } catch { await sleep(1_000); }
+      }
+      throw new Error("Timed out waiting for RisingWave port-forward on 14567");
+    })();
 
     const ddlTemplate = readFileSync(`${REPO_ROOT}/risingwave/ddl-cloud.sql`, "utf8");
     const ddl = ddlTemplate
@@ -1231,7 +1246,19 @@ try {
       );
       const rwCloudTunnel2 = { localPort: 14568, proc: rwCloudPf2, close: () => { try { rwCloudPf2.kill(); } catch { /* */ } } };
       tunnels.push(rwCloudTunnel2);
-      await sleep(8_000);
+      // Poll until the port-forward is accepting connections (up to 30s)
+      await (async () => {
+        const deadline = Date.now() + 30_000;
+        while (Date.now() < deadline) {
+          try {
+            const c = new pg.Client({ host: "localhost", port: 14568, user: "root", database: "dev", password: "", connectionTimeoutMillis: 2000 });
+            await c.connect();
+            await c.end();
+            return;
+          } catch { await sleep(1_000); }
+        }
+        throw new Error("Timed out waiting for RisingWave port-forward on 14568");
+      })();
 
       let rwCloudClient2: pg.Client | undefined;
       try {
@@ -1280,7 +1307,18 @@ try {
       );
       const tsdbCloudTunnel = { localPort: 15432, proc: tsdbCloudPf, close: () => { try { tsdbCloudPf.kill(); } catch { /* */ } } };
       tunnels.push(tsdbCloudTunnel);
-      await sleep(4_000);
+      await (async () => {
+        const deadline = Date.now() + 30_000;
+        while (Date.now() < deadline) {
+          try {
+            const c = new pg.Client({ host: "localhost", port: 15432, user: "workshop", database: "edge", password: tsdbPassword, connectionTimeoutMillis: 2000 });
+            await c.connect();
+            await c.end();
+            return;
+          } catch { await sleep(1_000); }
+        }
+        throw new Error("Timed out waiting for TimescaleDB port-forward on 15432");
+      })();
 
       let tsdbCloudClient: pg.Client | undefined;
       try {
@@ -1329,17 +1367,30 @@ try {
     }
 
     // ── 4. Freshness comparison summary ─────────────────────────────────────
-    await check("Freshness ladder: RisingWave < TimescaleDB < Datalake", async () => {
+    await check("Freshness ladder: streaming DBs >> Datalake", async () => {
       const rw   = rwCloudFreshnessMs;
       const tsdb = tsdbCloudFreshnessMs;
       const s3   = athenaFreshnessMs;
       if (rw == null || tsdb == null || s3 == null) {
         throw new Error(`Missing freshness readings — rw=${rw} tsdb=${tsdb} s3=${s3}`);
       }
-      if (!(rw < tsdb && tsdb < s3)) {
-        throw new Error(
-          `Freshness ladder violated: expected rw < tsdb < s3, got rw=${rw}ms tsdb=${tsdb}ms s3=${s3}ms`
-        );
+      // Both streaming stores must be <10s and at least 5× fresher than the datalake.
+      // RW vs TSDB ordering is not guaranteed in a single sample (sequential queries +
+      // 1 Hz publish means a new message can arrive between the two reads).
+      const RW_MAX_MS = 10_000;
+      const TSDB_MAX_MS = 10_000;
+      const MIN_S3_RATIO = 5;
+      if (rw > RW_MAX_MS) {
+        throw new Error(`RisingWave freshness too stale: ${rw}ms (expected < ${RW_MAX_MS}ms)`);
+      }
+      if (tsdb > TSDB_MAX_MS) {
+        throw new Error(`TimescaleDB freshness too stale: ${tsdb}ms (expected < ${TSDB_MAX_MS}ms)`);
+      }
+      if (s3 < rw * MIN_S3_RATIO) {
+        throw new Error(`S3/Athena not stale enough vs RisingWave: s3=${s3}ms, rw=${rw}ms (expected s3 > rw × ${MIN_S3_RATIO})`);
+      }
+      if (s3 < tsdb * MIN_S3_RATIO) {
+        throw new Error(`S3/Athena not stale enough vs TimescaleDB: s3=${s3}ms, tsdb=${tsdb}ms (expected s3 > tsdb × ${MIN_S3_RATIO})`);
       }
       capture("Data freshness comparison (all tiers)", JSON.stringify({ rw, tsdb, s3 }, null, 2));
       return { risingwave_freshness_ms: rw, timescaledb_freshness_ms: tsdb, datalake_athena_freshness_ms: s3 };
@@ -1357,7 +1408,7 @@ try {
 
   const k3sJobId = "deploy-k3s-e2e";
   log("Uploading job-scripts/deploy-k3s.sh to S3...");
-  shell(`aws s3 cp job-scripts/deploy-k3s.sh s3://workshop-${DEPLOYMENT_ID}/job-scripts/deploy-k3s.sh`);
+  shell(`aws s3 cp job-scripts/deploy-k3s.sh s3://${BUCKET_NAME}/job-scripts/deploy-k3s.sh`);
 
   log(`Creating IoT Job ${k3sJobId}...`);
   await createIotJob(k3sJobId, thingGroupArn, "deploy-k3s.sh", 45);
@@ -1795,7 +1846,7 @@ try {
     await check("S3 bucket deleted", async () => {
       const t0 = Date.now();
       try {
-        await s3.send(new HeadBucketCommand({ Bucket: `workshop-${DEPLOYMENT_ID}` }));
+        await s3.send(new HeadBucketCommand({ Bucket: BUCKET_NAME }));
         throw new Error("Bucket still exists");
       } catch (err: unknown) {
         if (err instanceof Error && (err.name === "NotFound" || err.name === "NoSuchBucket" || err.message.includes("403")))

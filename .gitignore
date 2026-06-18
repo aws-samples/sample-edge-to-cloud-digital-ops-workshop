@@ -1,5 +1,6 @@
 tmp
 .claude
+**/.next
 
 # Helm chart tarballs — run `helm dependency update helm/edge-stack` to regenerate
 helm/edge-stack/charts/*.tgz

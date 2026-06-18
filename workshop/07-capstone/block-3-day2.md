@@ -22,7 +22,7 @@ shadow.name.device-config.reported.telemetry_interval_ms:[4000 TO *]
 
 **3. Observe staged rollout** with the abort criteria in action:
 
-- Navigate to **IoT Core → Manage → Jobs → (job)**
+- Navigate to [**IoT Core → Manage → Jobs**](https://console.aws.amazon.com/iot/home#/jobhub) → open the job
 - Watch each device progress: `QUEUED` → `IN_PROGRESS` → `SUCCEEDED`
 - Confirm Fleet Indexing query returns zero devices after completion:
 

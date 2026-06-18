@@ -9,7 +9,7 @@
 
 ## Steps
 
-1. Navigate to **S3 → `workshop-{DEPLOYMENT_ID}/telemetry/`**
+1. Navigate to [**S3 → `workshop-ws-slot00-000000000000/telemetry/`**](https://s3.console.aws.amazon.com/s3/buckets/workshop-ws-slot00-000000000000?prefix=telemetry/)
 2. Observe JSON files being created by the IoT Rules Engine (one file per MQTT message)
 3. Note the key prefix structure: `telemetry/edge/{DEPLOYMENT_ID}/{THING_NAME}/telemetry/{timestamp}`
 4. Click one file → **Download** to inspect a raw JSON payload

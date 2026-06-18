@@ -25,7 +25,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-S3_BUCKET="workshop-${DEPLOYMENT_ID}"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+S3_BUCKET="workshop-${DEPLOYMENT_ID}-${ACCOUNT_ID}"
 IMAGE_TAG="workshop-hmi:latest"
 LOCAL_TARBALL="/tmp/workshop-hmi.tar.gz"
 S3_KEY="images/workshop-hmi.tar.gz"

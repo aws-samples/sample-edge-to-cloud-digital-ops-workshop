@@ -9,6 +9,16 @@ import { existsSync } from "fs";
 const REGION = process.env.AWS_REGION ?? "us-east-1";
 const SLOT = process.env.WORKSHOP_TEST_SLOT ?? "ws-slot00";
 
+function getAccountId() {
+  return execSync(
+    "aws sts get-caller-identity --query Account --output text",
+    { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }
+  ).trim();
+}
+
+const ACCOUNT_ID = getAccountId();
+const BUCKET_NAME = `workshop-${SLOT}-${ACCOUNT_ID}`;
+
 let passed = 0;
 let failed = 0;
 
@@ -49,9 +59,9 @@ check(`IoT provisioning template: ${SLOT}-provisioning`, () => {
 });
 
 // 4. S3 bucket exists
-check(`S3 bucket: workshop-${SLOT}`, () => {
+check(`S3 bucket: ${BUCKET_NAME}`, () => {
   execSync(
-    `aws s3api head-bucket --bucket workshop-${SLOT} --region ${REGION}`,
+    `aws s3api head-bucket --bucket ${BUCKET_NAME} --region ${REGION}`,
     { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }
   );
 });

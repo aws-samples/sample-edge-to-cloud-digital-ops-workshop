@@ -30,7 +30,7 @@ Use a `??? example` collapsible admonition with a GitHub button above the code b
 
 ~~~markdown
 ??? example "View source — description"
-    [:simple-github: Open in GitHub](https://github.com/energy-digital-operations/edge-digital-operations-workshop/blob/main/path/to/file){ .md-button target=_blank }
+    [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/path/to/file){ .md-button target=_blank }
 
     ```typescript
     \--8<-- "path/to/file.ts:my-section"
@@ -47,15 +47,24 @@ Paths in `--8<-- "..."` are resolved relative to the **repo root** (configured v
 
 ---
 
-## Deployment ID Substitution
+## Deployment ID and Account ID Substitution
 
-All code blocks use `ws-slot00` as the placeholder deployment ID. The static site swaps it client-side when a participant loads a URL with `?did=ws-slotXX`:
+All code blocks use two placeholders that are swapped client-side when the participant loads the docs:
+
+| Placeholder | Query param | Example value |
+|---|---|---|
+| `ws-slot00` | `?did=` | `ws-slot03` |
+| `000000000000` | `?aid=` | `123456789012` |
+
+The facilitator shares a URL with both values embedded:
 
 ```
-https://your-workshop-site/?did=ws-slot03
+https://your-workshop-site/?did=ws-slot03&aid=123456789012
 ```
 
-The value persists in `sessionStorage` for the rest of the session, so it only needs to appear in the first URL the facilitator shares. See [`workshop/javascripts/deployment-id.js`](https://github.com/energy-digital-operations/edge-digital-operations-workshop/blob/main/workshop/javascripts/deployment-id.js) for the implementation.
+Both values persist in `sessionStorage` for the rest of the session. See [`workshop/javascripts/deployment-id.js`](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/workshop/javascripts/deployment-id.js) for the implementation.
+
+S3 bucket names in docs follow the pattern `workshop-ws-slot00-000000000000` — both placeholders are present so the JS can substitute them independently.
 
 ---
 

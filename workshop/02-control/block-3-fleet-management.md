@@ -6,7 +6,7 @@
 
 ## Steps
 
-**1. Navigate to IoT Core → Software Package Catalog**
+**1. Navigate to [IoT Core → Software Package Catalog](https://console.aws.amazon.com/iot/home#/softwarepackagecatalog)**
 
 - Observe the pre-registered package `{DEPLOYMENT_ID}-telemetry-agent` with versions `1.0.0` and `2.0.0` (deployed by the platform stack — no manual registration needed)
 - The `telemetry-v2.sh` job handler will update each device's `$package` shadow with `version: 2.0.0` after it runs successfully

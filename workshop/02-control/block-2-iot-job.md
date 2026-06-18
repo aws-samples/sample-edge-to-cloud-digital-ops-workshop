@@ -11,28 +11,33 @@ The update does two things:
 
 ## Steps
 
-**1. Open `job-scripts/telemetry-v2.sh`** in your editor (or browse it on [GitHub](https://github.com/energy-digital-operations/edge-digital-operations-workshop/blob/main/job-scripts/telemetry-v2.sh)). Facilitator walks through the key sections:
+**1. Open `job-scripts/telemetry-v2.sh`** in your editor (or browse it on [GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/job-scripts/telemetry-v2.sh)). Facilitator walks through the key sections:
 
-- `TELEMETRY_INTERVAL_MS` changing from `5000` → `1000`
-- The `METRICS` array extended with the two network metrics
-- The `aws iot update-thing-shadow` call that reports `config_version: 2.0.0`
+- `sleep 1` at the bottom of the loop (down from 5 s → 1 Hz)
+- The network delta block: reads `/proc/net/dev`, computes `NET_IO_BYTES_SENT` / `NET_IO_BYTES_RECV` each cycle
+- The `aws iot-data update-thing-shadow` call that reports `telemetry_interval_ms: 1000`, the full metrics list, and `config_version: "2.0.0"`
 - The `exit 0` / `exit 1` contract
 
 **2. Make the edits** directly in the IDE: change the interval and add the two network metrics to the array.
 
-**3. Upload the edited script to S3:**
+??? example "View source — `job-scripts/telemetry-v2.sh`"
+    [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/job-scripts/telemetry-v2.sh){ .md-button target=_blank }
+
+    ```bash
+    --8<-- "job-scripts/telemetry-v2.sh:job-handler"
+    ```
+
+**3. Upload the edited script and job document to S3:**
 
 ```bash
 aws s3 cp job-scripts/telemetry-v2.sh \
-  s3://workshop-{DEPLOYMENT_ID}/job-scripts/telemetry-v2.sh
+  s3://workshop-ws-slot00-000000000000/job-scripts/telemetry-v2.sh
 ```
 
-**4. Create the IoT Job in the console:**
+The console also requires the job document to be stored in S3. Create and upload it now:
 
-- Target: Thing Group `{DEPLOYMENT_ID}-devices`
-- Job document (Device Client v1.0 steps format):
-
-```json
+```bash
+cat > /tmp/telemetry-v2-job-doc.json << 'EOF'
 {
   "version": "1.0",
   "steps": [
@@ -42,16 +47,27 @@ aws s3 cp job-scripts/telemetry-v2.sh \
         "type": "runHandler",
         "input": {
           "handler": "run-script.sh",
-          "args": ["s3://workshop-{DEPLOYMENT_ID}/job-scripts/telemetry-v2.sh"]
+          "args": ["s3://workshop-ws-slot00-000000000000/job-scripts/telemetry-v2.sh"]
         },
         "runAsUser": ""
       }
     }
   ]
 }
+EOF
+
+aws s3 cp /tmp/telemetry-v2-job-doc.json \
+  s3://workshop-ws-slot00-000000000000/job-docs/telemetry-v2-job-doc.json
 ```
 
 The `run-script.sh` handler receives the S3 URI as `$2` and downloads it to run locally.
+
+**4. [Create the IoT Job in the console](https://us-east-1.console.aws.amazon.com/iot/home#/jobhub):**
+
+- Job type: **Create custom job**
+- **Thing groups to run this job:** `{DEPLOYMENT_ID}-devices`
+- **Job document:** select **From file**, then paste the S3 URL:
+  `s3://workshop-ws-slot00-000000000000/job-docs/telemetry-v2-job-doc.json`
 
 **5. Configure rollout:**
 

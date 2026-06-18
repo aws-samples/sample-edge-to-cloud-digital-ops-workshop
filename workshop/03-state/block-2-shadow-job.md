@@ -17,7 +17,7 @@
 
 ```bash
 aws s3 cp job-scripts/add-shadows.sh \
-  s3://workshop-{DEPLOYMENT_ID}/job-scripts/add-shadows.sh
+  s3://workshop-ws-slot00-000000000000/job-scripts/add-shadows.sh
 ```
 
 2. Create an IoT Job targeting Thing Group `{DEPLOYMENT_ID}-devices` with this document:
@@ -32,7 +32,7 @@ aws s3 cp job-scripts/add-shadows.sh \
         "type": "runHandler",
         "input": {
           "handler": "run-script.sh",
-          "args": ["s3://workshop-{DEPLOYMENT_ID}/job-scripts/add-shadows.sh"]
+          "args": ["s3://workshop-ws-slot00-000000000000/job-scripts/add-shadows.sh"]
         },
         "runAsUser": ""
       }

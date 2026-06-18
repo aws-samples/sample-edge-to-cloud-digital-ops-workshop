@@ -6,7 +6,7 @@
 
 ## Steps
 
-1. Navigate to **Athena → workgroup `workshop-{DEPLOYMENT_ID}`**
+1. Navigate to [**Athena → workgroup `workshop-ws-slot00`**](https://console.aws.amazon.com/athena/home#/query-editor?workgroup=workshop-ws-slot00)
 2. The Glue table `workshop_{DEPLOYMENT_ID}.telemetry` was pre-created by the platform stack — no DDL needed. Confirm it exists:
 
 ```sql
@@ -28,10 +28,10 @@ GROUP BY thing_name
 ORDER BY freshness_seconds DESC;
 ```
 
-4. Observe that freshness is typically **a few seconds** — because IoT Rule → S3 fires per-message with no batching. This is faster than the 30–90 s floor you'd see with MSK Connect, but the cost per query is still high (see discussion below).
+4. Observe that freshness is typically **30–90 seconds** — because data flows IoT Rule → MSK → Hudi table in S3. MSK batches messages and the Hudi sink commits Parquet files on a timed interval rather than writing one object per MQTT message.
 
-!!! note "This is different from the production Hudi path"
-    In a production deployment, MSK Connect writes Parquet files with time-based partitioning. The IoT Rule path here writes raw JSON, which Athena can query via a JsonSerDe table. The freshness and cost characteristics differ, but the core concept — Athena is not a live-dashboard tool — holds for both.
+!!! info "Why not a direct IoT Rule → S3 path?"
+    A direct IoT Rule → S3 action (one S3 object per message) would yield lower latency but creates millions of tiny files that make Athena scans expensive. The MSK → Hudi path batches writes into time-partitioned Parquet files, which trades a bit of freshness for dramatically lower scan cost.
 
 ---
 
@@ -40,13 +40,13 @@ ORDER BY freshness_seconds DESC;
 Walk through the chain of problems:
 
 **1. Every Athena query is a full S3 scan.**  
-Each query scans all JSON files in the prefix. At 1 Hz × 3 devices × a week of data, that's >1.8 million objects. No row-level indexing, no pushdown beyond prefix filtering.
+Each query scans all Parquet files under the Hudi table prefix. Hudi's time-partitioned layout reduces file count compared to per-message writes, but there is still no row-level indexing and no pushdown beyond partition filtering.
 
 **2. Athena startup overhead is irreducible.**  
 Even simple queries incur ~2–5 seconds of planning and DPU startup before the first byte returns. At a 5-second dashboard refresh cadence, you'd be starting a new query before the previous one finishes — and paying per query.
 
 **3. S3 is not a streaming source.**  
-IoT Rule writes one S3 object per message. S3 has no change-notification mechanism a browser can subscribe to. You'd have to poll — which amplifies both latency and cost.
+The Hudi sink commits files on a batch interval; there is no change-notification mechanism a browser can subscribe to. You'd have to poll Athena — which amplifies both latency and cost.
 
 !!! info "This is the archive tier"
     Appropriate for compliance, ML training, and historical analysis. Not for operational dashboards. Sessions 3–4 introduce the higher-frequency tiers.
@@ -56,4 +56,4 @@ IoT Rule writes one S3 object per message. S3 has no change-notification mechani
 ## Reference
 
 - [Athena query fundamentals](https://docs.aws.amazon.com/athena/latest/ug/querying.html)
-- [Hudi incremental query](https://hudi.apache.org/docs/querying_data#incremental-query) — what you'd see in production with MSK Connect
+- [Hudi incremental query](https://hudi.apache.org/docs/querying_data#incremental-query) — enables time-bounded scans on the Hudi table to avoid full-table reads

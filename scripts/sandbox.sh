@@ -35,7 +35,8 @@ fi
 # Uses the official GHCR build image so EC2 user data only needs a fast S3 download.
 # The binary is cached locally after the first build; subsequent runs skip the build step.
 LOCAL_BINARY_CACHE="$HOME/.cache/workshop/aws-iot-device-client"
-S3_BUCKET="workshop-${DEPLOYMENT_ID}"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+S3_BUCKET="workshop-${DEPLOYMENT_ID}-${ACCOUNT_ID}"
 
 if [[ ! -f "$LOCAL_BINARY_CACHE" ]]; then
   echo ">>> Building AWS IoT Device Client using ECR Public amazonlinux image (one-time, ~8 min)…"

@@ -12,7 +12,7 @@ Launch both steps simultaneously — they run independently and must both comple
 
 ```bash
 aws s3 cp job-scripts/deploy-k3s.sh \
-  s3://workshop-{DEPLOYMENT_ID}/job-scripts/deploy-k3s.sh
+  s3://workshop-ws-slot00-000000000000/job-scripts/deploy-k3s.sh
 ```
 
 2. Create an IoT Job targeting Thing Group `{DEPLOYMENT_ID}-devices`:
@@ -27,7 +27,7 @@ aws s3 cp job-scripts/deploy-k3s.sh \
         "type": "runHandler",
         "input": {
           "handler": "run-script.sh",
-          "args": ["s3://workshop-{DEPLOYMENT_ID}/job-scripts/deploy-k3s.sh"]
+          "args": ["s3://workshop-ws-slot00-000000000000/job-scripts/deploy-k3s.sh"]
         },
         "runAsUser": ""
       }

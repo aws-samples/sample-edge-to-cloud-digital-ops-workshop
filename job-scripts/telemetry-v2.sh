@@ -47,7 +47,7 @@ while true; do
     --cli-binary-format raw-in-base64-out \
     2>/dev/null || true
 
-  sleep 1
+  sleep 0.1
 done
 TELEMETRY
 

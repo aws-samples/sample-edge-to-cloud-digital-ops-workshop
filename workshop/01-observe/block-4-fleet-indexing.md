@@ -16,26 +16,38 @@
    ```bash
    aws iot describe-index --index-name AWS_Things
    ```
-4. Navigate to **IoT Core → Manage → Things** and use the search bar to confirm all 3 devices are visible:
+4. Navigate to [**IoT Core → Manage → Things → Advanced thing search**](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=%22thingName%3A%20*%22) and confirm all devices are visible.
+
+   > **Console tip:** The regular Things search bar uses a display-name dialect that doesn't support shadow/connectivity queries. Use **Advanced thing search** instead — it accepts the same Lucene syntax as the CLI and the links below pre-populate the query for you.
+
+5. Query by shadow state — confirm current config version:
+
+   [Open in console](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=%22shadow.name.device-config.reported.config_version%3A%202.0.0%22){ .md-button target=_blank }
+
+   ```bash
+   aws iot search-index --index-name AWS_Things \
+     --query-string 'shadow.name.device\-config.reported.config_version:2.0.0'
    ```
-   thingName:*
-   ```
-5. Query by shadow state — confirm initial config version:
-   ```
-   shadow.name.device-config.reported.config_version:1.0.0
-   ```
+   > **Note:** The backslash before the hyphen (`device\-config`) is required because `-` is a reserved character in the Lucene query language. Without it the query parser rejects the field name with `InvalidQueryException`. The same escaping applies to any shadow name that contains a hyphen.
+
 6. Query connectivity status:
+
+   [Open in console](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=%22connectivity.connected%3A%20true%22){ .md-button target=_blank }
+
+   ```bash
+   aws iot search-index --index-name AWS_Things \
+     --query-string 'connectivity.connected:true'
    ```
-   connectivity.connected:true
+
+7. Query by software package version — confirm all devices are on `telemetry-agent` v2.0.0:
+
+   [Open in console](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=%22shadow.name.%24package.reported.telemetry-agent.version%3A%202.0.0%22){ .md-button target=_blank }
+
+   ```bash
+   aws iot search-index --index-name AWS_Things \
+     --query-string 'shadow.name.$package.reported.telemetry\-agent.version:2.0.0'
    ```
-7. Query by software package version — confirm all devices are on `telemetry-agent` v1.0.0:
-   ```
-   shadow.name.$package.reported.telemetry-agent.version:1.0.0
-   ```
-8. Query by source IP (socket indexing) — inspect where devices are connecting from:
-   ```
-   connectivity.sourceIp:*
-   ```
+
 
 ---
 
