@@ -20,53 +20,60 @@ aws s3 cp job-scripts/add-shadows.sh \
   s3://workshop-shared-v2-000000000000/ws-slot00/job-scripts/add-shadows.sh
 ```
 
-2. Create the IoT Job targeting your device group:
+2. [Create the IoT Job in the console](https://us-east-1.console.aws.amazon.com/iot/home#/jobhub):
 
-```bash
-cat > /tmp/add-shadows-job-doc.json << 'EOF'
-{
-  "version": "1.0",
-  "steps": [
-    {
-      "action": {
-        "name": "add-shadows",
-        "type": "runHandler",
-        "input": {
-          "handler": "run-script.sh",
-          "args": ["s3://workshop-shared-v2-000000000000/ws-slot00/job-scripts/add-shadows.sh"]
-        },
-        "runAsUser": ""
-      }
-    }
-  ]
-}
-EOF
+    - Job type: **Create custom job**
+    - **Thing group:** `ws-slot00-devices`
+    - **Job document:** from S3 URL:
 
-aws s3 cp /tmp/add-shadows-job-doc.json \
-  s3://workshop-shared-v2-000000000000/ws-slot00/job-docs/add-shadows-job-doc.json
+        ```
+        s3://workshop-shared-v2-000000000000/ws-slot00/job-docs/add-shadows-job-doc.json
+        ```
 
-aws iot create-job \
-  --job-id ws-slot00-add-shadows \
-  --targets "$(aws iot describe-thing-group \
-      --thing-group-name ws-slot00-devices \
-      --query thingGroupArn --output text)" \
-  --document-source \
-      s3://workshop-shared-v2-000000000000/ws-slot00/job-docs/add-shadows-job-doc.json \
-  --timeout-config '{"inProgressTimeoutInMinutes":15}'
-```
+    - In-progress timeout: **15 minutes**
 
-??? tip "Console alternative"
-    [Open IoT Jobs hub](https://us-east-1.console.aws.amazon.com/iot/home#/jobhub){ .md-button target=_blank } → **Create custom job** → thing group `ws-slot00-devices` → job document from S3 URL above.
+    ??? example "AWS CLI equivalent"
+        ```bash
+        cat > /tmp/add-shadows-job-doc.json << 'EOF'
+        {
+          "version": "1.0",
+          "steps": [
+            {
+              "action": {
+                "name": "add-shadows",
+                "type": "runHandler",
+                "input": {
+                  "handler": "run-script.sh",
+                  "args": ["s3://workshop-shared-v2-000000000000/ws-slot00/job-scripts/add-shadows.sh"]
+                },
+                "runAsUser": ""
+              }
+            }
+          ]
+        }
+        EOF
 
-Poll until all devices succeed:
+        aws s3 cp /tmp/add-shadows-job-doc.json \
+          s3://workshop-shared-v2-000000000000/ws-slot00/job-docs/add-shadows-job-doc.json
 
-```bash
-aws iot list-job-executions-for-job \
-  --job-id ws-slot00-add-shadows \
-  --status SUCCEEDED \
-  --query 'executionSummaries[].thingArn' --output table
-```
-```
+        aws iot create-job \
+          --job-id ws-slot00-add-shadows \
+          --targets "$(aws iot describe-thing-group \
+              --thing-group-name ws-slot00-devices \
+              --query thingGroupArn --output text)" \
+          --document-source \
+              s3://workshop-shared-v2-000000000000/ws-slot00/job-docs/add-shadows-job-doc.json \
+          --timeout-config '{"inProgressTimeoutInMinutes":15}'
+        ```
+
+    Monitor per-device status at [IoT Core → Manage → Jobs](https://us-east-1.console.aws.amazon.com/iot/home#/jobhub), or poll with the CLI:
+
+    ```bash
+    aws iot list-job-executions-for-job \
+      --job-id ws-slot00-add-shadows \
+      --query 'executionSummaries[].{thing:thingArn,status:jobExecutionSummary.status}' \
+      --output table
+    ```
 
 3. The job script installs two `systemd` timer units that fire every 30 seconds:
    - `report-app-deployment.timer` — reports compose version and deploy status
@@ -74,15 +81,13 @@ aws iot list-job-executions-for-job \
 
 4. Observe the new shadows appearing in **IoT Core → Manage → Things → (device) → Shadows**
 
-5. Use Fleet Indexing to query device health across the fleet:
+5. Use Fleet Indexing to query device health across the fleet via [Advanced thing search](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=attributes.deploymentId%3Aws-slot00%20AND%20shadow.name.device-health.reported.cpu_pct%3A%5B50%20TO%20*%5D):
 
-```bash
-aws iot search-index --index-name AWS_Things \
-  --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.device-health.reported.cpu_pct:[50 TO *]'
-```
-
-??? tip "Console alternative"
-    [Open Advanced thing search](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=shadow.name.device-health.reported.cpu_pct%3A%5B50%20TO%20*%5D){ .md-button target=_blank }
+    ??? example "AWS CLI equivalent"
+        ```bash
+        aws iot search-index --index-name AWS_Things \
+          --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.device-health.reported.cpu_pct:[50 TO *]'
+        ```
 
 ---
 

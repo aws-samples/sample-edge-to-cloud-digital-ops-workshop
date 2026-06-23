@@ -7,27 +7,52 @@
 ## Steps
 
 1. Navigate to [**Athena → workgroup `workshop-shared`**](https://console.aws.amazon.com/athena/home#/query-editor?workgroup=workshop-shared)
-2. All slots share a single Glue database `workshop_telemetry` pre-created by the platform stack — no DDL needed. Confirm the table exists:
+2. All slots share a single Glue database `workshop_telemetry` pre-created by the platform stack — no DDL needed. Confirm the table exists by running in the query editor:
 
-```sql
-SHOW TABLES IN workshop_telemetry;
-```
+    ```sql
+    SHOW TABLES IN workshop_telemetry;
+    ```
 
-3. Run the data freshness query (replace `ws-slot00` with your slot number):
+    ??? example "AWS CLI equivalent"
+        ```bash
+        aws glue get-tables \
+          --database-name workshop_telemetry \
+          --query 'TableList[].Name' --output table
+        ```
 
-```sql
-SELECT
-  thing_name,
-  from_unixtime(MAX(ingest_ts) / 1000)  AS latest_edge_ts,
-  current_timestamp                      AS query_ts,
-  date_diff('second',
-    from_unixtime(MAX(ingest_ts) / 1000),
-    current_timestamp)                   AS freshness_seconds
-FROM workshop_telemetry.telemetry
-WHERE deployment_id = 'ws-slot00'
-GROUP BY thing_name
-ORDER BY freshness_seconds ASC;
-```
+3. Run the data freshness query in the Athena query editor:
+
+    ```sql
+    SELECT
+      thing_name,
+      from_unixtime(MAX(ingest_ts) / 1000)  AS latest_edge_ts,
+      current_timestamp                      AS query_ts,
+      date_diff('second',
+        from_unixtime(MAX(ingest_ts) / 1000),
+        current_timestamp)                   AS freshness_seconds
+    FROM workshop_telemetry.telemetry
+    WHERE deployment_id = 'ws-slot00'
+    GROUP BY thing_name
+    ORDER BY freshness_seconds ASC;
+    ```
+
+    ??? example "AWS CLI equivalent"
+        ```bash
+        QUERY_ID=$(aws athena start-query-execution \
+          --work-group workshop-shared \
+          --query-string "SELECT thing_name, from_unixtime(MAX(ingest_ts)/1000) AS latest_edge_ts, current_timestamp AS query_ts, date_diff('second', from_unixtime(MAX(ingest_ts)/1000), current_timestamp) AS freshness_seconds FROM workshop_telemetry.telemetry WHERE deployment_id='ws-slot00' GROUP BY thing_name ORDER BY freshness_seconds ASC" \
+          --query QueryExecutionId --output text)
+
+        # Wait for completion
+        aws athena get-query-execution \
+          --query-execution-id "$QUERY_ID" \
+          --query 'QueryExecution.Status.State'
+
+        # Fetch results
+        aws athena get-query-results \
+          --query-execution-id "$QUERY_ID" \
+          --query 'ResultSet.Rows[*].Data[*].VarCharValue' --output table
+        ```
 
 4. Observe that freshness is typically **30–90 seconds** — because data flows IoT Rule → MSK → Hudi table in S3. MSK batches messages and the Hudi sink commits Parquet files on a timed interval rather than writing one object per MQTT message.
 

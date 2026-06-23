@@ -8,14 +8,25 @@
 
 1. Navigate to [**IoT Core → Settings → Fleet indexing → Manage indexing**](https://console.aws.amazon.com/iot/home#/settings)
 2. Enable Thing indexing and select the following data sources:
-   - **Add thing connectivity** — indexes connected/disconnected state, disconnect reason, and last connection timestamp
-   - **Include socket information** *(new)* — indexes source IP, source port, target IP, target port, and VPC endpoint ID per connection
-   - **Add named shadows** — add `device-config`
-   - **Add device software packages and versions** — indexes the reserved `$package` shadow for version-targeted queries
-3. Click **Update** and wait for index status to show `ACTIVE`:
-   ```bash
-   aws iot describe-index --index-name AWS_Things
-   ```
+    - **Add thing connectivity** — indexes connected/disconnected state, disconnect reason, and last connection timestamp
+    - **Include socket information** *(new)* — indexes source IP, source port, target IP, target port, and VPC endpoint ID per connection
+    - **Add named shadows** — add `device-config` and `device-health`
+    - **Add device software packages and versions** — indexes the reserved `$package` shadow for version-targeted queries
+3. Click **Update** and wait for index status to show `ACTIVE`.
+
+    ??? example "AWS CLI equivalent"
+        ```bash
+        aws iot update-indexing-configuration \
+          --thing-indexing-configuration \
+            'thingIndexingMode=REGISTRY_AND_SHADOW,thingConnectivityIndexingMode=STATUS,namedShadowIndexingMode=ON,filter={namedShadowNames=["device-config","device-health","$package"]}'
+        ```
+
+    Check status:
+
+    ```bash
+    aws iot describe-index --index-name AWS_Things
+    ```
+
 4. Navigate to [**IoT Core → Manage → Things → Advanced thing search**](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=%22thingName%3A%20*%22) and confirm all devices are visible.
 
    > **Console tip:** The regular Things search bar uses a display-name dialect that doesn't support shadow/connectivity queries. Use **Advanced thing search** instead — it accepts the same Lucene syntax as the CLI and the links below pre-populate the query for you.
@@ -24,10 +35,11 @@
 
    [Open in console](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=attributes.deploymentId%3Aws-slot00){ .md-button target=_blank }
 
-   ```bash
-   aws iot search-index --index-name AWS_Things \
-     --query-string 'attributes.deploymentId:ws-slot00'
-   ```
+   ??? example "AWS CLI equivalent"
+       ```bash
+       aws iot search-index --index-name AWS_Things \
+         --query-string 'attributes.deploymentId:ws-slot00'
+       ```
 
    > **Note:** Thing names are EC2 instance IDs, not slot-prefixed — `attributes.deploymentId` is the right field to scope to your slot. Combine it with any other filter using `AND`, e.g. `attributes.deploymentId:ws-slot00 AND connectivity.connected:true`.
 
@@ -35,29 +47,35 @@
 
    [Open in console](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=attributes.deploymentId%3Aws-slot00%20AND%20shadow.name.device-config.reported.config_version%3A3.0.0){ .md-button target=_blank }
 
-   ```bash
-   aws iot search-index --index-name AWS_Things \
-     --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.device\-config.reported.config_version:3.0.0'
-   ```
+   ??? example "AWS CLI equivalent"
+       ```bash
+       aws iot search-index --index-name AWS_Things \
+         --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.device\-config.reported.config_version:3.0.0'
+       ```
+
    > **Note:** The backslash before the hyphen (`device\-config`) is required because `-` is a reserved character in the Lucene query language. Without it the query parser rejects the field name with `InvalidQueryException`. The same escaping applies to any shadow name that contains a hyphen.
 
 7. Query connectivity status:
 
    [Open in console](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=attributes.deploymentId%3Aws-slot00%20AND%20connectivity.connected%3Atrue){ .md-button target=_blank }
 
-   ```bash
-   aws iot search-index --index-name AWS_Things \
-     --query-string 'attributes.deploymentId:ws-slot00 AND connectivity.connected:true'
-   ```
+   ??? example "AWS CLI equivalent"
+       ```bash
+       aws iot search-index --index-name AWS_Things \
+         --query-string 'attributes.deploymentId:ws-slot00 AND connectivity.connected:true'
+       ```
 
 8. Query by software package version — confirm all devices are on `telemetry-agent` v3.0.0:
 
-   [Open in console](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=attributes.deploymentId%3Aws-slot00%20AND%20shadow.name.%24package.reported.telemetry-agent.version%3A3.0.0){ .md-button target=_blank }
+   [Open in console](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=attributes.deploymentId%3Aws-slot00%20AND%20shadow.name.%24package.reported.telemetry_agent.version%3A3.0.0){ .md-button target=_blank }
 
-   ```bash
-   aws iot search-index --index-name AWS_Things \
-     --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.$package.reported.telemetry\-agent.version:3.0.0'
-   ```
+   ??? example "AWS CLI equivalent"
+       ```bash
+       aws iot search-index --index-name AWS_Things \
+         --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.$package.reported.telemetry_agent.version:3.0.0'
+       ```
+
+   > **Note:** Hyphens in package names are replaced with underscores in Fleet Indexing query syntax — query `telemetry_agent`, not `telemetry-agent`.
 
 
 ---

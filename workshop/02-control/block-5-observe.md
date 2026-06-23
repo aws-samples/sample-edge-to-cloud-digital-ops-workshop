@@ -6,23 +6,39 @@
 
 ## Steps
 
-1. Return to the **MQTT test client** and observe: metric values now have 3 decimal places (`"cpu_pct": 12.450` instead of `12`).
-2. Return to **Athena workgroup `workshop-shared`** — confirm the precision change is visible in the archive:
+1. Return to the [**IoT Core → Test → MQTT test client**](https://console.aws.amazon.com/iot/home#/test) and observe: metric values now have 3 decimal places (`"cpu_pct": 12.450` instead of `12`).
+2. Return to [**Athena workgroup `workshop-shared`**](https://console.aws.amazon.com/athena/home#/query-editor?workgroup=workshop-shared) and run this query to confirm the precision change is visible in the archive:
 
-```sql
-SELECT
-  thing_name,
-  from_unixtime(MAX(ingest_ts) / 1000)  AS latest_edge_ts,
-  current_timestamp                      AS query_ts,
-  date_diff('second',
-    from_unixtime(MAX(ingest_ts) / 1000),
-    current_timestamp)                   AS freshness_seconds,
-  COUNT(*)                               AS row_count
-FROM workshop_telemetry.telemetry
-WHERE deployment_id = 'ws-slot00'
-GROUP BY thing_name
-ORDER BY freshness_seconds DESC;
-```
+    ```sql
+    SELECT
+      thing_name,
+      from_unixtime(MAX(ingest_ts) / 1000)  AS latest_edge_ts,
+      current_timestamp                      AS query_ts,
+      date_diff('second',
+        from_unixtime(MAX(ingest_ts) / 1000),
+        current_timestamp)                   AS freshness_seconds,
+      COUNT(*)                               AS row_count
+    FROM workshop_telemetry.telemetry
+    WHERE deployment_id = 'ws-slot00'
+    GROUP BY thing_name
+    ORDER BY freshness_seconds DESC;
+    ```
+
+    ??? example "AWS CLI equivalent"
+        ```bash
+        QUERY_ID=$(aws athena start-query-execution \
+          --work-group workshop-shared \
+          --query-string "SELECT thing_name, from_unixtime(MAX(ingest_ts)/1000) AS latest_edge_ts, current_timestamp AS query_ts, date_diff('second', from_unixtime(MAX(ingest_ts)/1000), current_timestamp) AS freshness_seconds, COUNT(*) AS row_count FROM workshop_telemetry.telemetry WHERE deployment_id='ws-slot00' GROUP BY thing_name ORDER BY freshness_seconds DESC" \
+          --query QueryExecutionId --output text)
+
+        aws athena get-query-execution \
+          --query-execution-id "$QUERY_ID" \
+          --query 'QueryExecution.Status.State'
+
+        aws athena get-query-results \
+          --query-execution-id "$QUERY_ID" \
+          --query 'ResultSet.Rows[*].Data[*].VarCharValue' --output table
+        ```
 
 3. Observe that rows added after the job succeeded have decimal-precision values; earlier rows have integers — the Parquet schema widens automatically to `DOUBLE`.
 

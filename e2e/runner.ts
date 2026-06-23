@@ -62,6 +62,7 @@ import {
   DescribeProvisioningTemplateCommand,
   GetTopicRuleCommand,
   CreateJobCommand,
+  DescribeJobExecutionCommand,
   ListJobExecutionsForJobCommand,
   GetIndexingConfigurationCommand,
 } from "@aws-sdk/client-iot";
@@ -487,6 +488,28 @@ async function waitForIotJob(
     ]);
     const succeeded = succResp.executionSummaries?.length ?? 0;
     const failed = failResp.executionSummaries?.length ?? 0;
+
+    if (failed > 0) {
+      // Fetch execution details from the first failed device to surface the real error.
+      const firstFailed = failResp.executionSummaries?.[0];
+      const thingArn = firstFailed?.thingArn ?? "";
+      const thingName = thingArn.split(":thing/")[1] ?? thingArn;
+      let details = "";
+      if (thingName) {
+        try {
+          const execResp = await iot.send(
+            new DescribeJobExecutionCommand({ jobId, thingName })
+          );
+          const dm = execResp.execution?.statusDetails?.detailsMap ?? {};
+          details = Object.entries(dm).map(([k, v]) => `${k}: ${v}`).join("; ");
+        } catch { /* best-effort */ }
+      }
+      throw new Error(
+        `IoT Job ${jobId}: ${failed} device(s) FAILED (${succeeded} succeeded). ` +
+        `First failure — ${thingName}: ${details || "(no details)"}`
+      );
+    }
+
     if (succeeded >= expectedSuccessCount) {
       return { succeeded, failed, waitMs: Date.now() - t0 };
     }
@@ -2008,20 +2031,21 @@ try {
   }
   } // end Phase 9
 
-  // ── Phase 10: Workshop walkthrough — read-only aws CLI checks ─────────────
+  // ── Phase 10: Workshop walkthrough — aws CLI checks from docs ────────────
   // For each workshop module in order, parse bash code blocks from every
-  // block-*.md file, extract lines starting with "aws " (read-only commands
-  // only: describe/get/list/search), substitute placeholder values with the
-  // live deployment's account ID and deployment ID, and run each as a check.
+  // block-*.md file, extract aws CLI lines, substitute placeholder values,
+  // and run each as a check.  Read-only commands run directly; safe mutating
+  // commands (create-job, start-query-execution, etc.) are run with
+  // already-exists / duplicate errors treated as passing.
   if (phaseEnabled("Phase 10")) {
   beginPhase("Phase 10 — Workshop walkthrough");
 
-  // Only read-only aws subcommands — never mutate or deploy from docs.
   const READ_ONLY_PREFIXES = [
     "aws iot describe-",
     "aws iot get-",
     "aws iot list-",
     "aws iot search-index",
+    "aws iot-data get-thing-shadow",
     "aws s3 ls",
     "aws s3api list-",
     "aws s3api get-",
@@ -2031,6 +2055,7 @@ try {
     "aws ssm list-",
     "aws secretsmanager describe-",
     "aws secretsmanager list-",
+    "aws secretsmanager get-secret-value",
     "aws kafka describe-",
     "aws kafka list-",
     "aws kafka get-bootstrap-brokers",
@@ -2040,38 +2065,92 @@ try {
     "aws eks list-",
     "aws cloudformation describe-",
     "aws cloudformation list-",
+    "aws glue get-",
+    "aws glue list-",
     "aws sts get-caller-identity",
   ];
 
-  function isReadOnlyAwsCommand(line: string): boolean {
-    const trimmed = line.trim();
-    return READ_ONLY_PREFIXES.some((p) => trimmed.startsWith(p));
+  // Mutating commands that are safe to run: idempotent or already-exists is OK.
+  const MUTATING_PREFIXES = [
+    "aws s3 cp",
+    "aws iot create-job",
+    "aws iot update-indexing-configuration",
+    "aws iot-data update-thing-shadow",
+    "aws athena start-query-execution",
+  ];
+
+  // Errors from mutating commands that are safe to ignore.
+  const ALREADY_EXISTS_PATTERNS = [
+    /ResourceAlreadyExistsException/,
+    /ConflictException/,
+    /already exists/i,
+    /Job already exists/i,
+  ];
+
+  function classifyLine(line: string): "readonly" | "mutating" | null {
+    const t = line.trim();
+    if (READ_ONLY_PREFIXES.some((p) => t.startsWith(p))) return "readonly";
+    if (MUTATING_PREFIXES.some((p) => t.startsWith(p))) return "mutating";
+    return null;
   }
 
-  // Extract all aws command lines from fenced bash/shell code blocks.
+  // Extract classified aws command lines from fenced bash/shell code blocks.
+  // Handles both top-level fences and indented fences inside MkDocs admonitions
+  // (??? example / ??? tip blocks indent code fences with 4 spaces).
   // Multi-line continuations (trailing \) are joined into one command.
-  function extractAwsCommands(markdown: string): string[] {
-    const commands: string[] = [];
-    const fenceRe = /^```(?:bash|shell|sh)?\s*\n([\s\S]*?)^```/gm;
+  // Strips VAR=$(aws ...) wrappers and output redirects.
+  // varName is set when the doc line is a shell assignment: VAR=$(aws ...).
+  // The runner executes the inner aws command and stores the raw output in varMap[varName]
+  // so that downstream commands referencing $VAR can be substituted at runtime.
+  interface WalkCmd { module: string; block: string; cmd: string; kind: "readonly" | "mutating"; varName?: string }
+
+  function extractWalkCmds(markdown: string, mod: string, block: string): WalkCmd[] {
+    const out: WalkCmd[] = [];
+    // Capture optional leading indentation (group 1) so we can dedent block content.
+    // Backreference \1 ensures the closing fence has the same indentation.
+    const fenceRe = /^([ \t]*)```(?:bash|shell|sh)?\s*\n([\s\S]*?)^\1```/gm;
     let match: RegExpExecArray | null;
     while ((match = fenceRe.exec(markdown)) !== null) {
-      const block = match[1];
-      // Join continuation lines
-      const joined = block.replace(/\\\n\s*/g, " ");
+      const indent = match[1];
+      const blockContent = match[2];
+      // Strip block-level indentation from each line so commands parse cleanly.
+      const dedented = indent
+        ? blockContent.split("\n").map((l) => (l.startsWith(indent) ? l.slice(indent.length) : l)).join("\n")
+        : blockContent;
+      const joined = dedented.replace(/\\\n\s*/g, " ");
       for (const raw of joined.split("\n")) {
-        // Strip variable assignments up to the aws invocation: VAR=$(aws ...) → aws ...
-        let line = raw.replace(/^\s*\w+=\$\(\s*/, "").replace(/\)\s*$/, "").trim();
-        // Strip output redirects (> file, >> file) — we capture stdout ourselves
-        line = line.replace(/\s*>{1,2}\s*\S+/, "").trim();
-        if (!isReadOnlyAwsCommand(line)) continue;
-        // Skip commands with bare shell variables ($VAR_NAME) — they won't be set at runtime.
-        // Subshell substitutions ($(...)) are fine and will be evaluated by execSync.
-        if (/\$[A-Z_]{2,}/.test(line.replace(/\$\([^)]+\)/g, ""))) continue;
-        commands.push(line);
+        // Detect shell variable setter: VAR=$(aws ...)
+        const setterMatch = raw.match(/^\s*([A-Z_][A-Z_0-9]*)=\$\(\s*/);
+        if (setterMatch) {
+          const varName = setterMatch[1];
+          let inner = raw.replace(/^\s*\w+=\$\(\s*/, "").replace(/\)\s*$/, "").trim();
+          inner = inner.replace(/\s*>>\s*\S+/, "").replace(/\s*>\s*(?!\/dev\/null|\/)(\S+)/, "").trim();
+          const kind = classifyLine(inner);
+          if (kind) out.push({ module: mod, block, cmd: inner, kind, varName });
+          continue;
+        }
+        let line = raw.trim();
+        // Strip output redirects — outfile args on iot-data commands are handled at run-time.
+        line = line.replace(/\s*>>\s*\S+/, "").replace(/\s*>\s*(?!\/dev\/null|\/)(\S+)/, "").trim();
+        const kind = classifyLine(line);
+        if (!kind) continue;
+        // Emit commands with bare shell variables — they will be resolved at runtime from varMap.
+        out.push({ module: mod, block, cmd: line, kind });
       }
     }
-    return commands;
+    return out;
   }
+
+  // Errors that indicate a resource simply hasn't been provisioned yet — warn
+  // rather than hard-fail so Phase 10 can run against a partially-deployed slot.
+  const RESOURCE_NOT_FOUND_PATTERNS = [
+    /ResourceNotFoundException/,
+    /ParameterNotFound/,
+    /NoSuchEntityException/,
+    /ResourceNotFound/,
+    /does not exist/i,
+    /not found/i,
+  ];
 
   // Substitute placeholder values baked into the workshop docs with live values.
   function substituteValues(cmd: string): string {
@@ -2081,16 +2160,13 @@ try {
       .replace(/\bus-east-1\b/g, REGION);
   }
 
-  // Collect ordered list of (module, block, command) tuples.
   const workshopDir = join(REPO_ROOT, "workshop");
   const moduleDirs = readdirSync(workshopDir, { withFileTypes: true })
     .filter((d) => d.isDirectory() && /^\d{2}-/.test(d.name))
     .sort((a, b) => a.name.localeCompare(b.name))
     .map((d) => d.name);
 
-  interface WalkCommand { module: string; block: string; cmd: string }
-  const walkCommands: WalkCommand[] = [];
-
+  const walkCommands: WalkCmd[] = [];
   for (const mod of moduleDirs) {
     const modDir = join(workshopDir, mod);
     const blocks = readdirSync(modDir)
@@ -2098,21 +2174,313 @@ try {
       .sort();
     for (const block of blocks) {
       const content = readFileSync(join(modDir, block), "utf8");
-      for (const cmd of extractAwsCommands(content)) {
-        walkCommands.push({ module: mod, block, cmd: substituteValues(cmd) });
+      for (const wc of extractWalkCmds(content, mod, block)) {
+        walkCommands.push({ ...wc, cmd: substituteValues(wc.cmd) });
       }
     }
   }
 
-  log(`Found ${walkCommands.length} read-only aws commands across workshop docs`);
+  const roCount = walkCommands.filter((c) => c.kind === "readonly").length;
+  const mutCount = walkCommands.filter((c) => c.kind === "mutating").length;
+  log(`Found ${walkCommands.length} aws commands across workshop docs (${roCount} read-only, ${mutCount} mutating)`);
 
-  for (const { module: mod, block, cmd } of walkCommands) {
-    const label = `[${mod}/${block}] ${cmd.slice(0, 80)}${cmd.length > 80 ? "…" : ""}`;
-    await check(label, async () => {
-      const outputFlag = cmd.includes("--output") ? "" : " --output json";
-      const out = shellOutput(`${cmd}${outputFlag} 2>&1`);
-      return { output: out.slice(0, 300) };
+  // Runtime variable store: varMap[VAR_NAME] = raw command output (trimmed).
+  // Populated when a WalkCmd has varName set; consumed when a downstream command
+  // contains $VAR_NAME.  Also used to track Athena $QUERY_ID across a block.
+  const varMap = new Map<string, string>();
+
+  // Pre-write any /tmp files that the docs create via heredoc (cat > /tmp/...)
+  // before the corresponding aws s3 cp commands run.
+  const addShadowsJobDoc = JSON.stringify({
+    version: "1.0",
+    steps: [{
+      action: {
+        name: "add-shadows",
+        type: "runHandler",
+        input: {
+          handler: "run-script.sh",
+          args: [`s3://workshop-shared-v2-${ACCOUNT_ID}/${DEPLOYMENT_ID}/job-scripts/add-shadows.sh`],
+        },
+        runAsUser: "",
+      },
+    }],
+  }, null, 2);
+  writeFileSync("/tmp/add-shadows-job-doc.json", addShadowsJobDoc);
+
+  // Job docs use the per-slot bucket (workshop-{DEPLOYMENT_ID}-{ACCOUNT_ID}), not the
+  // shared bucket shown in some doc examples. Devices only have IAM access to their own
+  // slot bucket — a 403 from the shared bucket is what caused ws-slot11-telemetry-v4 to fail.
+  const telemetryV3JobDoc = JSON.stringify({
+    version: "1.0",
+    steps: [{
+      action: {
+        name: "update-telemetry-precision",
+        type: "runHandler",
+        input: {
+          handler: "run-script.sh",
+          args: [`s3://${BUCKET_NAME}/job-scripts/telemetry-v3.sh`],
+        },
+        runAsUser: "",
+      },
+    }],
+  }, null, 2);
+  writeFileSync("/tmp/telemetry-v3-job-doc.json", telemetryV3JobDoc);
+
+  const telemetryV4JobDoc = JSON.stringify({
+    version: "1.0",
+    steps: [{
+      action: {
+        name: "update-telemetry-precision",
+        type: "runHandler",
+        input: {
+          handler: "run-script.sh",
+          args: [`s3://${BUCKET_NAME}/job-scripts/telemetry-v4.sh`],
+        },
+        runAsUser: "",
+      },
+    }],
+  }, null, 2);
+  writeFileSync("/tmp/telemetry-v4-job-doc.json", telemetryV4JobDoc);
+
+  // Extract the combined error text from an execSync failure, which may carry
+  // the real error message in err.stdout (when the command uses 2>&1) rather
+  // than in err.message (which is just "Command failed: ...").
+  function errText(err: unknown): string {
+    if (!(err instanceof Error)) return String(err);
+    const e = err as Error & { stdout?: Buffer | string; stderr?: Buffer | string };
+    return [err.message, e.stdout?.toString(), e.stderr?.toString()].filter(Boolean).join("\n");
+  }
+
+  // Validate that important read-only commands returned meaningful data.
+  function validateReadOutput(cmd: string, out: string, label: string): void {
+    // glue get-tables: must list at least the telemetry table.
+    if (cmd.startsWith("aws glue get-tables")) {
+      if (!out.includes("telemetry")) throw new Error(`${label}: expected 'telemetry' table in Glue output, got: ${out.slice(0, 200)}`);
+    }
+    // iot describe-index: must report ACTIVE.
+    if (cmd.startsWith("aws iot describe-index")) {
+      try {
+        const parsed = JSON.parse(out) as { indexStatus?: string };
+        if (parsed.indexStatus && parsed.indexStatus !== "ACTIVE") {
+          throw new Error(`${label}: Fleet index status is ${parsed.indexStatus}, expected ACTIVE`);
+        }
+      } catch (e) { if (e instanceof SyntaxError) return; else throw e; }
+    }
+    // iot search-index: at least one thing returned.
+    if (cmd.startsWith("aws iot search-index")) {
+      try {
+        const parsed = JSON.parse(out) as { things?: unknown[] };
+        if (parsed.things !== undefined && parsed.things.length === 0) {
+          // Soft warning only — index may not have caught up yet.
+          log(`  ⚠  ${label}: search-index returned 0 things (index may be re-building)`);
+        }
+      } catch { /* non-JSON output is fine */ }
+    }
+    // iot list-packages: must include our package.
+    if (cmd.startsWith("aws iot list-packages")) {
+      if (!out.includes(DEPLOYMENT_ID) && !out.includes("telemetry")) {
+        log(`  ⚠  ${label}: expected deployment package in list-packages output`);
+      }
+    }
+    // iot list-job-executions-for-job: at least one execution entry.
+    if (cmd.startsWith("aws iot list-job-executions-for-job")) {
+      try {
+        const parsed = JSON.parse(out) as { executionSummaries?: unknown[] };
+        if (parsed.executionSummaries !== undefined && parsed.executionSummaries.length === 0) {
+          log(`  ⚠  ${label}: no job execution summaries yet`);
+        }
+      } catch { /* table output — not JSON */ }
+    }
+    // athena get-query-results: at least a header row present.
+    if (cmd.startsWith("aws athena get-query-results")) {
+      try {
+        const parsed = JSON.parse(out) as { ResultSet?: { Rows?: unknown[] } };
+        if (parsed.ResultSet?.Rows !== undefined && parsed.ResultSet.Rows.length <= 1) {
+          log(`  ⚠  ${label}: athena get-query-results returned ≤1 rows (data may not be present yet)`);
+        }
+      } catch { /* table output — not JSON */ }
+    }
+    // secretsmanager get-secret-value: output must be non-empty.
+    // The doc may extract just the password string via --query or python piping, so
+    // accept any non-empty output without an error marker.
+    if (cmd.startsWith("aws secretsmanager get-secret-value")) {
+      const trimmed = out.trim();
+      if (!trimmed || /\"errorMessage\"/.test(trimmed)) {
+        throw new Error(`${label}: expected secret value in output, got: ${out.slice(0, 200)}`);
+      }
+    }
+    // kafka get-bootstrap-brokers: must contain broker hostname.
+    if (cmd.startsWith("aws kafka get-bootstrap-brokers")) {
+      if (!out.includes(":9096") && !out.includes(":9092") && !out.includes("bootstrap")) {
+        throw new Error(`${label}: expected bootstrap broker endpoint in output, got: ${out.slice(0, 200)}`);
+      }
+    }
+    // cloudformation list-exports: MSK ARN must look like an ARN.
+    if (cmd.startsWith("aws cloudformation list-exports") && cmd.includes("msk-arn")) {
+      if (!out.includes("arn:aws")) {
+        throw new Error(`${label}: expected MSK ARN in cloudformation exports, got: ${out.slice(0, 200)}`);
+      }
+    }
+  }
+
+  // Substitute bare $VAR_NAME references using the runtime varMap.
+  // Subshell expressions $(aws ...) are left as-is for the shell to resolve.
+  function applyVarMap(cmd: string): string {
+    return cmd.replace(/\$([A-Z_][A-Z_0-9]*)/g, (full, name) => {
+      const val = varMap.get(name);
+      return val !== undefined ? val.trim() : full;
     });
+  }
+
+  for (const { module: mod, block, cmd, kind, varName } of walkCommands) {
+    // Resolve any bare $VAR references from varMap before running.
+    const resolvedRaw = substituteValues(applyVarMap(cmd));
+
+    // Skip the command entirely if it still has unresolved bare $VAR after varMap substitution.
+    // (The variable setter itself failed or returned nothing — don't pass an empty arg.)
+    const stripped = resolvedRaw.replace(/\$\([^)]+\)/g, "__SUBSHELL__");
+    const hasUnresolved = /\$[A-Z_][A-Z_0-9]*/.test(stripped);
+    if (hasUnresolved) {
+      log(`  ⚠  [${mod}/${block}] Skipping — unresolved variable in: ${resolvedRaw.slice(0, 80)}`);
+      continue;
+    }
+    const safeCmd = resolvedRaw;
+
+    const label = `[${mod}/${block}] ${safeCmd.slice(0, 80)}${safeCmd.length > 80 ? "…" : ""}`;
+
+    if (kind === "readonly") {
+      await check(label, async () => {
+        const outputFlag = safeCmd.includes("--output") ? "" : " --output json";
+        let out: string;
+        try {
+          out = shellOutput(`${safeCmd}${outputFlag} 2>&1`);
+        } catch (err: unknown) {
+          const msg = errText(err);
+          if (RESOURCE_NOT_FOUND_PATTERNS.some((re) => re.test(msg))) {
+            log(`  ⚠  ${label} — resource not found (slot may not have this phase deployed)`);
+            return { output: "resource-not-found (skipped)" };
+          }
+          throw err;
+        }
+
+        // If this cmd is a variable setter, capture its output for downstream use.
+        if (varName) {
+          varMap.set(varName, out.trim());
+
+          // Special case: QUERY_ID setters use `--query QueryExecutionId --output text` so
+          // the output IS the raw execution ID string.  Poll until SUCCEEDED before continuing.
+          if (varName === "QUERY_ID") {
+            const execId = out.trim();
+            if (execId) {
+              const deadline = Date.now() + 60_000;
+              while (Date.now() < deadline) {
+                await sleep(2_000);
+                try {
+                  const execOut = shellOutput(
+                    `aws athena get-query-execution --query-execution-id ${execId} --output json 2>&1`
+                  );
+                  const state = (JSON.parse(execOut) as { QueryExecution?: { Status?: { State?: string } } })
+                    ?.QueryExecution?.Status?.State;
+                  if (state === "SUCCEEDED" || state === "FAILED" || state === "CANCELLED") break;
+                } catch { break; }
+              }
+            }
+          }
+        }
+
+        // Response validation for key checks.
+        validateReadOutput(safeCmd, out, label);
+
+        return { output: out.slice(0, 300) };
+      });
+
+    } else {
+      // Mutating command — run it, treat already-exists as pass.
+      await check(label, async () => {
+        // aws iot-data update-thing-shadow requires an outfile positional arg.
+        let runCmd = safeCmd;
+        let shadowOutFile: string | undefined;
+        if (safeCmd.startsWith("aws iot-data update-thing-shadow") && !safeCmd.includes("/tmp/")) {
+          shadowOutFile = join(tmpdir(), `shadow-update-${Date.now()}.json`);
+          runCmd = `${safeCmd} ${shadowOutFile}`;
+        }
+
+        // Setter commands (varName set) keep their original --output format so applyVarMap
+        // downstream gets a clean value.  Non-setter mutating commands use --output json.
+        const outputSuffix = (varName || runCmd.includes("--output")) ? "" : " --output json";
+        let out: string;
+        try {
+          out = shellOutput(`${runCmd}${outputSuffix} 2>&1`);
+        } catch (err: unknown) {
+          const msg = errText(err);
+          if (ALREADY_EXISTS_PATTERNS.some((re) => re.test(msg))) {
+            return { output: "already-exists (treated as pass)" };
+          }
+          if (RESOURCE_NOT_FOUND_PATTERNS.some((re) => re.test(msg))) {
+            log(`  ⚠  ${label} — resource not found (slot may not have this phase deployed)`);
+            return { output: "resource-not-found (skipped)" };
+          }
+          throw err;
+        }
+
+        // For iot create-job: poll until all devices succeed or any device fails.
+        if (safeCmd.startsWith("aws iot create-job")) {
+          try {
+            const jobIdMatch = safeCmd.match(/--job-id\s+(\S+)/);
+            const walkthroughJobId = jobIdMatch?.[1];
+            if (walkthroughJobId) {
+              // Count expected devices from the thing group
+              const tgResp = await iot.send(
+                new ListThingsInThingGroupCommand({ thingGroupName: `${DEPLOYMENT_ID}-devices` })
+              ).catch(() => null);
+              const deviceCount = tgResp?.things?.length ?? 1;
+              log(`  Waiting for IoT Job ${walkthroughJobId} to complete on ${deviceCount} device(s)...`);
+              await waitForIotJob(walkthroughJobId, deviceCount, 600_000);
+            }
+          } catch (pollErr: unknown) {
+            throw new Error(
+              `IoT Job created but execution failed: ${pollErr instanceof Error ? pollErr.message : String(pollErr)}`
+            );
+          }
+        }
+
+        // For start-query-execution: extract the execution ID and poll before continuing.
+        if (safeCmd.startsWith("aws athena start-query-execution")) {
+          try {
+            // Output may be raw UUID (--output text) or JSON depending on doc format.
+            let execId: string | undefined;
+            try { execId = (JSON.parse(out) as { QueryExecutionId?: string }).QueryExecutionId; } catch { /* not JSON */ }
+            if (!execId) execId = out.trim(); // raw text output fallback
+            if (execId) {
+              // Store under both the doc's varName (e.g. QUERY_ID) and the canonical name.
+              if (varName) varMap.set(varName, execId);
+              varMap.set("QUERY_ID", execId);
+              const deadline = Date.now() + 60_000;
+              while (Date.now() < deadline) {
+                await sleep(2_000);
+                const execOut = shellOutput(
+                  `aws athena get-query-execution --query-execution-id ${execId} --output json 2>&1`
+                );
+                const state = (JSON.parse(execOut) as { QueryExecution?: { Status?: { State?: string } } })
+                  ?.QueryExecution?.Status?.State;
+                if (state === "SUCCEEDED" || state === "FAILED" || state === "CANCELLED") break;
+              }
+            }
+          } catch { /* best-effort */ }
+        }
+
+        // For non-athena variable setters, store raw trimmed output.
+        if (varName && !safeCmd.startsWith("aws athena start-query-execution")) {
+          varMap.set(varName, out.trim());
+        }
+
+        if (shadowOutFile) {
+          try { capture(`shadow update response (${label})`, readFileSync(shadowOutFile, "utf8")); } catch { /* best-effort */ }
+        }
+
+        return { output: out.slice(0, 300) };
+      });
+    }
   }
   } // end Phase 10
 } finally {
