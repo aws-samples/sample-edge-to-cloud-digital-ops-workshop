@@ -66,24 +66,39 @@ aws s3 cp /tmp/telemetry-v3-job-doc.json \
   s3://workshop-shared-v2-000000000000/ws-slot00/job-docs/telemetry-v3-job-doc.json
 ```
 
-**3. [Create the IoT Job in the console](https://us-east-1.console.aws.amazon.com/iot/home#/jobhub):**
+**3. Create the IoT Job:**
 
-- Job type: **Create custom job**
-- **Thing groups to run this job:**
+```bash
+aws iot create-job \
+  --job-id ws-slot00-telemetry-v3 \
+  --targets "$(aws iot describe-thing-group \
+      --thing-group-name ws-slot00-devices \
+      --query thingGroupArn --output text)" \
+  --document-source \
+      s3://workshop-shared-v2-000000000000/ws-slot00/job-docs/telemetry-v3-job-doc.json \
+  --job-executions-rollout-config \
+      '{"maximumPerMinute":1}' \
+  --abort-config \
+      '{"criteriaList":[{"failureType":"ALL","action":"CANCEL","thresholdPercentage":33,"minNumberOfExecutedThings":1}]}' \
+  --timeout-config '{"inProgressTimeoutInMinutes":15}'
+```
 
-    ```
-    ws-slot00-devices
-    ```
-- **Job document:** select **From file**, then paste the S3 URL:
+??? tip "Console alternative"
+    [Open IoT Jobs hub](https://us-east-1.console.aws.amazon.com/iot/home#/jobhub){ .md-button target=_blank } → **Create custom job** → thing group `ws-slot00-devices` → job document from S3 URL above → max rate 1/min → abort on >33% failure.
 
-    ```
-    s3://workshop-shared-v2-000000000000/ws-slot00/job-docs/telemetry-v3-job-doc.json
-    ```
+**4. Poll job status** until all devices show `SUCCEEDED`:
 
-**4. Configure rollout:**
+```bash
+aws iot list-job-executions-for-job \
+  --job-id ws-slot00-telemetry-v3 \
+  --status SUCCEEDED \
+  --query 'executionSummaries[].thingArn' --output table
 
-- Max rate: **1 device/minute**
-- Abort criteria: abort if **>33%** of devices fail
+aws iot list-job-executions-for-job \
+  --job-id ws-slot00-telemetry-v3 \
+  --status FAILED \
+  --query 'executionSummaries[].thingArn' --output table
+```
 
 **5. Observe job status** per device: `IN_PROGRESS` → `SUCCEEDED`
 
