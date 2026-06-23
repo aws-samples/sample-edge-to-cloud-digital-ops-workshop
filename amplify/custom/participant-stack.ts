@@ -1,14 +1,8 @@
-import { Stack, StackProps, RemovalPolicy, Duration, CfnOutput, Fn, CfnDeletionPolicy, CustomResource } from "aws-cdk-lib";
+import { Stack, StackProps, RemovalPolicy, Duration, CfnOutput, Fn, CustomResource } from "aws-cdk-lib";
 import {
   Vpc,
-  SubnetType,
-  SecurityGroup,
-  Peer,
-  Port,
   CfnInstance,
   MachineImage,
-  CfnInternetGateway,
-  CfnVPCGatewayAttachment,
   CfnSubnet,
   CfnRouteTable,
   CfnRoute,
@@ -37,14 +31,6 @@ import {
   Key as KmsKey,
 } from "aws-cdk-lib/aws-kms";
 import {
-  CfnCluster as MskCluster,
-} from "aws-cdk-lib/aws-msk";
-import {
-  Bucket,
-  BlockPublicAccess,
-  BucketEncryption,
-} from "aws-cdk-lib/aws-s3";
-import {
   Function as LambdaFn,
   Runtime,
   Code,
@@ -52,29 +38,18 @@ import {
 } from "aws-cdk-lib/aws-lambda";
 import {
   CfnTopicRule,
-  CfnTopicRuleDestination,
 } from "aws-cdk-lib/aws-iot";
-import {
-  CfnApi as CfnAppSyncApi,
-  CfnChannelNamespace,
-} from "aws-cdk-lib/aws-appsync";
-import {
-  CfnWorkGroup,
-} from "aws-cdk-lib/aws-athena";
 import {
   AwsCustomResource,
   AwsSdkCall,
   PhysicalResourceId,
   AwsCustomResourcePolicy,
 } from "aws-cdk-lib/custom-resources";
-import {
-  CfnDatabase,
-  CfnTable,
-} from "aws-cdk-lib/aws-glue";
 import { Construct } from "constructs";
 
 export interface ParticipantStackProps extends StackProps {
   deploymentId: string;
+  graphqlEndpoint: string;
 }
 
 /**
@@ -86,93 +61,34 @@ export interface ParticipantStackProps extends StackProps {
  *  - IoT Provisioning Template + claim cert (stored in Secrets Manager)
  *  - Pre-provisioning hook Lambda
  *  - IoT Dynamic Thing Group
- *  - IoT Rule → MSK (raw.telemetry topic)
- *  - MSK Provisioned cluster (kafka.t3.small × 2 brokers, SASL/SCRAM)
- *  - IoT Rule → Lambda → MSK (raw.telemetry topic, Session 4)
- *  - S3 bucket + Athena workgroup + Glue telemetry table (Sessions 1–3)
+ *  - IoT Rule → shared MSK (raw.telemetry topic, SASL/SCRAM, stamps deployment_id)
+ *  - IoT Rule → AppSync bridge Lambda → Amplify GraphQL subscription
+ *  - Per-slot MSK SASL/SCRAM secret (references shared cluster + shared KMS key)
  *  - Kubernetes namespace (ws-slotNN) in the shared workshop-eks cluster
+ *
+ * Shared infrastructure (S3, MSK cluster, Flink, Glue, Athena) lives in
+ * WorkshopPlatformStack and is imported via Fn.importValue.
  */
 export class ParticipantStack extends Stack {
+  readonly appSyncBridgeFn: LambdaFn;
+
   constructor(scope: Construct, id: string, props: ParticipantStackProps) {
     super(scope, id, props);
 
-    const { deploymentId } = props;
+    const { deploymentId, graphqlEndpoint } = props;
 
     const edgeVpc = Vpc.fromLookup(this, "WorkshopEdgeVpc", { vpcName: "workshop-edge" });
-    const cloudVpc = Vpc.fromLookup(this, "WorkshopCloudVpc", { vpcName: "workshop-cloud" });
 
-    // ── S3 ──────────────────────────────────────────────────────────────────
-    const workshopBucket = new Bucket(this, "WorkshopBucket", {
-      bucketName: `workshop-${deploymentId}-${this.account}`,
-      removalPolicy: RemovalPolicy.DESTROY,
-      autoDeleteObjects: true,
-      blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
-      encryption: BucketEncryption.S3_MANAGED,
-      versioned: false,
-    });
-
-    // ── Athena workgroup ─────────────────────────────────────────────────────
-    new CfnWorkGroup(this, "AthenaWorkGroup", {
-      name: `workshop-${deploymentId}`,
-      workGroupConfiguration: {
-        engineVersion: {
-          selectedEngineVersion: "Athena engine version 3",
-        },
-        resultConfiguration: {
-          outputLocation: `s3://${workshopBucket.bucketName}/athena-results/`,
-        },
-        publishCloudWatchMetricsEnabled: false,
-      },
-    });
-
-    // ── Glue database + telemetry table (queried by Athena) ──────────────────
-    // Glue DB name uses underscores (Athena identifier rules).
-    const glueDbName = `workshop_${deploymentId.replace(/-/g, "_")}`;
-    const glueDb = new CfnDatabase(this, "GlueDatabase", {
-      catalogId: this.account,
-      databaseInput: {
-        name: glueDbName,
-        description: `Workshop telemetry database for ${deploymentId}`,
-      },
-    });
-
-    // Pre-create the Glue table so Athena queries work as soon as telemetry arrives.
-    // Schema matches the IoT Rule SQL: SELECT *, topic() AS mqtt_topic, timestamp() AS ingest_ts
-    new CfnTable(this, "GlueTelemetryTable", {
-      catalogId: this.account,
-      databaseName: glueDbName,
-      tableInput: {
-        name: "telemetry",
-        tableType: "EXTERNAL_TABLE",
-        parameters: {
-          "classification": "json",
-          "has_encrypted_data": "false",
-        },
-        storageDescriptor: {
-          location: `s3://${workshopBucket.bucketName}/telemetry/`,
-          inputFormat: "org.apache.hadoop.mapred.TextInputFormat",
-          outputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
-          serdeInfo: {
-            serializationLibrary: "org.openx.data.jsonserde.JsonSerDe",
-            parameters: { "serialization.format": "1" },
-          },
-          columns: [
-            { name: "thing_name", type: "string" },
-            { name: "cpu_pct", type: "double" },
-            { name: "mem_used_pct", type: "double" },
-            { name: "disk_used_pct", type: "double" },
-            { name: "net_io_bytes_sent", type: "bigint" },
-            { name: "net_io_bytes_recv", type: "bigint" },
-            { name: "message_timestamp", type: "bigint" },
-            { name: "mqtt_topic", type: "string" },
-            { name: "ingest_ts", type: "bigint" },
-          ],
-        },
-      },
-    }).addDependency(glueDb);
+    // ── Import shared platform resources ─────────────────────────────────────
+    const sharedBucketName  = Fn.importValue("workshop-platform-bucket-name");
+    const sharedBucketArn   = Fn.importValue("workshop-platform-bucket-arn");
+    const mskClusterArn     = Fn.importValue("workshop-platform-msk-arn");
+    const mskSgId           = Fn.importValue("workshop-platform-msk-sg-id");
+    const mskBootstrapScram = Fn.importValue("workshop-platform-msk-bootstrap-scram");
+    const mskScramKeyArn    = Fn.importValue("workshop-platform-msk-scram-key-arn");
+    const iotVpcDestArn     = Fn.importValue("workshop-platform-iot-vpc-dest-arn");
 
     // ── IAM roles ────────────────────────────────────────────────────────────
-    // EC2 instance profile
     const ec2Role = new Role(this, "EdgeEc2Role", {
       assumedBy: new ServicePrincipal("ec2.amazonaws.com"),
       managedPolicies: [
@@ -180,7 +96,6 @@ export class ParticipantStack extends Stack {
       ],
     });
 
-    // Allow EC2 instances to read the claim secret (narrow to this deployment)
     const claimSecret = new Secret(this, "ClaimCertSecret", {
       secretName: `/workshop/${deploymentId}/claim-cert`,
       description: `IoT fleet provisioning claim cert for ${deploymentId}`,
@@ -188,10 +103,6 @@ export class ParticipantStack extends Stack {
     });
     claimSecret.grantRead(ec2Role);
 
-    // Lambda-backed custom resource: creates the IoT claim cert + stores it in Secrets Manager.
-    // Using a real Lambda avoids two AwsCustomResource pitfalls:
-    //   1. 4KB CFn response-size limit (cert PEM + private key exceeds it)
-    //   2. PEM newlines becoming literal control characters in CFn token substitution
     const claimCertProvisionerRole = new Role(this, "ClaimCertProvisionerRole", {
       assumedBy: new ServicePrincipal("lambda.amazonaws.com"),
       managedPolicies: [
@@ -224,7 +135,7 @@ export class ParticipantStack extends Stack {
       role: claimCertProvisionerRole,
     });
 
-    const claimCertResource = new CustomResource(this, "ClaimCertResource", {
+    new CustomResource(this, "ClaimCertResource", {
       serviceToken: claimCertProvisionerFn.functionArn,
       properties: {
         PolicyName: `workshop-${deploymentId}-claim-policy`,
@@ -232,7 +143,6 @@ export class ParticipantStack extends Stack {
       },
     });
 
-    // Allow Device Client to look up the IoT data endpoint and perform MQTT/shadow/jobs operations
     ec2Role.addToPolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,
@@ -257,22 +167,21 @@ export class ParticipantStack extends Stack {
       })
     );
 
+    // EC2 instances pull job scripts and binaries from the shared S3 bucket.
     ec2Role.addToPolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,
         actions: ["s3:PutObject", "s3:GetObject"],
         resources: [
-          `${workshopBucket.bucketArn}/job-scripts/*`,
-          `${workshopBucket.bucketArn}/bin/*`,
-          `${workshopBucket.bucketArn}/simulator/*`,
-          `${workshopBucket.bucketArn}/scripts/*`,
-          `${workshopBucket.bucketArn}/images/*`,
+          `${sharedBucketArn}/job-scripts/*`,
+          `${sharedBucketArn}/bin/*`,
+          `${sharedBucketArn}/simulator/*`,
+          `${sharedBucketArn}/scripts/*`,
+          `${sharedBucketArn}/images/*`,
         ],
       })
     );
 
-    // K3s install job writes token + kubeconfig to SSM Parameter Store;
-    // agents read them back. Scoped to /workshop/<deploymentId>/.
     ec2Role.addToPolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,
@@ -283,7 +192,6 @@ export class ParticipantStack extends Stack {
       })
     );
 
-    // deploy-k3s.sh uses ListThingsInThingGroup to determine server/agent role
     ec2Role.addToPolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,
@@ -446,7 +354,6 @@ exports.handler = async (event) => {
       timeout: Duration.seconds(10),
     });
 
-    // Grant IoT Core permission to invoke the hook
     preProvisionLambda.addPermission("AllowIoTInvoke", {
       principal: new ServicePrincipal("iot.amazonaws.com"),
     });
@@ -455,21 +362,16 @@ exports.handler = async (event) => {
     // ── IoT Provisioning Template ────────────────────────────────────────────
     const provisioningRole = new Role(this, "ProvisioningRole", {
       assumedBy: new ServicePrincipal("iot.amazonaws.com"),
-      // AWSIoTThingsRegistration is required for RegisterThing to succeed
       managedPolicies: [
         ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSIoTThingsRegistration"),
       ],
     });
 
-    // Thing group that every provisioned device joins — IoT Job targets this group
     new CfnThingGroup(this, "DevicesThingGroup", {
       thingGroupName: `${deploymentId}-devices`,
     });
 
     // ── Software Package Catalog ─────────────────────────────────────────────
-    // Registered so fleet indexing can query $package shadow by version.
-    // Devices write the $package shadow on boot (v1.0.0) and after the
-    // telemetry-v2 job runs (v2.0.0).
     const softwarePackage = new CfnSoftwarePackage(this, "TelemetryAgentPackage", {
       packageName: `${deploymentId}-telemetry-agent`,
     });
@@ -533,12 +435,9 @@ exports.handler = async (event) => {
     // --8<-- [end:provisioning-template]
 
     // ── Edge subnet (network-isolated /24) ───────────────────────────────────
-    // We pick a /24 slot based on the numeric slot index embedded in deploymentId.
-    // e.g. ws-slot00 → 10.0.0.0/24, ws-slot01 → 10.0.1.0/24, etc.
     const slotIndex = parseInt(deploymentId.replace(/\D/g, "").slice(-2), 10) || 0;
     const edgeSubnetCidr = `10.0.${slotIndex}.0/24`;
 
-    // Use L1 constructs because the edge VPC was created with no subnet config.
     const edgeSubnet = new CfnSubnet(this, "EdgeSubnet", {
       vpcId: edgeVpc.vpcId,
       cidrBlock: edgeSubnetCidr,
@@ -547,28 +446,30 @@ exports.handler = async (event) => {
       tags: [{ key: "Name", value: `workshop-edge-${deploymentId}` }],
     });
 
-    // Route table: only the IGW route — no route to other subnets.
     const edgeRtb = new CfnRouteTable(this, "EdgeRtb", {
       vpcId: edgeVpc.vpcId,
       tags: [{ key: "Name", value: `workshop-edge-${deploymentId}-rtb` }],
     });
 
-    // Find or reference the IGW already attached to the edge VPC.
-    // The edge VPC was created without subnets so CDK did not auto-attach an IGW.
-    // We attach one here if needed.
-    const igw = new CfnInternetGateway(this, "EdgeIgw", {
-      tags: [{ key: "Name", value: `workshop-edge-${deploymentId}-igw` }],
-    });
-
-    new CfnVPCGatewayAttachment(this, "EdgeIgwAttach", {
-      vpcId: edgeVpc.vpcId,
-      internetGatewayId: igw.ref,
+    // The edge VPC has a single shared IGW (owned by whichever slot deployed first).
+    // Look it up instead of creating a new one — a VPC can only have one IGW attached.
+    const sharedIgw = new AwsCustomResource(this, "EdgeIgwLookup", {
+      onUpdate: {
+        service: "EC2",
+        action: "describeInternetGateways",
+        parameters: {
+          Filters: [{ Name: "attachment.vpc-id", Values: [edgeVpc.vpcId] }],
+        },
+        physicalResourceId: PhysicalResourceId.fromResponse("InternetGateways.0.InternetGatewayId"),
+        outputPaths: ["InternetGateways.0.InternetGatewayId"],
+      },
+      policy: AwsCustomResourcePolicy.fromSdkCalls({ resources: AwsCustomResourcePolicy.ANY_RESOURCE }),
     });
 
     new CfnRoute(this, "EdgeDefaultRoute", {
       routeTableId: edgeRtb.ref,
       destinationCidrBlock: "0.0.0.0/0",
-      gatewayId: igw.ref,
+      gatewayId: sharedIgw.getResponseField("InternetGateways.0.InternetGatewayId"),
     });
 
     new CfnSubnetRouteTableAssociation(this, "EdgeSubnetRtbAssoc", {
@@ -576,12 +477,10 @@ exports.handler = async (event) => {
       routeTableId: edgeRtb.ref,
     });
 
-    // Security group: intra-VPC all traffic (K3s cluster + MQTT broker) + outbound internet
     const edgeSg = new CfnSecurityGroup(this, "EdgeSg", {
       vpcId: edgeVpc.vpcId,
       groupDescription: `workshop-edge-${deploymentId}`,
       securityGroupIngress: [
-        // Allow all traffic within the edge VPC subnet (K3s API, MQTT broker, Redpanda, RisingWave)
         { ipProtocol: "-1", fromPort: -1, toPort: -1, cidrIp: edgeSubnetCidr },
       ],
       securityGroupEgress: [
@@ -594,13 +493,11 @@ exports.handler = async (event) => {
     const userDataScript = `#!/bin/bash
 set -euxo pipefail
 
-# Install SSM Agent (pre-installed on Amazon Linux 2023, but ensure it's running)
 yum install -y amazon-ssm-agent 2>/dev/null || true
 systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent
 
 INSTANCE_ID=$(ec2-metadata --instance-id | cut -d' ' -f2)
 
-# Retrieve claim cert from Secrets Manager (no hardcoded secrets in user data)
 mkdir -p /etc/aws-iot-device-client/certs
 SECRET_JSON=$(aws secretsmanager get-secret-value \
   --region ${this.region} \
@@ -608,35 +505,23 @@ SECRET_JSON=$(aws secretsmanager get-secret-value \
   --query SecretString --output text)
 
 echo "$SECRET_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); open('/etc/aws-iot-device-client/certs/claim.pem.crt','w').write(d['certificate']); open('/etc/aws-iot-device-client/certs/claim-private.pem.key','w').write(d['privateKey'])"
-# cert must be 644 (world-readable) — Device Client validates this
 chmod 644 /etc/aws-iot-device-client/certs/claim.pem.crt
 chmod 600 /etc/aws-iot-device-client/certs/claim-private.pem.key
 
-# Download Amazon Root CA
 curl -o /etc/aws-iot-device-client/certs/AmazonRootCA1.pem \
   https://www.amazontrust.com/repository/AmazonRootCA1.pem
 
-# Get IoT Core data endpoint
 IOT_ENDPOINT=$(aws iot describe-endpoint \
   --region ${this.region} \
   --endpoint-type iot:Data-ATS \
   --query endpointAddress --output text)
 
-# Download Device Client binary built by sandbox.sh and staged in S3.
-# sandbox.sh builds it once using the official GHCR build image and uploads here.
-aws s3 cp "s3://${workshopBucket.bucketName}/bin/aws-iot-device-client" /usr/local/bin/aws-iot-device-client --region ${this.region}
+aws s3 cp "s3://${sharedBucketName}/bin/aws-iot-device-client" /usr/local/bin/aws-iot-device-client --region ${this.region}
 chmod +x /usr/local/bin/aws-iot-device-client
 
 mkdir -p /etc/aws-iot-device-client/jobs
-# certs dir must be 700; Device Client rejects cert files outside a 700 directory
 chmod 700 /etc/aws-iot-device-client/certs
 
-# Write Device Client config.
-# On first boot: cert/key point to claim certs (fleet provisioning not yet run).
-# After fleet provisioning completes, Device Client writes a runtime config that
-# overrides cert/key with the newly-issued device cert for subsequent connections.
-# Note: device-key/device-cert/claim-cert/claim-key are NOT recognized fleet-provisioning
-# JSON keys — omit them to avoid IsValidFilePath() validation on non-existent files.
 cat > /etc/aws-iot-device-client/aws-iot-device-client.conf <<EOF
 {
   "endpoint": "$IOT_ENDPOINT",
@@ -668,9 +553,6 @@ cat > /etc/aws-iot-device-client/aws-iot-device-client.conf <<EOF
 EOF
 chmod 640 /etc/aws-iot-device-client/aws-iot-device-client.conf
 
-# Generic IoT Job handler: downloads and runs an S3-hosted script.
-# Device Client calls: run-script.sh <runAsUser> <scriptUri> [args...]
-# $1 = runAsUser (empty string if not set), $2 = S3 URI of script to execute
 cat > /etc/aws-iot-device-client/jobs/run-script.sh <<'HANDLER'
 #!/bin/bash
 set -euo pipefail
@@ -679,25 +561,21 @@ if [[ -z "$SCRIPT_URI" ]]; then
   echo "ERROR: no scriptUri provided as arg" >&2
   exit 1
 fi
-aws s3 cp "$SCRIPT_URI" /tmp/job-script.sh --region us-east-1
+aws s3 cp "$SCRIPT_URI" /tmp/job-script.sh --region ${this.region}
 chmod +x /tmp/job-script.sh
 /tmp/job-script.sh
 HANDLER
 chmod +x /etc/aws-iot-device-client/jobs/run-script.sh
 
-# Device Client adds ~/.aws-iot-device-client/jobs to PATH when executing handlers.
-# Symlink the configured handler-directory so handlers are found via execvp().
 mkdir -p /root/.aws-iot-device-client
 ln -sfn /etc/aws-iot-device-client/jobs /root/.aws-iot-device-client/jobs
 
-# Initial telemetry script (v1): publishes at 0.2 Hz with cpu/mem/disk metrics.
-# telemetry-v2.sh job overwrites this file and restarts the service.
 cat > /etc/aws-iot-device-client/jobs/publish-telemetry.sh <<'TELEMETRY'
 #!/bin/bash
 INSTANCE_ID=$(ec2-metadata --instance-id | cut -d' ' -f2)
 DEPLOYMENT_ID=$DEPLOYMENT_ID
 IOT_ENDPOINT=$(aws iot describe-endpoint --endpoint-type iot:Data-ATS --query endpointAddress --output text)
-INTERVAL_S=5  # 0.2 Hz
+INTERVAL_S=5
 
 while true; do
   TS=$(date -u +%s%3N)
@@ -721,7 +599,6 @@ done
 TELEMETRY
 chmod +x /etc/aws-iot-device-client/jobs/publish-telemetry.sh
 
-# Systemd unit: workshop-telemetry — replaced in Session 2 by telemetry-v2.sh job
 cat > /etc/systemd/system/workshop-telemetry.service <<EOF
 [Unit]
 Description=Workshop MQTT Telemetry Publisher
@@ -738,10 +615,8 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-# Write deployment ID env file so telemetry script picks it up
 echo "DEPLOYMENT_ID=${deploymentId}" > /etc/workshop-telemetry.env
 
-# Systemd unit for Device Client binary
 cat > /etc/systemd/system/aws-iot-device-client.service <<EOF
 [Unit]
 Description=AWS IoT Device Client
@@ -777,7 +652,6 @@ systemctl start aws-iot-device-client workshop-telemetry
         securityGroupIds: [edgeSg.ref],
         iamInstanceProfile: instanceProfile.ref,
         userData: encodedUserData,
-        // 30 GB root volume — K3s + Redpanda + RisingWave + MinIO images need ~15 GB
         blockDeviceMappings: [
           {
             deviceName: "/dev/xvda",
@@ -791,18 +665,12 @@ systemctl start aws-iot-device-client workshop-telemetry
       });
     }
 
-    // ── Sensor Simulator EC2 (Session 5 — Step 5B) ──────────────────────────
-    // A 4th EC2 instance running the Python sensor simulator and Mosquitto MQTT broker.
-    // Publishes to mosquitto:1883; Redpanda Connect in K3s reads from there.
-    // Note: Amazon Linux 2023 does not ship mosquitto in its default repos, so
-    // we build it from source (gcc + cmake are available, g++ needed for mosquitto 2.x).
+    // ── Sensor Simulator EC2 ─────────────────────────────────────────────────
     const simulatorUserData = `#!/bin/bash
 set -euxo pipefail
 
-# SSM agent (pre-installed on AL2023, ensure it's running)
 systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent
 
-# Build mosquitto from source — not in AL2023 default repos
 dnf install -y gcc gcc-c++ make cmake openssl-devel
 
 cd /tmp
@@ -814,11 +682,9 @@ cmake --build build -j$(nproc)
 cmake --install build
 ldconfig
 
-# Install paho-mqtt for the sensor simulator (AL2023 uses python3 -m ensurepip)
 python3 -m ensurepip --upgrade
 pip3 install paho-mqtt
 
-# Create mosquitto config
 mkdir -p /etc/mosquitto
 cat > /etc/mosquitto/mosquitto.conf <<'MQTTCONF'
 listener 1883 0.0.0.0
@@ -843,8 +709,7 @@ SVC
 systemctl daemon-reload
 systemctl enable mosquitto && systemctl start mosquitto
 
-# Download sensor simulator from S3
-aws s3 cp s3://${workshopBucket.bucketName}/simulator/sensor-sim.py /usr/local/bin/sensor-sim.py --region ${this.region}
+aws s3 cp s3://${sharedBucketName}/simulator/sensor-sim.py /usr/local/bin/sensor-sim.py --region ${this.region}
 chmod +x /usr/local/bin/sensor-sim.py
 
 cat > /etc/systemd/system/sensor-sim.service <<'SVC'
@@ -884,106 +749,7 @@ systemctl start sensor-sim
       ],
     });
 
-    // ── MSK Provisioned cluster ──────────────────────────────────────────────
-    const mskSg = new SecurityGroup(this, "MskSg", {
-      vpc: cloudVpc,
-      description: `workshop-${deploymentId}-msk`,
-      allowAllOutbound: true,
-    });
-
-    // Allow IoT Rules Engine (inside VPC destination) to reach MSK on 9096 (SASL/SCRAM)
-    mskSg.addIngressRule(
-      Peer.ipv4(cloudVpc.vpcCidrBlock),
-      Port.tcp(9096),
-      "SASL/SCRAM from VPC"
-    );
-
-    const mskCluster = new MskCluster(this, "MskCluster", {
-      clusterName: `workshop-${deploymentId}-msk`,
-      kafkaVersion: "3.6.0",
-      numberOfBrokerNodes: 2,
-      brokerNodeGroupInfo: {
-        instanceType: "kafka.t3.small",
-        clientSubnets: cloudVpc.selectSubnets({ subnetType: SubnetType.PRIVATE_WITH_EGRESS }).subnetIds.slice(0, 2),
-        securityGroups: [mskSg.securityGroupId],
-        storageInfo: {
-          ebsStorageInfo: {
-            volumeSize: 50,
-          },
-        },
-      },
-      clientAuthentication: {
-        sasl: {
-          scram: {
-            enabled: true,
-          },
-        },
-      },
-      encryptionInfo: {
-        encryptionInTransit: {
-          clientBroker: "TLS",
-          inCluster: true,
-        },
-      },
-    });
-    // MSK takes 15+ min to create and can't be deleted while CREATING, which causes
-    // DELETE_FAILED cascades on rollback. Teardown is handled by scripts/teardown.sh.
-    mskCluster.cfnOptions.deletionPolicy = CfnDeletionPolicy.RETAIN;
-
-    // ── IoT Rule → S3 (raw telemetry landing) ───────────────────────────────
-    // Routes edge/<deploymentId>/+/telemetry messages to S3 for Athena queries.
-    // MSK → IoT direct Kafka action requires an IoT VPC Destination (separate setup);
-    // S3 action is used here for workshop bootstrap.
-    const iotRuleRole = new Role(this, "IotRuleRole", {
-      assumedBy: new ServicePrincipal("iot.amazonaws.com"),
-    });
-
-    iotRuleRole.addToPolicy(
-      new PolicyStatement({
-        effect: Effect.ALLOW,
-        actions: ["s3:PutObject"],
-        resources: [`${workshopBucket.bucketArn}/telemetry/*`],
-      })
-    );
-
-    new CfnTopicRule(this, "IotToS3Rule", {
-      ruleName: `workshop_${deploymentId.replace(/-/g, "_")}_to_s3`,
-      topicRulePayload: {
-        sql: `SELECT *, topic() AS mqtt_topic, timestamp() AS ingest_ts FROM 'edge/${deploymentId}/+/telemetry'`,
-        actions: [
-          {
-            s3: {
-              bucketName: workshopBucket.bucketName,
-              key: "telemetry/\${topic()}/\${timestamp()}",
-              roleArn: iotRuleRole.roleArn,
-            },
-          },
-        ],
-        ruleDisabled: false,
-      },
-    });
-
-    // ── AppSync Events API (live push — no persistence) ──────────────────────
-    // Path: device MQTT → IoT Core → IoT Rule → Lambda → AppSync Events → browser WebSocket.
-    // IoT's HTTP action requires a pre-confirmed destination URL (not settable via CFN),
-    // so a thin Lambda bridge is used instead.
-    const eventsApi = new CfnAppSyncApi(this, "TelemetryEventsApi", {
-      name: `workshop-${deploymentId}-events`,
-      eventConfig: {
-        authProviders: [{ authType: "AWS_IAM" }],
-        connectionAuthModes: [{ authType: "AWS_IAM" }],
-        defaultPublishAuthModes: [{ authType: "AWS_IAM" }],
-        defaultSubscribeAuthModes: [{ authType: "AWS_IAM" }],
-      },
-    });
-
-    // Channel namespace: /telemetry/<deploymentId>/<thingName>
-    new CfnChannelNamespace(this, "TelemetryNamespace", {
-      apiId: eventsApi.attrApiId,
-      name: "telemetry",
-    });
-
-    // Lambda bridge: IoT Rule → Lambda → AppSync Events publish
+    // ── AppSync bridge Lambda (live push — no persistence) ───────────────────
     const appSyncBridgeRole = new Role(this, "AppSyncBridgeRole", {
       assumedBy: new ServicePrincipal("lambda.amazonaws.com"),
       managedPolicies: [
@@ -991,15 +757,7 @@ systemctl start sensor-sim
       ],
     });
 
-    appSyncBridgeRole.addToPolicy(
-      new PolicyStatement({
-        effect: Effect.ALLOW,
-        actions: ["appsync:EventPublish"],
-        resources: [`${eventsApi.attrApiArn}/channel/telemetry/*`],
-      })
-    );
-
-    const appSyncBridgeFn = new LambdaFn(this, "AppSyncBridge", {
+    this.appSyncBridgeFn = new LambdaFn(this, "AppSyncBridge", {
       functionName: `workshop-${deploymentId}-appsync-bridge`,
       runtime: Runtime.NODEJS_22_X,
       architecture: Architecture.ARM_64,
@@ -1007,14 +765,14 @@ systemctl start sensor-sim
       role: appSyncBridgeRole,
       timeout: Duration.seconds(5),
       environment: {
-        APPSYNC_HTTP_ENDPOINT: eventsApi.attrDnsHttp,
+        APPSYNC_GRAPHQL_ENDPOINT: graphqlEndpoint,
         DEPLOYMENT_ID: deploymentId,
         REGION: this.region,
       },
       code: Code.fromAsset("amplify/lambda/appsync-bridge"),
     });
 
-    appSyncBridgeFn.addPermission("AllowIoTInvoke", {
+    this.appSyncBridgeFn.addPermission("AllowIoTInvoke", {
       principal: new ServicePrincipal("iot.amazonaws.com"),
     });
 
@@ -1025,7 +783,7 @@ systemctl start sensor-sim
         actions: [
           {
             lambda: {
-              functionArn: appSyncBridgeFn.functionArn,
+              functionArn: this.appSyncBridgeFn.functionArn,
             },
           },
         ],
@@ -1033,12 +791,10 @@ systemctl start sensor-sim
       },
     });
 
-    // ── MSK SASL/SCRAM credentials ────────────────────────────────────────────
-    // MSK requires SCRAM secrets to be encrypted with a customer-managed KMS key
-    // (not the default AWS-managed key). The workshop CMK is created once and shared.
-    const mskScramKey = KmsKey.fromLookup(this, "MskScramKey", {
-      aliasName: "alias/workshop-msk-scram",
-    });
+    // ── Per-participant MSK SASL/SCRAM secret ─────────────────────────────────
+    // Each participant gets their own credentials on the shared MSK cluster.
+    // The secret must use the platform-managed CMK (MSK requirement).
+    const mskScramKey = KmsKey.fromKeyArn(this, "MskScramKey", mskScramKeyArn);
 
     const mskCredSecret = new Secret(this, "MskCredSecret", {
       secretName: `AmazonMSK_workshop-${deploymentId}`,
@@ -1052,50 +808,40 @@ systemctl start sensor-sim
       },
     });
 
-    // Register the SCRAM secret with MSK so the broker accepts it for authentication.
-    // Must run after both the cluster and the secret exist.
+    // Register the SCRAM secret with the shared MSK cluster.
     const mskAssociateScram = new AwsCustomResource(this, "MskAssociateScram", {
       onCreate: {
         service: "Kafka",
         action: "batchAssociateScramSecret",
         parameters: {
-          ClusterArn: mskCluster.attrArn,
+          ClusterArn: mskClusterArn,
           SecretArnList: [mskCredSecret.secretArn],
         },
-        physicalResourceId: PhysicalResourceId.of("MskScramAssoc"),
+        physicalResourceId: PhysicalResourceId.of(`MskScramAssoc-${deploymentId}`),
       } as AwsSdkCall,
       onDelete: {
         service: "Kafka",
         action: "batchDisassociateScramSecret",
         parameters: {
-          ClusterArn: mskCluster.attrArn,
+          ClusterArn: mskClusterArn,
           SecretArnList: [mskCredSecret.secretArn],
         },
       } as AwsSdkCall,
       policy: AwsCustomResourcePolicy.fromSdkCalls({
-        resources: [mskCluster.attrArn, mskCredSecret.secretArn, `${mskCredSecret.secretArn}-*`],
+        resources: AwsCustomResourcePolicy.ANY_RESOURCE,
       }),
     });
-    mskAssociateScram.node.addDependency(mskCluster);
     mskAssociateScram.node.addDependency(mskCredSecret);
 
-    // ── IoT Rule → MSK (Session 4 — native Apache Kafka rule action) ─────────
-    // A second rule on the same topic feeds MSK via the native Kafka action with
-    // a VPC destination pointing at the MSK cluster subnets.
+    // ── IoT Rule → MSK (Session 4 — native Apache Kafka rule action) ──────────
+    // IoT Kafka action writes to the shared MSK cluster via SASL/SCRAM.
+    // The SQL stamps deployment_id so the Flink Iceberg sink can partition by it.
+    // Per-slot role for IoT kafka action — needs SCRAM secret + KMS access so IoT can
+    // call get_secret() inline. EC2 VPC networking lives on the platform-stack's shared
+    // IotVpcDestRole (the VPC destination is shared; only one allowed per VPC).
     const iotKafkaVpcRole = new Role(this, "IotKafkaVpcRole", {
       assumedBy: new ServicePrincipal("iot.amazonaws.com"),
     });
-
-    iotKafkaVpcRole.addToPolicy(new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: [
-        "ec2:CreateNetworkInterface", "ec2:DescribeNetworkInterfaces",
-        "ec2:CreateNetworkInterfacePermission", "ec2:DeleteNetworkInterface",
-        "ec2:DescribeSubnets", "ec2:DescribeVpcs",
-        "ec2:DescribeVpcAttribute", "ec2:DescribeSecurityGroups",
-      ],
-      resources: ["*"],
-    }));
 
     iotKafkaVpcRole.addToPolicy(new PolicyStatement({
       effect: Effect.ALLOW,
@@ -1106,59 +852,31 @@ systemctl start sensor-sim
     iotKafkaVpcRole.addToPolicy(new PolicyStatement({
       effect: Effect.ALLOW,
       actions: ["kms:Decrypt"],
-      resources: [mskScramKey.keyArn],
+      resources: [mskScramKeyArn],
     }));
 
-    const kafkaVpcDest = new CfnTopicRuleDestination(this, "KafkaVpcDest", {
-      vpcProperties: {
-        vpcId: cloudVpc.vpcId,
-        subnetIds: cloudVpc.selectSubnets({ subnetType: SubnetType.PRIVATE_WITH_EGRESS }).subnetIds.slice(0, 2),
-        securityGroups: [mskSg.securityGroupId],
-        roleArn: iotKafkaVpcRole.roleArn,
-      },
-    });
-    // AWS::MSK::Cluster only exposes Arn and CurrentVersion via Fn::GetAtt.
-    // Bootstrap broker addresses require a separate SDK call via custom resource.
-    const getBootstrapBrokers = new AwsCustomResource(this, "GetMskBootstrapBrokers", {
-      onCreate: {
-        service: "Kafka",
-        action: "getBootstrapBrokers",
-        parameters: { ClusterArn: mskCluster.attrArn },
-        physicalResourceId: PhysicalResourceId.of(`MskBootstrapBrokers-${deploymentId}`),
-      } as AwsSdkCall,
-      onUpdate: {
-        service: "Kafka",
-        action: "getBootstrapBrokers",
-        parameters: { ClusterArn: mskCluster.attrArn },
-        physicalResourceId: PhysicalResourceId.of(`MskBootstrapBrokers-${deploymentId}`),
-      } as AwsSdkCall,
-      policy: AwsCustomResourcePolicy.fromSdkCalls({
-        resources: [mskCluster.attrArn],
-      }),
-    });
-    getBootstrapBrokers.node.addDependency(mskCluster);
-    const bootstrapBrokersSaslScram = getBootstrapBrokers.getResponseField("BootstrapBrokerStringSaslScram");
-
-    // Must wait for the role's policy to be attached before IoT can validate permissions
-    kafkaVpcDest.node.addDependency(iotKafkaVpcRole);
-    kafkaVpcDest.node.addDependency(mskCluster);
+    // Allow IoT to write delivery errors to the shared S3 bucket for debugging.
+    iotKafkaVpcRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:PutObject"],
+      resources: [`${sharedBucketArn}/iot-errors/${deploymentId}/*`],
+    }));
 
     new CfnTopicRule(this, "IotToMskRule", {
       ruleName: `workshop_${deploymentId.replace(/-/g, "_")}_to_msk`,
       topicRulePayload: {
-        sql: `SELECT *, topic() AS mqtt_topic, timestamp() AS ingest_ts FROM 'edge/${deploymentId}/+/telemetry'`,
+        // Stamps deployment_id and extracts thing_name from the topic path (reliable even if
+        // payload omits it). Topic structure: edge/{deploymentId}/{thingName}/telemetry
+        sql: `SELECT *, topic(3) AS thing_name, topic() AS mqtt_topic, timestamp() AS ingest_ts, '${deploymentId}' AS deployment_id FROM 'edge/${deploymentId}/+/telemetry'`,
         actions: [
           {
             kafka: {
-              destinationArn: kafkaVpcDest.attrArn,
+              destinationArn: iotVpcDestArn,
               topic: "raw.telemetry",
               clientProperties: {
-                "bootstrap.servers": bootstrapBrokersSaslScram,
+                "bootstrap.servers": mskBootstrapScram,
                 "security.protocol": "SASL_SSL",
                 "sasl.mechanism": "SCRAM-SHA-512",
-                // IoT Kafka action uses explicit username/password properties (sasl.jaas.config not supported).
-                // \${get_secret(...)} is an IoT substitution template evaluated at rule-fire time.
-                // Requires 4 args: (secretId, SecretString, key, roleArn).
                 "sasl.scram.username": `\${get_secret('AmazonMSK_workshop-${deploymentId}', 'SecretString', 'username', '${iotKafkaVpcRole.roleArn}')}`,
                 "sasl.scram.password": `\${get_secret('AmazonMSK_workshop-${deploymentId}', 'SecretString', 'password', '${iotKafkaVpcRole.roleArn}')}`,
                 "acks": "1",
@@ -1166,6 +884,15 @@ systemctl start sensor-sim
             },
           },
         ],
+        // Errors written to S3 for debugging — inspect at s3://…/iot-errors/<deploymentId>/
+        errorAction: {
+          s3: {
+            bucketName: sharedBucketName,
+            key: `iot-errors/${deploymentId}/\${timestamp()}/\${newuuid()}`,
+            roleArn: iotKafkaVpcRole.roleArn,
+            cannedAcl: "private",
+          },
+        },
         ruleDisabled: false,
       },
     });
@@ -1176,34 +903,9 @@ systemctl start sensor-sim
       value: deploymentId,
     });
 
-    new CfnOutput(this, "WorkshopBucketName", {
-      exportName: `workshop-${deploymentId}-bucket`,
-      value: workshopBucket.bucketName,
-    });
-
-    new CfnOutput(this, "MskClusterArn", {
-      exportName: `workshop-${deploymentId}-msk-arn`,
-      value: mskCluster.attrArn,
-    });
-
     new CfnOutput(this, "ClaimSecretArn", {
       exportName: `workshop-${deploymentId}-claim-secret`,
       value: claimSecret.secretArn,
-    });
-
-    new CfnOutput(this, "EventsApiId", {
-      exportName: `workshop-${deploymentId}-events-api-id`,
-      value: eventsApi.attrApiId,
-    });
-
-    new CfnOutput(this, "EventsApiHttpEndpoint", {
-      exportName: `workshop-${deploymentId}-events-http`,
-      value: eventsApi.attrDnsHttp,
-    });
-
-    new CfnOutput(this, "EventsApiRealtimeEndpoint", {
-      exportName: `workshop-${deploymentId}-events-realtime`,
-      value: eventsApi.attrDnsRealtime,
     });
 
     new CfnOutput(this, "EksClusterName", {
@@ -1215,6 +917,12 @@ systemctl start sensor-sim
     new CfnOutput(this, "MskCredSecretArn", {
       exportName: `workshop-${deploymentId}-msk-cred-secret`,
       value: mskCredSecret.secretArn,
+    });
+
+    new CfnOutput(this, "SharedBucketName", {
+      exportName: `workshop-${deploymentId}-shared-bucket`,
+      value: sharedBucketName,
+      description: "Shared S3 bucket — your Iceberg data is at telemetry/deployment_id=<your-id>/",
     });
   }
 }
