@@ -10,7 +10,11 @@
 kubectl port-forward -n edge svc/hmi 3000:3000
 ```
 
-Open `http://localhost:3000` in a browser.
+Open in a browser:
+
+```
+http://localhost:3000
+```
 
 ---
 

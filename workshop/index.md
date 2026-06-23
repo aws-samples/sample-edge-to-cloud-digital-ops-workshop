@@ -225,4 +225,4 @@ The workshop makes this ladder directly observable — each tier is wired to a p
 
 ## Before You Begin
 
-Check that you have received your **`DEPLOYMENT_ID`** (format: `ws-a1b2c3`) from the workshop facilitator. You will substitute this value wherever you see `{DEPLOYMENT_ID}` in the instructions.
+Check that you have received your **`DEPLOYMENT_ID`** (format: `ws-a1b2c3`) from the workshop facilitator. You will substitute this value wherever you see `ws-slot00` in the instructions.

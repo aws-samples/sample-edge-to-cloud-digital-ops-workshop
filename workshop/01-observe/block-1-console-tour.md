@@ -8,7 +8,11 @@
 
 1. Facilitator walks through the deployed architecture diagram
 2. Navigate to [**IoT Core → Test → MQTT test client**](https://console.aws.amazon.com/iot/home#/test)
-3. Subscribe to `edge/{YOUR_DEPLOYMENT_ID}/#`
+3. Subscribe to the topic filter for your slot:
+
+    ```
+    edge/ws-slot00/#
+    ```
 4. Observe incoming telemetry messages at 0.2 Hz; inspect the JSON payload structure
 5. Navigate to [**IoT Core → Manage → Things**](https://console.aws.amazon.com/iot/home#/thinghub) → confirm 3 registered devices
 

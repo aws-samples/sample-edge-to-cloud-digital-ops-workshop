@@ -12,10 +12,14 @@ Launch both steps simultaneously — they run independently and must both comple
 
 ```bash
 aws s3 cp job-scripts/deploy-k3s.sh \
-  s3://workshop-ws-slot00-000000000000/job-scripts/deploy-k3s.sh
+  s3://workshop-shared-v2-000000000000/ws-slot00/job-scripts/deploy-k3s.sh
 ```
 
-2. Create an IoT Job targeting Thing Group `{DEPLOYMENT_ID}-devices`:
+2. Create an IoT Job targeting Thing Group:
+
+    ```
+    ws-slot00-devices
+    ```
 
 ```json
 {
@@ -27,7 +31,7 @@ aws s3 cp job-scripts/deploy-k3s.sh \
         "type": "runHandler",
         "input": {
           "handler": "run-script.sh",
-          "args": ["s3://workshop-ws-slot00-000000000000/job-scripts/deploy-k3s.sh"]
+          "args": ["s3://workshop-shared-v2-000000000000/ws-slot00/job-scripts/deploy-k3s.sh"]
         },
         "runAsUser": ""
       }
@@ -49,7 +53,7 @@ aws s3 cp job-scripts/deploy-k3s.sh \
 
 ## Step 5B: Deploy Simulated Sensor EC2
 
-A 4th EC2 instance (`workshop-{DEPLOYMENT_ID}-sensor-sim`) is already deployed by the CDK stack. It runs:
+A 4th EC2 instance (`workshop-ws-slot00-sensor-sim`) is already deployed by the CDK stack. It runs:
 - **Mosquitto** — MQTT broker on port 1883, accessible within the edge subnet
 - **`sensor-sim.py`** — Python simulator publishing to Mosquitto at 0.2–1 Hz
 
@@ -69,7 +73,7 @@ Find the simulator private IP (you'll need it for the Helm values in Block 3):
 
 ```bash
 aws ec2 describe-instances \
-  --filters "Name=tag:Name,Values=workshop-{DEPLOYMENT_ID}-sensor-sim" \
+  --filters "Name=tag:Name,Values=workshop-ws-slot00-sensor-sim" \
             "Name=instance-state-name,Values=running" \
   --query "Reservations[0].Instances[0].PrivateIpAddress" \
   --output text

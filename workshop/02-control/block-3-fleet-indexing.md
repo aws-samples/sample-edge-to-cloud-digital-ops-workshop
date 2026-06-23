@@ -20,32 +20,43 @@
 
    > **Console tip:** The regular Things search bar uses a display-name dialect that doesn't support shadow/connectivity queries. Use **Advanced thing search** instead — it accepts the same Lucene syntax as the CLI and the links below pre-populate the query for you.
 
-5. Query by shadow state — confirm current config version:
+5. Scope to your deployment — filter by the `deploymentId` attribute so subsequent queries only return your three devices:
 
-   [Open in console](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=%22shadow.name.device-config.reported.config_version%3A%202.0.0%22){ .md-button target=_blank }
+   [Open in console](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=attributes.deploymentId%3Aws-slot00){ .md-button target=_blank }
 
    ```bash
    aws iot search-index --index-name AWS_Things \
-     --query-string 'shadow.name.device\-config.reported.config_version:2.0.0'
+     --query-string 'attributes.deploymentId:ws-slot00'
+   ```
+
+   > **Note:** Thing names are EC2 instance IDs, not slot-prefixed — `attributes.deploymentId` is the right field to scope to your slot. Combine it with any other filter using `AND`, e.g. `attributes.deploymentId:ws-slot00 AND connectivity.connected:true`.
+
+6. Query by shadow state — confirm current config version:
+
+   [Open in console](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=attributes.deploymentId%3Aws-slot00%20AND%20shadow.name.device-config.reported.config_version%3A3.0.0){ .md-button target=_blank }
+
+   ```bash
+   aws iot search-index --index-name AWS_Things \
+     --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.device\-config.reported.config_version:3.0.0'
    ```
    > **Note:** The backslash before the hyphen (`device\-config`) is required because `-` is a reserved character in the Lucene query language. Without it the query parser rejects the field name with `InvalidQueryException`. The same escaping applies to any shadow name that contains a hyphen.
 
-6. Query connectivity status:
+7. Query connectivity status:
 
-   [Open in console](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=%22connectivity.connected%3A%20true%22){ .md-button target=_blank }
+   [Open in console](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=attributes.deploymentId%3Aws-slot00%20AND%20connectivity.connected%3Atrue){ .md-button target=_blank }
 
    ```bash
    aws iot search-index --index-name AWS_Things \
-     --query-string 'connectivity.connected:true'
+     --query-string 'attributes.deploymentId:ws-slot00 AND connectivity.connected:true'
    ```
 
-7. Query by software package version — confirm all devices are on `telemetry-agent` v2.0.0:
+8. Query by software package version — confirm all devices are on `telemetry-agent` v3.0.0:
 
-   [Open in console](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=%22shadow.name.%24package.reported.telemetry-agent.version%3A%202.0.0%22){ .md-button target=_blank }
+   [Open in console](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=attributes.deploymentId%3Aws-slot00%20AND%20shadow.name.%24package.reported.telemetry-agent.version%3A3.0.0){ .md-button target=_blank }
 
    ```bash
    aws iot search-index --index-name AWS_Things \
-     --query-string 'shadow.name.$package.reported.telemetry\-agent.version:2.0.0'
+     --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.$package.reported.telemetry\-agent.version:3.0.0'
    ```
 
 

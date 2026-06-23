@@ -11,7 +11,7 @@ Verify K3s is up before proceeding:
 ```bash
 # Retrieve kubeconfig written to SSM by the K3s install job
 aws ssm get-parameter \
-  --name /workshop/{DEPLOYMENT_ID}/kubeconfig \
+  --name /workshop/ws-slot00/kubeconfig \
   --with-decryption \
   --query Parameter.Value \
   --output text > ~/.kube/edge-config
@@ -31,7 +31,7 @@ The WAN relay needs MSK credentials to authenticate to the cloud MSK cluster. Re
 ```bash
 # Get MSK credentials from Secrets Manager
 MSK_CREDS=$(aws secretsmanager get-secret-value \
-  --secret-id AmazonMSK_workshop-{DEPLOYMENT_ID} \
+  --secret-id AmazonMSK_workshop-ws-slot00 \
   --query SecretString --output text)
 MSK_USER=$(echo "$MSK_CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)['username'])")
 MSK_PASS=$(echo "$MSK_CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
@@ -53,7 +53,7 @@ helm dependency update helm/edge-stack
 helm upgrade --install edge-stack ./helm/edge-stack \
   --namespace edge --create-namespace \
   -f helm/edge-stack-values.yaml \
-  --set deploymentId={DEPLOYMENT_ID}
+  --set deploymentId=ws-slot00
 ```
 
 This deploys in a single Helm umbrella chart:

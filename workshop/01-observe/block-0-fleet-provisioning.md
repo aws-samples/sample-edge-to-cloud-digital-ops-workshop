@@ -82,7 +82,7 @@ Open each link and walk through what's shown:
 - [**IoT Core → Connect → Fleet Provisioning**](https://console.aws.amazon.com/iot/home#/provisioningtemplatehub) → show the provisioning template JSON
 - [**IoT Core → Security → Certificates**](https://console.aws.amazon.com/iot/home#/certificatehub) → show the claim cert (status: `ACTIVE`, policy: provisioning-only)
 - [**IoT Core → Manage → Things**](https://console.aws.amazon.com/iot/home#/thinghub) → open one device → show its permanent cert and attached policy
-- [**IoT Core → Security → Policies**](https://console.aws.amazon.com/iot/home#/policyhub) → compare the claim cert policy (3 statements) vs the device operational policy (publish/subscribe on `edge/{DEPLOYMENT_ID}/#` and shadow topics)
+- [**IoT Core → Security → Policies**](https://console.aws.amazon.com/iot/home#/policyhub) → compare the claim cert policy (3 statements) vs the device operational policy (publish/subscribe on `edge/ws-slot00/#` and shadow topics)
 
 ---
 

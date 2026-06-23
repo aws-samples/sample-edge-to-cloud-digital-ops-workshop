@@ -36,12 +36,12 @@ helm repo update
 ```bash
 # Get the auto-generated MSK password from Secrets Manager
 aws secretsmanager get-secret-value \
-  --secret-id AmazonMSK_workshop-{DEPLOYMENT_ID} \
+  --secret-id AmazonMSK_workshop-ws-slot00 \
   --query SecretString --output text | python3 -m json.tool
 
 # Get MSK bootstrap brokers (SASL/SCRAM endpoint, port 9096)
-MSK_CLUSTER_ARN=$(aws kafka list-clusters --region us-east-1 \
-  --query "ClusterInfoList[?ClusterName=='workshop-{DEPLOYMENT_ID}-msk'].ClusterArn" \
+MSK_CLUSTER_ARN=$(aws cloudformation list-exports \
+  --query "Exports[?Name=='workshop-platform-msk-arn'].Value" \
   --output text)
 aws kafka get-bootstrap-brokers \
   --cluster-arn "$MSK_CLUSTER_ARN" \
@@ -52,18 +52,19 @@ aws kafka get-bootstrap-brokers \
 Create a Kubernetes Secret with these values (used by Redpanda Connect and RisingWave):
 
 ```bash
-kubectl create namespace {DEPLOYMENT_ID}
+kubectl create namespace ws-slot00
 
 MSK_PASS=$(aws secretsmanager get-secret-value \
-  --secret-id AmazonMSK_workshop-{DEPLOYMENT_ID} \
+  --secret-id AmazonMSK_workshop-ws-slot00 \
   --query SecretString --output text | python3 -c 'import sys,json; print(json.load(sys.stdin)["password"])')
 MSK_BOOTSTRAP=$(aws kafka get-bootstrap-brokers \
-  --cluster-arn "$MSK_CLUSTER_ARN" --region us-east-1 \
+  --cluster-arn "$(aws cloudformation list-exports --query "Exports[?Name=='workshop-platform-msk-arn'].Value" --output text)" \
+  --region us-east-1 \
   --query BootstrapBrokerStringSaslScram --output text)
 
 kubectl create secret generic msk-credentials \
-  --namespace {DEPLOYMENT_ID} \
-  --from-literal=MSK_USERNAME=workshop-{DEPLOYMENT_ID} \
+  --namespace ws-slot00 \
+  --from-literal=MSK_USERNAME=workshop-ws-slot00 \
   --from-literal=MSK_PASSWORD="$MSK_PASS" \
   --from-literal=MSK_BOOTSTRAP_SERVERS="$MSK_BOOTSTRAP"
 ```
@@ -73,7 +74,7 @@ kubectl create secret generic msk-credentials \
     ```bash
     # Run from a pod in the cluster (e.g. the kafkatools helper)
     # or use the AWS CLI kafka-topics wrapper if you have network access.
-    # Topics needed: sensors.raw.sim, sensors.raw.{DEPLOYMENT_ID}-edge-0, etc.
+    # Topics needed: sensors.raw.sim, sensors.raw.ws-slot00-edge-0, etc.
     ```
 
 **4. Deploy RisingWave operator and instance**
@@ -90,7 +91,7 @@ kubectl wait --for=condition=available deployment/risingwave-operator-controller
   -n risingwave-system --timeout=120s
 
 # Deploy the RisingWave CR into your participant namespace
-sed "s/\${DEPLOYMENT_ID}/{DEPLOYMENT_ID}/g" k8s/risingwave-cloud.yaml | kubectl apply -n {DEPLOYMENT_ID} -f -
+sed "s/\${DEPLOYMENT_ID}/ws-slot00/g" k8s/risingwave-cloud.yaml | kubectl apply -n ws-slot00 -f -
 ```
 
 **5. Deploy TimescaleDB via CloudNativePG**
@@ -105,7 +106,7 @@ helm upgrade --install cnpg cloudnative-pg/cloudnative-pg \
 kubectl wait --for=condition=available deployment/cnpg-cloudnative-pg \
   -n cnpg-system --timeout=120s
 
-kubectl apply -f k8s/timescaledb-cloud-cluster.yaml -n {DEPLOYMENT_ID}
+kubectl apply -f k8s/timescaledb-cloud-cluster.yaml -n ws-slot00
 ```
 
 **6. Deploy Redpanda Connect (MSK → TimescaleDB)**
@@ -114,7 +115,7 @@ Update `helm/rp-connect-timescaledb.yaml` with the MSK bootstrap brokers, then:
 
 ```bash
 helm upgrade --install rp-connect-timescaledb redpanda/connect \
-  --namespace {DEPLOYMENT_ID} \
+  --namespace ws-slot00 \
   -f helm/rp-connect-timescaledb.yaml
 ```
 
@@ -124,11 +125,11 @@ RisingWave's PostgreSQL wire protocol is on port **4567** (the HTTP dashboard is
 
 ```bash
 # Port-forward — keep running in a separate terminal
-kubectl port-forward -n {DEPLOYMENT_ID} svc/risingwave-cloud-frontend 4567:4567 &
+kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567 &
 
 # Substitute credentials and apply
 sed -e "s|__MSK_BOOTSTRAP__|$MSK_BOOTSTRAP|g" \
-    -e "s|__MSK_USER__|workshop-{DEPLOYMENT_ID}|g" \
+    -e "s|__MSK_USER__|workshop-ws-slot00|g" \
     -e "s|__MSK_PASS__|$MSK_PASS|g" \
     risingwave/ddl-cloud.sql | psql -h localhost -p 4567 -U root -d dev
 ```
@@ -136,7 +137,7 @@ sed -e "s|__MSK_BOOTSTRAP__|$MSK_BOOTSTRAP|g" \
 **8. Wait for all pods**
 
 ```bash
-kubectl get pods -n {DEPLOYMENT_ID}
+kubectl get pods -n ws-slot00
 kubectl get pods -n cnpg-system
 kubectl get pods -n risingwave-system
 ```

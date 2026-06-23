@@ -77,13 +77,13 @@ nav:
       - Block 1 — Console Tour: 01-observe/block-1-console-tour.md
       - Block 2 — S3 Observation: 01-observe/block-2-s3.md
       - Block 3 — Athena Freshness: 01-observe/block-3-athena.md
-      - Block 4 — Fleet Indexing: 01-observe/block-4-fleet-indexing.md
   - Session 2 — Control:
       - Overview: 02-control/index.md
       - Block 1 — Device Client Architecture: 02-control/block-1-device-client.md
       - Block 2 — Create and Deploy a Job: 02-control/block-2-iot-job.md
-      - Block 3 — Fleet Management Deep Dive: 02-control/block-3-fleet-management.md
-      - Block 4 — Observe Updated Data Flow: 02-control/block-4-observe.md
+      - Block 3 — Fleet Indexing: 02-control/block-3-fleet-indexing.md
+      - Block 4 — Fleet Management Deep Dive: 02-control/block-4-fleet-management.md
+      - Block 5 — Observe Updated Data Flow: 02-control/block-5-observe.md
   - Session 3 — State:
       - Overview: 03-state/index.md
       - Block 1 — Named Shadow Architecture: 03-state/block-1-shadows.md

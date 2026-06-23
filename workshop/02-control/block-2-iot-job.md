@@ -2,52 +2,58 @@
 
 **Duration:** 60 min
 
-The update does two things:
-
-1. Changes publish frequency from 0.2 Hz → **1 Hz**
-2. Adds **`net_io_bytes_sent`** and **`net_io_bytes_recv`** to the payload
+The telemetry agent currently reports integer values for CPU, memory, and disk (`cpu_pct: 42`). The job deploys an updated agent that reports **3-decimal-place precision** (`cpu_pct: 42.150`) — important for detecting subtle trends in the analytics tier.
 
 ---
 
 ## Steps
 
-**1. Open `job-scripts/telemetry-v2.sh`** in your editor (or browse it on [GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/job-scripts/telemetry-v2.sh)). Facilitator walks through the key sections:
-
-- `sleep 1` at the bottom of the loop (down from 5 s → 1 Hz)
-- The network delta block: reads `/proc/net/dev`, computes `NET_IO_BYTES_SENT` / `NET_IO_BYTES_RECV` each cycle
-- The `aws iot-data update-thing-shadow` call that reports `telemetry_interval_ms: 1000`, the full metrics list, and `config_version: "2.0.0"`
-- The `exit 0` / `exit 1` contract
-
-**2. Make the edits** directly in the IDE: change the interval and add the two network metrics to the array.
-
-??? example "View source — `job-scripts/telemetry-v2.sh`"
-    [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/job-scripts/telemetry-v2.sh){ .md-button target=_blank }
-
-    ```bash
-    --8<-- "job-scripts/telemetry-v2.sh:job-handler"
-    ```
-
-**3. Upload the edited script and job document to S3:**
+**1. Open `job-scripts/telemetry-v3.sh`** in your editor. Find the three measurement lines inside the `while true` loop — they currently use integer formatting:
 
 ```bash
-aws s3 cp job-scripts/telemetry-v2.sh \
-  s3://workshop-ws-slot00-000000000000/job-scripts/telemetry-v2.sh
+CPU=$(top -bn1 | grep "Cpu(s)" | awk '{printf "%d", $2+0}')
+MEM=$(free | awk '/Mem:/ {printf "%d", $3/$2*100}')
+DISK=$(df / | awk 'NR==2 {printf "%d", $5+0}')
 ```
 
-The console also requires the job document to be stored in S3. Create and upload it now:
+Change `%d` to `%.3f` on all three lines so the agent emits floating-point values:
 
 ```bash
-cat > /tmp/telemetry-v2-job-doc.json << 'EOF'
+CPU=$(top -bn1 | grep "Cpu(s)" | awk '{printf "%.3f", $2+0}')
+MEM=$(free | awk '/Mem:/ {printf "%.3f", $3/$2*100}')
+DISK=$(df / | awk 'NR==2 {printf "%.3f", $5+0}')
+```
+
+The `%d` format truncates — `42.7%` becomes `42`. The `%.3f` format preserves three decimal places — `42.7%` becomes `42.700`. This matters for analytics: integer CPU values cluster at round numbers and make it hard to detect gradual drift.
+
+Also note the `exit 0` at the end of the script — this is the contract with the IoT Jobs agent. `0` reports `SUCCEEDED`; any non-zero exit reports `FAILED` and triggers the abort criteria.
+
+??? example "View source — `job-scripts/telemetry-v3.sh`"
+    [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/job-scripts/telemetry-v3.sh){ .md-button target=_blank }
+
+    ```bash
+    --8<-- "job-scripts/telemetry-v3.sh:job-handler"
+    ```
+
+**2. Upload the script and job document to S3:**
+
+```bash
+aws s3 cp job-scripts/telemetry-v3.sh \
+  s3://workshop-shared-v2-000000000000/ws-slot00/job-scripts/telemetry-v3.sh
+```
+
+```bash
+cat > /tmp/telemetry-v3-job-doc.json << 'EOF'
 {
   "version": "1.0",
   "steps": [
     {
       "action": {
-        "name": "update-telemetry-config",
+        "name": "update-telemetry-precision",
         "type": "runHandler",
         "input": {
           "handler": "run-script.sh",
-          "args": ["s3://workshop-ws-slot00-000000000000/job-scripts/telemetry-v2.sh"]
+          "args": ["s3://workshop-shared-v2-000000000000/ws-slot00/job-scripts/telemetry-v3.sh"]
         },
         "runAsUser": ""
       }
@@ -56,30 +62,34 @@ cat > /tmp/telemetry-v2-job-doc.json << 'EOF'
 }
 EOF
 
-aws s3 cp /tmp/telemetry-v2-job-doc.json \
-  s3://workshop-ws-slot00-000000000000/job-docs/telemetry-v2-job-doc.json
+aws s3 cp /tmp/telemetry-v3-job-doc.json \
+  s3://workshop-shared-v2-000000000000/ws-slot00/job-docs/telemetry-v3-job-doc.json
 ```
 
-The `run-script.sh` handler receives the S3 URI as `$2` and downloads it to run locally.
-
-**4. [Create the IoT Job in the console](https://us-east-1.console.aws.amazon.com/iot/home#/jobhub):**
+**3. [Create the IoT Job in the console](https://us-east-1.console.aws.amazon.com/iot/home#/jobhub):**
 
 - Job type: **Create custom job**
-- **Thing groups to run this job:** `{DEPLOYMENT_ID}-devices`
-- **Job document:** select **From file**, then paste the S3 URL:
-  `s3://workshop-ws-slot00-000000000000/job-docs/telemetry-v2-job-doc.json`
+- **Thing groups to run this job:**
 
-**5. Configure rollout:**
+    ```
+    ws-slot00-devices
+    ```
+- **Job document:** select **From file**, then paste the S3 URL:
+
+    ```
+    s3://workshop-shared-v2-000000000000/ws-slot00/job-docs/telemetry-v3-job-doc.json
+    ```
+
+**4. Configure rollout:**
 
 - Max rate: **1 device/minute**
 - Abort criteria: abort if **>33%** of devices fail
 
-**6. Observe job status** per device: `IN_PROGRESS` → `SUCCEEDED`
+**5. Observe job status** per device: `IN_PROGRESS` → `SUCCEEDED`
 
-**7. Return to the MQTT test client** and observe:
+**6. Return to the MQTT test client** and observe:
 
-- Messages now arrive at **1 Hz**
-- Payload includes `net_io_bytes_sent` and `net_io_bytes_recv`
+- Metric values now have 3 decimal places: `"cpu_pct": 12.450` instead of `"cpu_pct": 12`
 
 ---
 
@@ -87,7 +97,7 @@ The `run-script.sh` handler receives the S3 URI as `$2` and downloads it to run 
 
 - What does the staged rollout protect you against?
 - What happens if a handler script times out without exiting?
-- How would you roll back if the new script caused issues?
+- How would you roll back if the precision change caused downstream issues?
 
 ---
 

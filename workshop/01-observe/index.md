@@ -13,7 +13,6 @@
 | [Block 1](block-1-console-tour.md) | 45 min | Orientation & Console Tour — subscribe to live telemetry |
 | [Block 2](block-2-s3.md) | 45 min | S3 Observation — Hudi files written by MSK Connect |
 | [Block 3](block-3-athena.md) | 60 min | Athena Data Freshness Query |
-| [Block 4](block-4-fleet-indexing.md) | 45 min | Fleet Indexing Introduction |
 | Wrap-up | 15 min | Recap + preview Session 2 |
 
 ---

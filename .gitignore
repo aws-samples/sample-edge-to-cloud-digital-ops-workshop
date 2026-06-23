@@ -1,6 +1,9 @@
 tmp
 .claude
 **/.next
+META-INF
+cdk.context.json
+.vscode
 
 # Helm chart tarballs — run `helm dependency update helm/edge-stack` to regenerate
 helm/edge-stack/charts/*.tgz
@@ -9,10 +12,17 @@ node_modules
 .amplify
 amplify_outputs.json
 CLAUDE.md
-cdk.out
+cdk.out**
 *.js.map
 
 workshop-site.zip
+
+# Maven build output
+**/target/
+
+# Vendored Kafka Connect plugin JARs (too large for git; rebuild with build-plugin.sh)
+local-kafka-connect/plugins/
+local-kafka-connect/hudi-kafka-connect-bundle-0.14.1.jar
 
 # Generated deployment artifact (contains account-specific ARNs)
 DEPLOYMENT_SUMMARY.md

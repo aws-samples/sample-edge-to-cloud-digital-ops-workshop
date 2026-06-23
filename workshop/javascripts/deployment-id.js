@@ -66,6 +66,19 @@
       }
     });
 
+    // Rewrite placeholder values in anchor hrefs (e.g. console deep-links)
+    document.querySelectorAll("a[href]").forEach(function (el) {
+      let href = el.getAttribute("href");
+      if (!href) return;
+      if (deploymentId && deploymentId !== DEPLOYMENT_PLACEHOLDER) {
+        href = href.replaceAll(DEPLOYMENT_PLACEHOLDER, deploymentId);
+      }
+      if (accountId && accountId !== ACCOUNT_PLACEHOLDER) {
+        href = href.replaceAll(ACCOUNT_PLACEHOLDER, accountId);
+      }
+      el.setAttribute("href", href);
+    });
+
     // Also update any "Your deployment ID" / "Your account ID" banners if present
     document.querySelectorAll("[data-deployment-id]").forEach(function (el) {
       if (deploymentId) el.textContent = deploymentId;

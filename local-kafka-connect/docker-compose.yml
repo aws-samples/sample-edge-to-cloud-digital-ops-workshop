@@ -1,0 +1,133 @@
+services:
+  redpanda:
+    image: redpandadata/redpanda:v24.1.13
+    command:
+      - redpanda start
+      - --overprovisioned
+      - --smp 1
+      - --memory 512M
+      - --reserve-memory 0M
+      - --node-id 0
+      - --kafka-addr PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:9092
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "info", "--brokers=localhost:9092"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  localstack:
+    image: localstack/localstack:3.4
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3
+      - DEFAULT_REGION=us-east-1
+    healthcheck:
+      test: ["CMD", "awslocal", "s3", "ls"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  jobmanager:
+    image: flink:1.18-java11
+    command: jobmanager
+    ports:
+      - "8081:8081"
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 2
+      # Pass host AWS credentials through so Flink writes to real S3.
+      # Run: eval $(aws configure export-credentials --format env) before docker compose up.
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}
+      AWS_DEFAULT_REGION: us-east-1
+      HADOOP_CONF_DIR: /etc/hadoop/conf
+      BOOTSTRAP_SERVERS: redpanda:9092
+      HUDI_BASE_PATH: s3a://workshop-shared-v2-796988593450/hudi-telemetry
+    volumes:
+      - ../flink-hudi-local/target/flink-hudi-sink-local-1.0.0.jar:/opt/flink/usrlib/job.jar
+      # Use the AWS-targeting Hadoop config (no LocalStack endpoint override).
+      - ./hadoop-conf-aws/core-site.xml:/etc/hadoop/conf/core-site.xml:ro
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8081/overview"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  taskmanager:
+    image: flink:1.18-java11
+    command: taskmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 2
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}
+      AWS_DEFAULT_REGION: us-east-1
+      HADOOP_CONF_DIR: /etc/hadoop/conf
+    volumes:
+      - ./hadoop-conf-aws/core-site.xml:/etc/hadoop/conf/core-site.xml:ro
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+
+  connect:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    ports:
+      - "8083:8083"
+    volumes:
+      # core-site.xml configures S3A to point to LocalStack
+      - ./hadoop-conf/core-site.xml:/etc/hadoop/conf/core-site.xml:ro
+      - ./telemetry.avsc:/etc/hudi/telemetry.avsc:ro
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: redpanda:9092
+      CONNECT_REST_ADVERTISED_HOST_NAME: connect
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: hudi-connect-local
+      CONNECT_CONFIG_STORAGE_TOPIC: __connect.config
+      CONNECT_OFFSET_STORAGE_TOPIC: __connect.offsets
+      CONNECT_STATUS_STORAGE_TOPIC: __connect.status
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_PLUGIN_PATH: /etc/kafka/connect-plugins
+      # Route S3 calls to LocalStack
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+      HADOOP_CONF_DIR: /etc/hadoop/conf
+      # Hadoop config for S3A — required by Hudi to write to S3
+      CONNECT_PRODUCER_BOOTSTRAP_SERVERS: redpanda:9092
+      CONNECT_CONSUMER_BOOTSTRAP_SERVERS: redpanda:9092
+      KAFKA_OPTS: >-
+        -Dfs.s3a.endpoint=http://localstack:4566
+        -Dfs.s3a.path.style.access=true
+        -Dfs.s3a.access.key=test
+        -Dfs.s3a.secret.key=test
+        -Dfs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8083/connectors"]
+      interval: 10s
+      timeout: 5s
+      retries: 15

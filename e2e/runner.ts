@@ -16,7 +16,7 @@
  *   pnpm test -- --session observe         # run only Phase 2 (Session 1: Observe)
  *
  * --session values map to phases:
- *   platform | observe | control | state | analytics | edge | hmi | teardown | platform-teardown
+ *   platform | observe | control | state | analytics | edge | hmi | teardown | platform-teardown | workshop-walkthrough
  *
  * Environment variables:
  *   WORKSHOP_TEST_SLOT          deployment ID (default: ws-e2e-test)
@@ -31,7 +31,7 @@
  */
 
 import { execSync, execFileSync, spawn } from "node:child_process";
-import { existsSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, writeFileSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -133,6 +133,7 @@ const SESSION_PHASE_MAP: Record<string, string> = {
   hmi:                "Phase 7",
   teardown:           "Phase 8",
   "platform-teardown":"Phase 9",
+  "workshop-walkthrough": "Phase 10",
 };
 
 // When --session is given, only the matching phase runs; all others are skipped.
@@ -2006,6 +2007,114 @@ try {
     });
   }
   } // end Phase 9
+
+  // ── Phase 10: Workshop walkthrough — read-only aws CLI checks ─────────────
+  // For each workshop module in order, parse bash code blocks from every
+  // block-*.md file, extract lines starting with "aws " (read-only commands
+  // only: describe/get/list/search), substitute placeholder values with the
+  // live deployment's account ID and deployment ID, and run each as a check.
+  if (phaseEnabled("Phase 10")) {
+  beginPhase("Phase 10 — Workshop walkthrough");
+
+  // Only read-only aws subcommands — never mutate or deploy from docs.
+  const READ_ONLY_PREFIXES = [
+    "aws iot describe-",
+    "aws iot get-",
+    "aws iot list-",
+    "aws iot search-index",
+    "aws s3 ls",
+    "aws s3api list-",
+    "aws s3api get-",
+    "aws s3api head-",
+    "aws ec2 describe-",
+    "aws ssm get-parameter",
+    "aws ssm list-",
+    "aws secretsmanager describe-",
+    "aws secretsmanager list-",
+    "aws kafka describe-",
+    "aws kafka list-",
+    "aws kafka get-bootstrap-brokers",
+    "aws athena get-",
+    "aws athena list-",
+    "aws eks describe-",
+    "aws eks list-",
+    "aws cloudformation describe-",
+    "aws cloudformation list-",
+    "aws sts get-caller-identity",
+  ];
+
+  function isReadOnlyAwsCommand(line: string): boolean {
+    const trimmed = line.trim();
+    return READ_ONLY_PREFIXES.some((p) => trimmed.startsWith(p));
+  }
+
+  // Extract all aws command lines from fenced bash/shell code blocks.
+  // Multi-line continuations (trailing \) are joined into one command.
+  function extractAwsCommands(markdown: string): string[] {
+    const commands: string[] = [];
+    const fenceRe = /^```(?:bash|shell|sh)?\s*\n([\s\S]*?)^```/gm;
+    let match: RegExpExecArray | null;
+    while ((match = fenceRe.exec(markdown)) !== null) {
+      const block = match[1];
+      // Join continuation lines
+      const joined = block.replace(/\\\n\s*/g, " ");
+      for (const raw of joined.split("\n")) {
+        // Strip variable assignments up to the aws invocation: VAR=$(aws ...) → aws ...
+        let line = raw.replace(/^\s*\w+=\$\(\s*/, "").replace(/\)\s*$/, "").trim();
+        // Strip output redirects (> file, >> file) — we capture stdout ourselves
+        line = line.replace(/\s*>{1,2}\s*\S+/, "").trim();
+        if (!isReadOnlyAwsCommand(line)) continue;
+        // Skip commands with bare shell variables ($VAR_NAME) — they won't be set at runtime.
+        // Subshell substitutions ($(...)) are fine and will be evaluated by execSync.
+        if (/\$[A-Z_]{2,}/.test(line.replace(/\$\([^)]+\)/g, ""))) continue;
+        commands.push(line);
+      }
+    }
+    return commands;
+  }
+
+  // Substitute placeholder values baked into the workshop docs with live values.
+  function substituteValues(cmd: string): string {
+    return cmd
+      .replace(/ws-slot\d+/g, DEPLOYMENT_ID)
+      .replace(/000000000000/g, ACCOUNT_ID)
+      .replace(/\bus-east-1\b/g, REGION);
+  }
+
+  // Collect ordered list of (module, block, command) tuples.
+  const workshopDir = join(REPO_ROOT, "workshop");
+  const moduleDirs = readdirSync(workshopDir, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && /^\d{2}-/.test(d.name))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((d) => d.name);
+
+  interface WalkCommand { module: string; block: string; cmd: string }
+  const walkCommands: WalkCommand[] = [];
+
+  for (const mod of moduleDirs) {
+    const modDir = join(workshopDir, mod);
+    const blocks = readdirSync(modDir)
+      .filter((f) => /^block-\d+.*\.md$/.test(f) || f === "index.md")
+      .sort();
+    for (const block of blocks) {
+      const content = readFileSync(join(modDir, block), "utf8");
+      for (const cmd of extractAwsCommands(content)) {
+        walkCommands.push({ module: mod, block, cmd: substituteValues(cmd) });
+      }
+    }
+  }
+
+  log(`Found ${walkCommands.length} read-only aws commands across workshop docs`);
+
+  for (const { module: mod, block, cmd } of walkCommands) {
+    const label = `[${mod}/${block}] ${cmd.slice(0, 80)}${cmd.length > 80 ? "…" : ""}`;
+    await check(label, async () => {
+      const outputFlag = cmd.includes("--output") ? "" : " --output json";
+      const out = shellOutput(`${cmd}${outputFlag} 2>&1`);
+      return { output: out.slice(0, 300) };
+    });
+  }
+  } // end Phase 10
 } finally {
   // Flush the last phase
   flushPhase();

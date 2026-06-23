@@ -7,7 +7,7 @@
 ## Run the Teardown Script
 
 ```bash
-./scripts/teardown.sh --deployment-id ws-{DEPLOYMENT_ID}
+./scripts/teardown.sh --deployment-id ws-slot00
 ```
 
 The script destroys resources in order to respect dependencies:

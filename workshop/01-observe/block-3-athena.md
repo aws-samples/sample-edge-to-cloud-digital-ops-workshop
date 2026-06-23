@@ -6,26 +6,27 @@
 
 ## Steps
 
-1. Navigate to [**Athena → workgroup `workshop-ws-slot00`**](https://console.aws.amazon.com/athena/home#/query-editor?workgroup=workshop-ws-slot00)
-2. The Glue table `workshop_{DEPLOYMENT_ID}.telemetry` was pre-created by the platform stack — no DDL needed. Confirm it exists:
+1. Navigate to [**Athena → workgroup `workshop-shared`**](https://console.aws.amazon.com/athena/home#/query-editor?workgroup=workshop-shared)
+2. All slots share a single Glue database `workshop_telemetry` pre-created by the platform stack — no DDL needed. Confirm the table exists:
 
 ```sql
-SHOW TABLES IN "workshop_{DEPLOYMENT_ID}";
+SHOW TABLES IN workshop_telemetry;
 ```
 
-3. Run the data freshness query:
+3. Run the data freshness query (replace `ws-slot00` with your slot number):
 
 ```sql
 SELECT
   thing_name,
-  from_unixtime(MAX(message_timestamp) / 1000) AS latest_edge_ts,
-  current_timestamp                             AS query_ts,
+  from_unixtime(MAX(ingest_ts) / 1000)  AS latest_edge_ts,
+  current_timestamp                      AS query_ts,
   date_diff('second',
-    from_unixtime(MAX(message_timestamp) / 1000),
-    current_timestamp)                          AS freshness_seconds
-FROM "workshop_{DEPLOYMENT_ID}"."telemetry"
+    from_unixtime(MAX(ingest_ts) / 1000),
+    current_timestamp)                   AS freshness_seconds
+FROM workshop_telemetry.telemetry
+WHERE deployment_id = 'ws-slot00'
 GROUP BY thing_name
-ORDER BY freshness_seconds DESC;
+ORDER BY freshness_seconds ASC;
 ```
 
 4. Observe that freshness is typically **30–90 seconds** — because data flows IoT Rule → MSK → Hudi table in S3. MSK batches messages and the Hudi sink commits Parquet files on a timed interval rather than writing one object per MQTT message.
@@ -50,6 +51,22 @@ The Hudi sink commits files on a batch interval; there is no change-notification
 
 !!! info "This is the archive tier"
     Appropriate for compliance, ML training, and historical analysis. Not for operational dashboards. Sessions 3–4 introduce the higher-frequency tiers.
+
+---
+
+## Wrap-Up
+
+Recap the full Session 1 data path:
+
+```
+EC2 (IoT Device Client)
+  → MQTT publish → IoT Core
+  → IoT Rules Engine → Kafka action → MSK
+  → MSK Connect (Hudi Sink) → S3
+  → Athena (Glue catalog)
+```
+
+**Preview Session 2:** Next you'll use IoT Jobs to push a script update to all 3 devices simultaneously — changing telemetry frequency from 0.2 Hz to 1 Hz and adding network I/O metrics. After the job runs you'll use Fleet Indexing to query device state across your whole deployment.
 
 ---
 

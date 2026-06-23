@@ -83,7 +83,6 @@ export class ParticipantStack extends Stack {
     const sharedBucketName  = Fn.importValue("workshop-platform-bucket-name");
     const sharedBucketArn   = Fn.importValue("workshop-platform-bucket-arn");
     const mskClusterArn     = Fn.importValue("workshop-platform-msk-arn");
-    const mskSgId           = Fn.importValue("workshop-platform-msk-sg-id");
     const mskBootstrapScram = Fn.importValue("workshop-platform-msk-bootstrap-scram");
     const mskScramKeyArn    = Fn.importValue("workshop-platform-msk-scram-key-arn");
     const iotVpcDestArn     = Fn.importValue("workshop-platform-iot-vpc-dest-arn");

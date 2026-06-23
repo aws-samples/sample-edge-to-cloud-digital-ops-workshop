@@ -1,0 +1,16 @@
+{
+  "type": "record",
+  "name": "Telemetry",
+  "namespace": "com.example",
+  "fields": [
+    {"name": "thing_name",          "type": "string"},
+    {"name": "message_timestamp",   "type": "long"},
+    {"name": "cpu_pct",             "type": ["null", "int"],    "default": null},
+    {"name": "mem_used_pct",        "type": ["null", "int"],    "default": null},
+    {"name": "disk_used_pct",       "type": ["null", "int"],    "default": null},
+    {"name": "net_io_bytes_sent",   "type": ["null", "long"],   "default": null},
+    {"name": "net_io_bytes_recv",   "type": ["null", "long"],   "default": null},
+    {"name": "mqtt_topic",          "type": ["null", "string"], "default": null},
+    {"name": "ingest_ts",           "type": ["null", "long"],   "default": null}
+  ]
+}

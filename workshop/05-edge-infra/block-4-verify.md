@@ -20,7 +20,13 @@ You should see MQTT messages being received and written to Redpanda topics.
 kubectl port-forward -n edge svc/redpanda-console 8080:8080
 ```
 
-Open `http://localhost:8080`. Navigate to **Topics → sensors.raw.\*** and confirm messages are flowing.
+Open in a browser:
+
+```
+http://localhost:8080
+```
+
+Navigate to **Topics → sensors.raw.\*** and confirm messages are flowing.
 
 **3. Confirm RisingWave DDL ran (Helm post-install hook)**
 

@@ -10,7 +10,7 @@ RisingWave's PostgreSQL wire protocol listens on **port 4567** (not 4566, which 
 
 ```bash
 # In one terminal — keep this running
-kubectl port-forward -n {DEPLOYMENT_ID} svc/risingwave-cloud-frontend 4567:4567
+kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567
 
 # In another terminal — connect with psql
 psql -h localhost -p 4567 -U root -d dev
@@ -25,15 +25,15 @@ The MSK bootstrap servers and credentials are available from your Amplify-deploy
 ```bash
 # Fetch MSK connection details
 MSK_BOOTSTRAP=$(aws kafka get-bootstrap-brokers \
-  --cluster-arn $(aws kafka list-clusters --region us-east-1 \
-    --query "ClusterInfoList[?ClusterName=='workshop-{DEPLOYMENT_ID}-msk'].ClusterArn" \
+  --cluster-arn $(aws cloudformation list-exports \
+    --query "Exports[?Name=='workshop-platform-msk-arn'].Value" \
     --output text) \
   --region us-east-1 \
   --query BootstrapBrokerStringSaslScram --output text)
 
-MSK_USER="workshop-{DEPLOYMENT_ID}"
+MSK_USER="workshop-ws-slot00"
 MSK_PASS=$(aws secretsmanager get-secret-value \
-  --secret-id AmazonMSK_workshop-{DEPLOYMENT_ID} \
+  --secret-id AmazonMSK_workshop-ws-slot00 \
   --query SecretString --output text | python3 -c 'import sys,json; print(json.load(sys.stdin)["password"])')
 
 # Apply the DDL with values substituted

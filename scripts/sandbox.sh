@@ -83,6 +83,45 @@ aws s3 cp simulator/sensor-sim.py "s3://${S3_BUCKET}/simulator/sensor-sim.py"
 
 echo ">>> Upload complete."
 
+# ── Seed initial device-config and $package shadows ──────────────────────────
+# EC2 instances self-register via fleet provisioning on first boot. Poll until
+# all 3 things appear in the registry, then write the initial shadows so fleet
+# indexing queries work before participants run any IoT Job.
+echo ">>> Waiting for devices to self-register via fleet provisioning..."
+IOT_ENDPOINT=$(aws iot describe-endpoint --endpoint-type iot:Data-ATS --query endpointAddress --output text)
+THING_NAMES=()
+for attempt in $(seq 1 60); do
+  mapfile -t THING_NAMES < <(aws iot list-things-in-thing-group \
+    --thing-group-name "${DEPLOYMENT_ID}-devices" \
+    --query "things[]" --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true)
+  echo "  ${#THING_NAMES[@]}/3 devices registered (attempt $attempt/60)..."
+  [[ "${#THING_NAMES[@]}" -ge 3 ]] && break
+  sleep 10
+done
+
+if [[ "${#THING_NAMES[@]}" -lt 3 ]]; then
+  echo "WARNING: Only ${#THING_NAMES[@]} device(s) registered after 10 min — seeding shadows for those that exist."
+fi
+
+for THING in "${THING_NAMES[@]}"; do
+  echo "  Seeding shadows for $THING..."
+  aws iot-data update-thing-shadow \
+    --endpoint-url "https://$IOT_ENDPOINT" \
+    --thing-name "$THING" \
+    --shadow-name device-config \
+    --cli-binary-format raw-in-base64-out \
+    --payload '{"state":{"desired":{"telemetry_interval_ms":5000,"metrics":["cpu_pct","mem_used_pct","disk_used_pct"],"config_version":"1.0.0"},"reported":{"telemetry_interval_ms":5000,"metrics":["cpu_pct","mem_used_pct","disk_used_pct"],"config_version":"1.0.0"}}}' \
+    /dev/null
+  aws iot-data update-thing-shadow \
+    --endpoint-url "https://$IOT_ENDPOINT" \
+    --thing-name "$THING" \
+    --shadow-name '$package' \
+    --cli-binary-format raw-in-base64-out \
+    --payload '{"state":{"reported":{"telemetry-agent":{"version":"1.0.0"}}}}' \
+    /dev/null
+done
+echo ">>> Shadow seeding complete."
+
 # ── Write deployment summary ──────────────────────────────────────────────────
 echo ">>> Generating deployment summary..."
 bash "$(dirname "$0")/deployment-summary.sh" "$DEPLOYMENT_ID"
