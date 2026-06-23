@@ -3,8 +3,8 @@ site_description: A 7-session hands-on workshop covering IoT fleet management, r
 site_author: NOV Digital Operations
 docs_dir: workshop
 
-repo_url: https://github.com/energy-digital-operations/edge-digital-operations-workshop
-repo_name: edge-digital-operations-workshop
+repo_url: https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop
+repo_name: sample-edge-to-cloud-digital-ops-workshop
 edit_uri: blob/main/workshop/
 
 theme:
