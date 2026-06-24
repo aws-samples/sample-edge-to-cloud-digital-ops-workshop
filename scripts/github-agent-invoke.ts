@@ -4,21 +4,24 @@
  *
  * 1. Reads the GitHub event from GITHUB_EVENT_PATH
  * 2. Finds the first @agent-<slug> mention in the comment body
- * 3. Invokes the agent Lambda directly (bypasses the 30s AppSync resolver timeout)
+ * 3. SigV4-signs a POST to the AgentCore runtime /invocations endpoint (sync mode)
  * 4. Posts the agent's reply as a comment using GITHUB_TOKEN
  *
  * Required environment variables (set by setup-github-integration.ts):
- *   GITHUB_EVENT_PATH      — path to the event JSON file (built-in Actions env)
- *   GITHUB_TOKEN           — built-in token for posting comments
- *   INVOKE_AGENT_LAMBDA_ARN — ARN of the invoke-agent Lambda function
- *   AWS_REGION             — AWS region (default us-east-1)
- *   AWS_ACCESS_KEY_ID      — IAM credentials for Lambda invocation
- *   AWS_SECRET_ACCESS_KEY  — IAM credentials for Lambda invocation
- *   GITHUB_BASE_REF        — default branch of the repo (e.g. "main")
+ *   GITHUB_EVENT_PATH        — path to the event JSON file (built-in Actions env)
+ *   GITHUB_TOKEN             — built-in token for posting comments
+ *   INVOKE_AGENT_RUNTIME_ARN — ARN of the AgUiHandler AgentCore runtime
+ *   AWS_REGION               — AWS region (default us-east-1)
+ *   AWS_ACCESS_KEY_ID        — IAM credentials for runtime invocation
+ *   AWS_SECRET_ACCESS_KEY    — IAM credentials for runtime invocation
+ *   GITHUB_BASE_REF          — default branch of the repo (e.g. "main")
  */
 
 import { Octokit } from '@octokit/rest';
 import { readFileSync } from 'fs';
+import { randomUUID } from 'crypto';
+import { SignatureV4 } from '@smithy/signature-v4';
+import { Sha256 } from '@aws-crypto/sha256-js';
 
 interface GitHubIssue {
   number: number;
@@ -36,36 +39,62 @@ interface GitHubEvent {
   repository: { full_name: string; owner: { login: string }; name: string };
 }
 
-// ─── Lambda invocation via @aws-sdk/client-lambda ────────────────────────────
+interface RuntimeResponse {
+  sessionId: string;
+  response?: string;
+  error?: string;
+}
 
-import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
+// ─── Runtime invocation via SigV4 ─────────────────────────────────────────────
 
-async function invokeLambda(
-  lambdaArn: string,
+async function invokeRuntime(
+  runtimeArn: string,
   region: string,
   payload: unknown,
   credentials: { accessKeyId: string; secretAccessKey: string; sessionToken?: string },
-): Promise<unknown> {
-  const client = new LambdaClient({
+): Promise<RuntimeResponse> {
+  const encodedArn = encodeURIComponent(runtimeArn);
+  const url = `https://bedrock-agentcore.${region}.amazonaws.com/runtimes/${encodedArn}/invocations?qualifier=DEFAULT`;
+
+  const body = JSON.stringify(payload);
+
+  const signer = new SignatureV4({
+    service: 'bedrock-agentcore',
     region,
     credentials: {
       accessKeyId: credentials.accessKeyId,
       secretAccessKey: credentials.secretAccessKey,
       ...(credentials.sessionToken ? { sessionToken: credentials.sessionToken } : {}),
     },
+    sha256: Sha256,
   });
 
-  const res = await client.send(new InvokeCommand({
-    FunctionName: lambdaArn,
-    InvocationType: 'RequestResponse',
-    Payload: Buffer.from(JSON.stringify(payload)),
-  }));
+  const parsed = new URL(url);
+  const signed = await signer.sign({
+    method: 'POST',
+    hostname: parsed.hostname,
+    path: parsed.pathname + parsed.search,
+    protocol: 'https:',
+    headers: {
+      host: parsed.hostname,
+      'content-type': 'application/json',
+      'content-length': String(Buffer.byteLength(body)),
+    },
+    body,
+  });
 
-  const result = JSON.parse(Buffer.from(res.Payload!).toString()) as {
-    errorType?: string; errorMessage?: string; response?: string; sessionId?: string;
-  };
-  if (result.errorType) throw new Error(`Lambda error: ${result.errorMessage}`);
-  return result;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: signed.headers as Record<string, string>,
+    body,
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Runtime HTTP ${res.status}: ${text}`);
+  }
+
+  return res.json() as Promise<RuntimeResponse>;
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -74,8 +103,8 @@ async function main() {
   const eventPath = process.env.GITHUB_EVENT_PATH;
   if (!eventPath) throw new Error('GITHUB_EVENT_PATH is not set');
 
-  const lambdaArn = process.env.INVOKE_AGENT_LAMBDA_ARN;
-  if (!lambdaArn) throw new Error('INVOKE_AGENT_LAMBDA_ARN is not set');
+  const runtimeArn = process.env.INVOKE_AGENT_RUNTIME_ARN;
+  if (!runtimeArn) throw new Error('INVOKE_AGENT_RUNTIME_ARN is not set');
 
   const awsRegion = process.env.AWS_REGION ?? 'us-east-1';
   const awsAccessKeyId = process.env.AWS_ACCESS_KEY_ID;
@@ -117,7 +146,6 @@ async function main() {
   const userPrompt = rawText.replace(`@agent-${agentSlug}`, '').trim() || event.issue?.title || rawText;
 
   // Inject structured context so the agent knows the repo, issue, and default branch.
-  // The agent can use GitHub MCP tools (create_branch, create_or_update_file, create_pull_request, etc.)
   const defaultBranch = process.env.GITHUB_BASE_REF || 'main';
   const prompt = `\
 You are acting on behalf of a GitHub user in the repository ${event.repository.full_name}.
@@ -137,14 +165,15 @@ If your response involves code changes, create a new branch off ${defaultBranch}
   console.log(`Agent: "${agentSlug}"  Issue: #${issueNumber}`);
   console.log(`Prompt: ${userPrompt.slice(0, 120)}${userPrompt.length > 120 ? '…' : ''}`);
 
-  const result = await invokeLambda(
-    lambdaArn,
+  const sessionId = randomUUID();
+  const result = await invokeRuntime(
+    runtimeArn,
     awsRegion,
-    { arguments: { agentSlug, prompt } },
+    { sessionId, prompt, sync: true },
     { accessKeyId: awsAccessKeyId, secretAccessKey: awsSecretAccessKey, sessionToken: awsSessionToken },
-  ) as { response: string; sessionId: string };
+  );
 
-  const response = result.response;
+  const response = result.response ?? result.error ?? '(no response)';
   console.log(`Agent responded (${response.length} chars)`);
 
   const octokit = new Octokit({ auth: githubToken });
