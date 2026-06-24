@@ -12,13 +12,17 @@
 
 The script destroys resources in order to respect dependencies:
 
-1. EKS workloads (Helm uninstall)
-2. EKS node groups + cluster
-3. MSK cluster
-4. IoT Things, Certificates, and Policies
-5. IoT Provisioning Template and Claim Certificate
-6. EC2 instances
-7. Subnets and route tables
+1. IoT Things and their certificates
+2. IoT Thing Group
+3. IoT Topic Rule (MSK bridge)
+4. IoT Provisioning Template
+5. EC2 instances
+6. EKS namespace (participant namespace on the shared cluster)
+7. MSK cluster
+8. S3 buckets (Iceberg data + RisingWave state)
+9. Athena workgroup
+10. Secrets Manager secrets (claim cert, MSK SCRAM creds)
+11. SSM parameters (k3s token, kubeconfig)
 
 The shared VPCs (`workshop-edge`, `workshop-cloud`) are **preserved** for the next session or reuse.
 

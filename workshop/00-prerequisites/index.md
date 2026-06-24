@@ -96,25 +96,22 @@ Each participant slot gets a unique **`DEPLOYMENT_ID`** (e.g., `ws-a1b2c3`). All
 ## Deploy Steps
 
 ```bash
-# 1. Clone and install
-git clone https://github.com/your-org/edge-digital-ops-workshop
-cd edge-digital-ops-workshop
+# 1. Clone the workshop repo
+git clone https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop.git
+cd sample-edge-to-cloud-digital-ops-workshop
+ 
+# 2. Install dependencies
 pnpm install
-
-# 2. Bootstrap CDK (first time only per account/region)
-npx cdk bootstrap
-
-# 3. Deploy all participant environments in parallel
-#    Deploys the shared platform stack once first (if needed),
-#    then starts one Amplify sandbox per participant concurrently.
-pnpm sandbox:all ws-a1b2c3 ws-b4c5d6
+ 
+# 3. Deploy all participant slots (list each slot ID for your attendee count)
+pnpm run sandbox:all ws-slot00 ws-slot01 ws-slot02 ws-slot03 ws-slot04 ws-slot05 ws-slot06 ws-slot07 ws-slot08 ws-slot09
 ```
 
 !!! info "What `pnpm sandbox:all` does"
     `scripts/sandbox-all.sh` deploys `WorkshopPlatformStack` (shared VPCs) sequentially first — eliminating any race condition — then fans out `npx ampx sandbox --identifier <ID>` for each participant in parallel. Each participant gets their own isolated full-stack Amplify environment. Logs are prefixed with `[ws-a1b2c3]` etc. for readability.
 
 !!! tip "Single participant"
-    To deploy or iterate on one environment: `pnpm sandbox ws-a1b2c3`
+    To deploy or iterate on one environment: `pnpm run sandbox ws-a1b2c3`
 
 ---
 

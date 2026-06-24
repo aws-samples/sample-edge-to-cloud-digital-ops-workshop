@@ -104,14 +104,15 @@ if [ -n "$MSK_ARN" ] && [ "$MSK_ARN" != "None" ]; then
   run aws kafka delete-cluster --region "$REGION" --cluster-arn "$MSK_ARN"
 fi
 
-# ── 8. Empty and delete S3 bucket ─────────────────────────────────────────────
+# ── 8. Empty and delete S3 buckets ────────────────────────────────────────────
 echo "--- S3 ---"
-BUCKET="workshop-${DEPLOYMENT_ID}-${ACCOUNT_ID}"
-if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
-  echo "  Emptying $BUCKET"
-  run aws s3 rm "s3://${BUCKET}" --recursive
-  run aws s3api delete-bucket --bucket "$BUCKET" --region "$REGION"
-fi
+for BUCKET in "workshop-${DEPLOYMENT_ID}-${ACCOUNT_ID}" "workshop-${DEPLOYMENT_ID}-${ACCOUNT_ID}-risingwave-state"; do
+  if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+    echo "  Emptying $BUCKET"
+    run aws s3 rm "s3://${BUCKET}" --recursive
+    run aws s3api delete-bucket --bucket "$BUCKET" --region "$REGION"
+  fi
+done
 
 # ── 9. Delete Athena workgroup ────────────────────────────────────────────────
 run aws athena delete-work-group --region "$REGION" \

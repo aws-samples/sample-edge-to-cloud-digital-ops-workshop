@@ -11,7 +11,7 @@ for _i in $(seq 1 15); do
   [ -n "$INSTANCE_ID" ] && break
   sleep 3
 done
-REGION=$(curl -s --max-time 2 http://169.254.169.254/latest/meta-data/placement/availability-zone 2>/dev/null | sed 's/.$//')
+REGION=$(curl -s --max-time 5 http://169.254.169.254/latest/dynamic/instance-identity/document 2>/dev/null | grep -oP '"region"\s*:\s*"\K[^"]+' || curl -s --max-time 5 http://169.254.169.254/latest/meta-data/placement/availability-zone 2>/dev/null | sed 's/.$//' || echo "us-east-1")
 IOT_ENDPOINT=$(aws iot describe-endpoint --region "$REGION" --endpoint-type iot:Data-ATS --query endpointAddress --output text)
 
 TELEMETRY_SCRIPT=/etc/aws-iot-device-client/jobs/publish-telemetry.sh
@@ -42,7 +42,7 @@ for _i in $(seq 1 15); do
   sleep 3
 done
 DEPLOYMENT_ID="${DEPLOYMENT_ID:-ws-slot00}"
-REGION=$(curl -s --max-time 2 http://169.254.169.254/latest/meta-data/placement/availability-zone 2>/dev/null | sed 's/.$//')
+REGION=$(curl -s --max-time 5 http://169.254.169.254/latest/dynamic/instance-identity/document 2>/dev/null | grep -oP '"region"\s*:\s*"\K[^"]+' || curl -s --max-time 5 http://169.254.169.254/latest/meta-data/placement/availability-zone 2>/dev/null | sed 's/.$//' || echo "us-east-1")
 IOT_ENDPOINT=$(aws iot describe-endpoint --endpoint-type iot:Data-ATS --query endpointAddress --output text)
 
 # Read desired config from device-config shadow; fall back to safe defaults

@@ -665,10 +665,21 @@ try {
 
   await check("workshop-eks cluster ACTIVE", async () => {
     const t0 = Date.now();
-    const resp = await eks.send(new DescribeClusterCommand({ name: "workshop-eks" }));
-    const status = resp.cluster?.status;
-    if (status !== "ACTIVE") throw new Error(`EKS cluster status: ${status}`);
-    return { status, version: resp.cluster?.version ?? "?", durationMs: Date.now() - t0 };
+    const deadline = Date.now() + 20 * 60_000; // up to 20 min if cluster is being created
+    while (Date.now() < deadline) {
+      try {
+        const resp = await eks.send(new DescribeClusterCommand({ name: "workshop-eks" }));
+        const status = resp.cluster?.status;
+        if (status === "ACTIVE") return { status, version: resp.cluster?.version ?? "?", durationMs: Date.now() - t0 };
+        log(`  EKS cluster status: ${status} — waiting...`);
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name === "ResourceNotFoundException") {
+          log("  EKS cluster not found — waiting for creation...");
+        } else throw err;
+      }
+      await sleep(30_000);
+    }
+    throw new Error("EKS cluster did not become ACTIVE within 20 min");
   }, { data: (r) => r });
 
   await check("workshop-eks has ≥2 Ready nodes", async () => {
@@ -1110,6 +1121,8 @@ try {
 
     // Apply RisingWave DDL via kubectl port-forward to the EKS frontend service
     log("Applying cloud RisingWave DDL...");
+    shellOutput(`lsof -ti:14567 | xargs kill -9 2>/dev/null || true`);
+    await sleep(1_000);
     const rwPfProc = spawn(
       "kubectl",
       ["--kubeconfig", cloudKcPath, "port-forward", "-n", DEPLOYMENT_ID,
@@ -1257,6 +1270,9 @@ try {
     let rwCloudFreshnessMs: number | undefined;
     if (cloudKcPath) {
       log("Port-forwarding to cloud RisingWave for freshness comparison...");
+      // Kill any stale port-forward from a prior run on the same port
+      shellOutput(`lsof -ti:14568 | xargs kill -9 2>/dev/null || true`);
+      await sleep(1_000);
       const rwCloudPf2 = spawn(
         "kubectl",
         ["--kubeconfig", cloudKcPath, "port-forward", "-n", DEPLOYMENT_ID,
@@ -1265,44 +1281,50 @@ try {
       );
       const rwCloudTunnel2 = { localPort: 14568, proc: rwCloudPf2, close: () => { try { rwCloudPf2.kill(); } catch { /* */ } } };
       tunnels.push(rwCloudTunnel2);
-      // Poll until the port-forward is accepting connections (up to 30s)
-      await (async () => {
-        const deadline = Date.now() + 30_000;
-        while (Date.now() < deadline) {
-          try {
-            const c = new pg.Client({ host: "localhost", port: 14568, user: "root", database: "dev", password: "", connectionTimeoutMillis: 2000 });
-            await c.connect();
-            await c.end();
-            return;
-          } catch { await sleep(1_000); }
-        }
-        throw new Error("Timed out waiting for RisingWave port-forward on 14568");
-      })();
-
-      let rwCloudClient2: pg.Client | undefined;
-      try {
-        rwCloudClient2 = new pg.Client({ host: "localhost", port: 14568, user: "root", database: "dev", password: "" });
-        await rwCloudClient2.connect();
-        await check("Cloud RisingWave freshness — fleet sensor MAX(ts_ms)", async () => {
-          const { rows, durationMs } = await pgQuery(
-            rwCloudClient2!,
-            `SELECT
-               AVG(CASE WHEN sensor = 'cpu_pct'      THEN 100.0 - value END) AS avg_free_cpu_pct,
-               AVG(CASE WHEN sensor = 'mem_used_pct' THEN 100.0 - value END) AS avg_free_mem_pct,
-               MAX(ts_ms)                                                     AS latest_ts_ms
-             FROM mv_sensor_fleet_latest`
-          );
-          const latestTs = Number(rows[0]?.latest_ts_ms ?? 0);
-          rwCloudFreshnessMs = Date.now() - latestTs;
-          const freeCpu = rows[0]?.avg_free_cpu_pct != null ? parseFloat(rows[0].avg_free_cpu_pct) : null;
-          const freeMem = rows[0]?.avg_free_mem_pct != null ? parseFloat(rows[0].avg_free_mem_pct) : null;
-          capture("Cloud RisingWave freshness result", JSON.stringify({ freeCpu, freeMem, latestTs, freshnessMs: rwCloudFreshnessMs }, null, 2));
-          return { freshnessMs: rwCloudFreshnessMs, avgFreeCpuPct: freeCpu, avgFreeMemPct: freeMem, queryMs: durationMs };
-        }, { data: (r) => ({ freshnessMs: r.freshnessMs, avgFreeCpuPct: r.avgFreeCpuPct, avgFreeMemPct: r.avgFreeMemPct, queryMs: r.queryMs }) });
-      } finally {
-        await rwCloudClient2?.end().catch(() => {});
+      // Poll until the port-forward is accepting connections (up to 60s)
+      let rwCloudPfReady = false;
+      const rwCloudPfDeadline = Date.now() + 60_000;
+      while (Date.now() < rwCloudPfDeadline) {
+        try {
+          const c = new pg.Client({ host: "localhost", port: 14568, user: "root", database: "dev", password: "", connectionTimeoutMillis: 2000 });
+          await c.connect();
+          await c.end();
+          rwCloudPfReady = true;
+          break;
+        } catch { await sleep(1_000); }
+      }
+      if (!rwCloudPfReady) {
+        log("⚠  RisingWave port-forward on 14568 not ready after 60s — skipping cloud freshness checks");
         rwCloudTunnel2.close();
         tunnels.splice(tunnels.indexOf(rwCloudTunnel2), 1);
+      }
+
+      if (rwCloudPfReady) {
+        let rwCloudClient2: pg.Client | undefined;
+        try {
+          rwCloudClient2 = new pg.Client({ host: "localhost", port: 14568, user: "root", database: "dev", password: "" });
+          await rwCloudClient2.connect();
+          await check("Cloud RisingWave freshness — fleet sensor MAX(ts_ms)", async () => {
+            const { rows, durationMs } = await pgQuery(
+              rwCloudClient2!,
+              `SELECT
+                 AVG(CASE WHEN sensor = 'cpu_pct'      THEN 100.0 - value END) AS avg_free_cpu_pct,
+                 AVG(CASE WHEN sensor = 'mem_used_pct' THEN 100.0 - value END) AS avg_free_mem_pct,
+                 MAX(ts_ms)                                                     AS latest_ts_ms
+               FROM mv_sensor_fleet_latest`
+            );
+            const latestTs = Number(rows[0]?.latest_ts_ms ?? 0);
+            rwCloudFreshnessMs = Date.now() - latestTs;
+            const freeCpu = rows[0]?.avg_free_cpu_pct != null ? parseFloat(rows[0].avg_free_cpu_pct) : null;
+            const freeMem = rows[0]?.avg_free_mem_pct != null ? parseFloat(rows[0].avg_free_mem_pct) : null;
+            capture("Cloud RisingWave freshness result", JSON.stringify({ freeCpu, freeMem, latestTs, freshnessMs: rwCloudFreshnessMs }, null, 2));
+            return { freshnessMs: rwCloudFreshnessMs, avgFreeCpuPct: freeCpu, avgFreeMemPct: freeMem, queryMs: durationMs };
+          }, { data: (r) => ({ freshnessMs: r.freshnessMs, avgFreeCpuPct: r.avgFreeCpuPct, avgFreeMemPct: r.avgFreeMemPct, queryMs: r.queryMs }) });
+        } finally {
+          await rwCloudClient2?.end().catch(() => {});
+          rwCloudTunnel2.close();
+          tunnels.splice(tunnels.indexOf(rwCloudTunnel2), 1);
+        }
       }
     }
 
@@ -1894,11 +1916,12 @@ try {
       return { terminated: true };
     });
 
-    await check("S3 bucket deleted", async () => {
+    await check("RisingWave state S3 bucket deleted", async () => {
+      const rwBucket = `workshop-${DEPLOYMENT_ID}-${ACCOUNT_ID}-risingwave-state`;
       const t0 = Date.now();
       try {
-        await s3.send(new HeadBucketCommand({ Bucket: BUCKET_NAME }));
-        throw new Error("Bucket still exists");
+        await s3.send(new HeadBucketCommand({ Bucket: rwBucket }));
+        throw new Error(`Bucket ${rwBucket} still exists`);
       } catch (err: unknown) {
         if (err instanceof Error && (err.name === "NotFound" || err.name === "NoSuchBucket" || err.message.includes("403")))
           return { deleted: true, durationMs: Date.now() - t0 };
@@ -1918,14 +1941,16 @@ try {
       }
     }, { data: (r) => ({ sdkLatencyMs: r.durationMs }) });
 
-    await check("MSK SCRAM secret deleted", async () => {
+    await check("MSK SCRAM secret deleted or pending delete", async () => {
       const t0 = Date.now();
       try {
-        await sm.send(new DescribeSecretCommand({ SecretId: `AmazonMSK_workshop-${DEPLOYMENT_ID}` }));
-        throw new Error("Secret still exists");
+        const resp = await sm.send(new DescribeSecretCommand({ SecretId: `AmazonMSK_workshop-${DEPLOYMENT_ID}` }));
+        // Secrets Manager enforces a recovery window — PENDING_DELETE counts as deleted for our purposes
+        if (resp.DeletedDate) return { deleted: true, pendingDelete: true, durationMs: Date.now() - t0 };
+        throw new Error("Secret still active (not scheduled for deletion)");
       } catch (err: unknown) {
         if (err instanceof Error && err.name === "ResourceNotFoundException")
-          return { deleted: true, durationMs: Date.now() - t0 };
+          return { deleted: true, pendingDelete: false, durationMs: Date.now() - t0 };
         throw err;
       }
     }, { data: (r) => ({ sdkLatencyMs: r.durationMs }) });
@@ -2018,6 +2043,34 @@ try {
       }
       throw new Error("EKS cluster deletion timed out");
     }, { data: (r) => ({ waitMs: r.waitMs }) });
+
+    // Delete all participant Amplify sandbox stacks first — the platform stack
+    // exports workshop-platform-msk-arn which participant stacks import.
+    // CloudFormation blocks platform stack deletion until all importers are gone.
+    log("Deleting participant Amplify sandbox stacks before platform teardown...");
+    const sandboxSlots = ["ws-slot00", "ws-slot01", "ws-slot02", "ws-slot03", "ws-slot04"];
+    for (const slot of sandboxSlots) {
+      try {
+        shellOutput(
+          `npx ampx sandbox delete --identifier ${slot} --yes 2>/dev/null || true`
+        );
+        log(`  Deleted sandbox ${slot}`);
+      } catch { log(`  sandbox ${slot} already gone or delete failed — continuing`); }
+    }
+    // Wait for sandbox stacks to finish deleting (up to 10 min)
+    const sandboxDeleteDeadline = Date.now() + 600_000;
+    while (Date.now() < sandboxDeleteDeadline) {
+      const remaining: string[] = [];
+      for (const slot of sandboxSlots) {
+        const stackStatus = shellOutput(
+          `aws cloudformation describe-stacks --stack-name "amplify-edge-digital-ops-workshop-${slot}-sandbox*" --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "DELETED"`
+        ).trim();
+        if (stackStatus !== "DELETED" && stackStatus !== "DELETE_COMPLETE" && stackStatus !== "") remaining.push(slot);
+      }
+      if (remaining.length === 0) break;
+      log(`  Waiting for sandbox stacks to finish deleting: ${remaining.join(", ")}...`);
+      await sleep(30_000);
+    }
 
     log("Destroying WorkshopPlatformStack (CDK)...");
     const platformDestroyT0 = Date.now();

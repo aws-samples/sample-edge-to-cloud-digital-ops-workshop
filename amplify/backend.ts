@@ -6,6 +6,16 @@ import { ParticipantStack } from "./custom/participant-stack";
 
 const backend = defineBackend({ auth, data });
 
+// ============================================================================
+// BASIC AUTH CONFIGURATION
+// ============================================================================
+
+// Disable self-signup - admin creates users manually
+const { cfnUserPool, cfnUserPoolClient } = backend.auth.resources.cfnResources;
+cfnUserPool.adminCreateUserConfig = {
+  allowAdminCreateUserOnly: true,
+};
+
 // WORKSHOP_DEPLOYMENT_ID is set by scripts/sandbox.sh (e.g. "ws-slot00").
 const deploymentId = process.env.WORKSHOP_DEPLOYMENT_ID;
 if (!deploymentId) {

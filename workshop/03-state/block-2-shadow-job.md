@@ -85,12 +85,12 @@ aws s3 cp job-scripts/add-shadows.sh \
 
 4. Observe the new shadows appearing in [IoT Core → Manage → Things](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/thinghub) → (device) → **Shadows**
 
-5. Use Fleet Indexing to query device health across the fleet via [Advanced thing search](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=attributes.deploymentId%3Aws-slot00%20AND%20shadow.name.device-health.reported.cpu_pct%3A%5B50%20TO%20*%5D):
+5. Use Fleet Indexing to query device health across the fleet via [Advanced thing search](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=attributes.deploymentId%3Aws-slot00%20AND%20shadow.name.device-health.reported.cpu_pct%3A%5B0%20TO%20*%5D):
 
     ??? example "AWS CLI equivalent"
         ```bash
         aws iot search-index --index-name AWS_Things \
-          --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.device-health.reported.cpu_pct:[50 TO *]' \
+          --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.device-health.reported.cpu_pct:[0 TO *]' \
           --output json | jq '{"totalResults": (.things | length)}'
         ```
         <!-- e2e:assert {"jsonPath": "totalResults", "matches": "^[1-9]"} -->

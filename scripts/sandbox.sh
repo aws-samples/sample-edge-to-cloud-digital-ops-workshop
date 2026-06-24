@@ -70,6 +70,7 @@ fi
 # ── Start Amplify sandbox for this participant ───────────────────────────────
 export WORKSHOP_DEPLOYMENT_ID="$DEPLOYMENT_ID"
 echo ">>> Starting Amplify sandbox --identifier $DEPLOYMENT_ID"
+unset npm_config_prefix
 . "$HOME/.nvm/nvm.sh"
 nvm use 22 --silent
 npx ampx sandbox --identifier "$DEPLOYMENT_ID" --once
@@ -91,7 +92,10 @@ echo ">>> Waiting for devices to self-register via fleet provisioning..."
 IOT_ENDPOINT=$(aws iot describe-endpoint --endpoint-type iot:Data-ATS --query endpointAddress --output text)
 THING_NAMES=()
 for attempt in $(seq 1 60); do
-  mapfile -t THING_NAMES < <(aws iot list-things-in-thing-group \
+  THING_NAMES=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && THING_NAMES+=("$line")
+  done < <(aws iot list-things-in-thing-group \
     --thing-group-name "${DEPLOYMENT_ID}-devices" \
     --query "things[]" --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true)
   echo "  ${#THING_NAMES[@]}/3 devices registered (attempt $attempt/60)..."
