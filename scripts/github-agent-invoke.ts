@@ -8,13 +8,13 @@
  * 4. Posts the agent's reply as a comment using GITHUB_TOKEN
  *
  * Required environment variables (set by setup-github-integration.ts):
- *   GITHUB_EVENT_PATH        — path to the event JSON file (built-in Actions env)
- *   GITHUB_TOKEN             — built-in token for posting comments
- *   INVOKE_AGENT_RUNTIME_ARN — ARN of the AgUiHandler AgentCore runtime
- *   AWS_REGION               — AWS region (default us-east-1)
- *   AWS_ACCESS_KEY_ID        — IAM credentials for runtime invocation
- *   AWS_SECRET_ACCESS_KEY    — IAM credentials for runtime invocation
- *   GITHUB_BASE_REF          — default branch of the repo (e.g. "main")
+ *   GITHUB_EVENT_PATH           — path to the event JSON file (built-in Actions env)
+ *   GITHUB_TOKEN                — built-in token for posting comments
+ *   INVOKE_AGENT_RUNTIME_ARN    — ARN of the AgUiHandler AgentCore runtime
+ *   AWS_REGION                  — AWS region (default us-east-1)
+ *   AWS_ACCESS_KEY_ID           — IAM credentials for runtime invocation
+ *   AWS_SECRET_ACCESS_KEY       — IAM credentials for runtime invocation
+ *   GITHUB_BASE_REF             — default branch of the repo (e.g. "main")
  */
 
 import { Octokit } from '@octokit/rest';
@@ -55,7 +55,6 @@ async function invokeRuntime(
 ): Promise<RuntimeResponse> {
   const encodedArn = encodeURIComponent(runtimeArn);
   const url = `https://bedrock-agentcore.${region}.amazonaws.com/runtimes/${encodedArn}/invocations?qualifier=DEFAULT`;
-
   const body = JSON.stringify(payload);
 
   const signer = new SignatureV4({
@@ -70,10 +69,14 @@ async function invokeRuntime(
   });
 
   const parsed = new URL(url);
+  const query: Record<string, string> = {};
+  parsed.searchParams.forEach((v, k) => { query[k] = v; });
+
   const signed = await signer.sign({
     method: 'POST',
     hostname: parsed.hostname,
-    path: parsed.pathname + parsed.search,
+    path: parsed.pathname,
+    query,
     protocol: 'https:',
     headers: {
       host: parsed.hostname,
@@ -82,9 +85,10 @@ async function invokeRuntime(
     body,
   });
 
-  // Build final headers: start from signed headers (Authorization, x-amz-date, etc.)
-  // then add content-type. Exclude 'host' — fetch sets Host automatically from the URL.
+  // Strip 'host' from the signed headers — fetch injects Host from the URL automatically.
+  // Keeping a manually-set Host header can cause signature mismatches on some runtimes.
   const { host: _host, ...signingHeaders } = signed.headers as Record<string, string>;
+
   const res = await fetch(url, {
     method: 'POST',
     headers: signingHeaders,
