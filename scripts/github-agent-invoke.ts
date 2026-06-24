@@ -109,10 +109,29 @@ async function main() {
   }
 
   const agentSlug = mentionMatch[1];
-  const prompt = rawText.replace(`@agent-${agentSlug}`, '').trim() || event.issue?.title || rawText;
+  const userPrompt = rawText.replace(`@agent-${agentSlug}`, '').trim() || event.issue?.title || rawText;
+
+  // Inject structured context so the agent knows the repo, issue, and default branch.
+  // The agent can use GitHub MCP tools (create_branch, create_or_update_file, create_pull_request, etc.)
+  // with this information to act on the repo directly.
+  const defaultBranch = process.env.GITHUB_BASE_REF || 'main';
+  const prompt = `\
+You are acting on behalf of a GitHub user in the repository ${event.repository.full_name}.
+
+CONTEXT:
+- Repository: ${event.repository.full_name}
+- Default branch: ${defaultBranch}
+- Issue #${issueNumber}: ${event.issue?.title ?? '(no title)'}
+- Issue body: ${(event.issue?.body ?? '').slice(0, 500)}
+- Triggered by: @${event.sender.login}
+
+USER REQUEST:
+${userPrompt}
+
+If your response involves code changes, create a new branch off ${defaultBranch}, commit the changes, and open a pull request. Reference issue #${issueNumber} in the PR description.`;
 
   console.log(`Agent: "${agentSlug}"  Issue: #${issueNumber}`);
-  console.log(`Prompt: ${prompt.slice(0, 120)}${prompt.length > 120 ? '…' : ''}`);
+  console.log(`Prompt: ${userPrompt.slice(0, 120)}${userPrompt.length > 120 ? '…' : ''}`);
 
   const data = await callGraphQL(endpoint, apiKey, INVOKE_AGENT_MUTATION, {
     agentSlug,
