@@ -8,7 +8,7 @@ on:
     types: [assigned]
 
 permissions:
-  contents: read
+  contents: write
   issues: write
   pull-requests: write
 
@@ -39,4 +39,6 @@ jobs:
           APPSYNC_API_KEY: ${{ secrets.APPSYNC_API_KEY }}
           AWS_REGION: us-east-1
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_BASE_REF: ${{ github.event.repository.default_branch }}
         run: npx tsx scripts/github-agent-invoke.ts
+
