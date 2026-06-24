@@ -36,22 +36,9 @@ interface GitHubEvent {
   repository: { full_name: string; owner: { login: string }; name: string };
 }
 
-// ─── SigV4 Lambda invocation (no SDK dependency) ─────────────────────────────
+// ─── Lambda invocation via @aws-sdk/client-lambda ────────────────────────────
 
-function hexEncode(buf: Uint8Array): string {
-  return Array.from(buf).map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
-async function sha256(data: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const hash = await crypto.subtle.digest('SHA-256', encoder.encode(data));
-  return hexEncode(new Uint8Array(hash));
-}
-
-async function hmac256(key: ArrayBuffer, data: string): Promise<ArrayBuffer> {
-  const cryptoKey = await crypto.subtle.importKey('raw', key, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  return crypto.subtle.sign('HMAC', cryptoKey, new TextEncoder().encode(data));
-}
+import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
 
 async function invokeLambda(
   lambdaArn: string,
@@ -59,53 +46,24 @@ async function invokeLambda(
   payload: unknown,
   credentials: { accessKeyId: string; secretAccessKey: string; sessionToken?: string },
 ): Promise<unknown> {
-  const functionName = lambdaArn.split(':').slice(-1)[0];
-  const host = `lambda.${region}.amazonaws.com`;
-  const path = `/2015-03-31/functions/${encodeURIComponent(lambdaArn)}/invocations`;
-  const body = JSON.stringify(payload);
-
-  const now = new Date();
-  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '').slice(0, 15) + 'Z';
-  const dateStamp = amzDate.slice(0, 8);
-
-  const payloadHash = await sha256(body);
-
-  const headers: Record<string, string> = {
-    'content-type': 'application/json',
-    host,
-    'x-amz-date': amzDate,
-    'x-amz-invocation-type': 'RequestResponse',
-    ...(credentials.sessionToken ? { 'x-amz-security-token': credentials.sessionToken } : {}),
-  };
-
-  const signedHeaders = Object.keys(headers).sort().join(';');
-  const canonicalHeaders = Object.entries(headers).sort(([a], [b]) => a.localeCompare(b))
-    .map(([k, v]) => `${k}:${v}\n`).join('');
-  const canonicalRequest = ['POST', path, '', canonicalHeaders, signedHeaders, payloadHash].join('\n');
-
-  const credentialScope = `${dateStamp}/${region}/lambda/aws4_request`;
-  const stringToSign = ['AWS4-HMAC-SHA256', amzDate, credentialScope, await sha256(canonicalRequest)].join('\n');
-
-  const enc = (s: string) => new TextEncoder().encode(s);
-  const kDate = await hmac256(enc(`AWS4${credentials.secretAccessKey}`), dateStamp);
-  const kRegion = await hmac256(kDate, region);
-  const kService = await hmac256(kRegion, 'lambda');
-  const kSigning = await hmac256(kService, 'aws4_request');
-  const signature = hexEncode(new Uint8Array(await hmac256(kSigning, stringToSign)));
-
-  const authorization = `AWS4-HMAC-SHA256 Credential=${credentials.accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
-
-  const res = await fetch(`https://${host}${path}`, {
-    method: 'POST',
-    headers: { ...headers, Authorization: authorization },
-    body,
+  const client = new LambdaClient({
+    region,
+    credentials: {
+      accessKeyId: credentials.accessKeyId,
+      secretAccessKey: credentials.secretAccessKey,
+      ...(credentials.sessionToken ? { sessionToken: credentials.sessionToken } : {}),
+    },
   });
 
-  // suppress unused variable warning
-  void functionName;
+  const res = await client.send(new InvokeCommand({
+    FunctionName: lambdaArn,
+    InvocationType: 'RequestResponse',
+    Payload: Buffer.from(JSON.stringify(payload)),
+  }));
 
-  if (!res.ok) throw new Error(`Lambda HTTP ${res.status}: ${await res.text()}`);
-  const result = await res.json() as { errorType?: string; errorMessage?: string; response?: string; sessionId?: string };
+  const result = JSON.parse(Buffer.from(res.Payload!).toString()) as {
+    errorType?: string; errorMessage?: string; response?: string; sessionId?: string;
+  };
   if (result.errorType) throw new Error(`Lambda error: ${result.errorMessage}`);
   return result;
 }
