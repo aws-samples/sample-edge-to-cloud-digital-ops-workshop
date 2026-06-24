@@ -70,12 +70,26 @@ kubectl create secret generic msk-credentials \
 ```
 
 !!! warning "MSK auto-create topics is disabled"
-    Create the sensor topics before running the DDL:
+    Create the sensor topics before running the DDL.
+    Run this once from any machine with AWS credentials and `kafka-topics.sh` on PATH
+    (e.g. `brew install kafka`):
+
     ```bash
-    # Run from a pod in the cluster (e.g. the kafkatools helper)
-    # or use the AWS CLI kafka-topics wrapper if you have network access.
-    # Topics needed: sensors.raw.sim, sensors.raw.ws-slot00-edge-0, etc.
+    scripts/create-msk-topics.sh --deployment-id ws-slot00
     ```
+
+    The script fetches SCRAM credentials from Secrets Manager, resolves the MSK bootstrap
+    endpoint, and creates:
+
+    | Topic | Purpose |
+    |-------|---------|
+    | `sensors.raw.sim` | Edge Redpanda → MSK relay (simulator) |
+    | `sensors.raw.ws-slot00-edge-0` | Per-node relay — edge 0 |
+    | `sensors.raw.ws-slot00-edge-1` | Per-node relay — edge 1 |
+    | `sensors.raw.ws-slot00-edge-2` | Per-node relay — edge 2 |
+    | `raw.telemetry` | IoT Rule → MSK (system metrics) |
+
+    `--if-not-exists` makes it safe to re-run. Pass `--dry-run` to preview the commands.
 
 **4. Deploy RisingWave operator and instance**
 

@@ -37,19 +37,23 @@ The **data freshness comparison panel** is the workshop's centrepiece: three pan
 ## Admin Deploy (run once before Session 1)
 
 ```bash
+# 1. Install dependencies
 pnpm install
-WORKSHOP_SLOT_COUNT=10 npx ampx sandbox --once
+
+# 2. Deploy the shared platform stack + all participant slots
+pnpm run sandbox:all ws-slot00 ws-slot01 ws-slot02 ws-slot03 ws-slot04 \
+  ws-slot05 ws-slot06 ws-slot07 ws-slot08 ws-slot09
 ```
 
-Cold deploy takes 45–60 minutes (MSK and EKS dominate). Deploy the night before.
+`sandbox:all` deploys the shared VPCs + EKS cluster once, then fans out one Amplify sandbox per slot in parallel. Cold deploy takes 45–60 minutes (MSK and EKS dominate). Deploy the night before.
 
 To deploy a single slot for testing:
 
 ```bash
-WORKSHOP_SLOT_COUNT=1 npx ampx sandbox --once
+pnpm run sandbox ws-slot00
 ```
 
-After all sandboxes finish, `scripts/deployment-summary.sh` runs automatically and writes **`DEPLOYMENT_SUMMARY.md`** in the repo root. It lists every slot's Deployment ID, S3 bucket, MSK ARN, AppSync endpoints, and secret ARNs, plus ready-to-run commands for smoke tests, user creation, and teardown.
+After all sandboxes finish, `scripts/deployment-summary.sh` runs automatically and writes **`DEPLOYMENT_SUMMARY.md`** in the repo root. It lists every slot's Deployment ID, workshop URL, S3 bucket, AppSync endpoints, and quick-command recipes.
 
 To regenerate it manually at any time:
 
@@ -77,7 +81,7 @@ scripts/create-workshop-user.sh ws-slot00 participant@example.com
 scripts/teardown.sh ws-slot00
 ```
 
-Removes IoT things, EC2 instances, MSK cluster, S3 objects, Athena workgroup, and SSM parameters for the slot. VPCs are preserved.
+Removes IoT things, EC2 instances, SCRAM secrets, S3 objects, Athena workgroup, and SSM parameters for the slot. The shared VPCs and EKS cluster are preserved.
 
 ---
 
@@ -96,6 +100,18 @@ mkdocs serve
 ```
 
 Open `http://localhost:8000`. The site rebuilds automatically whenever you save a file in `workshop/` or `mkdocs.yml`.
+
+### Publishing to GitHub Pages
+
+The live site at `https://aws-samples.github.io/sample-edge-to-cloud-digital-ops-workshop/` is updated automatically — just push to `main`:
+
+```bash
+git add workshop/ mkdocs.yml   # stage your changes
+git commit -m "update labs"
+git push upstream main
+```
+
+The `deploy-docs.yml` workflow runs `mkdocs gh-deploy` and Pages updates within ~30 seconds. **Do not run `mkdocs gh-deploy` locally** — it would publish uncommitted content and diverge from the repo.
 
 ---
 

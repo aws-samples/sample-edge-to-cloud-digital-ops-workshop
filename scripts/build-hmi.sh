@@ -10,6 +10,7 @@ trap 'rm -f /tmp/ssm-params-*.json' EXIT
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
 DEPLOYMENT_ID="ws-slot00"
+SKIP_BUILD=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -17,16 +18,20 @@ while [[ $# -gt 0 ]]; do
       DEPLOYMENT_ID="$2"
       shift 2
       ;;
+    --skip-build)
+      SKIP_BUILD=true
+      shift
+      ;;
     *)
       echo "Unknown argument: $1"
-      echo "Usage: $0 [--deployment-id <id>]"
+      echo "Usage: $0 [--deployment-id <id>] [--skip-build]"
       exit 1
       ;;
   esac
 done
 
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-S3_BUCKET="workshop-${DEPLOYMENT_ID}-${ACCOUNT_ID}"
+S3_BUCKET="workshop-platform-${ACCOUNT_ID}"
 IMAGE_TAG="workshop-hmi:latest"
 LOCAL_TARBALL="/tmp/workshop-hmi.tar.gz"
 S3_KEY="images/workshop-hmi.tar.gz"
@@ -34,20 +39,24 @@ S3_KEY="images/workshop-hmi.tar.gz"
 echo ">>> Deployment ID : $DEPLOYMENT_ID"
 echo ">>> S3 bucket     : s3://${S3_BUCKET}/${S3_KEY}"
 
-# ── 1. Build the Docker image ────────────────────────────────────────────────
-echo ">>> Building Docker image ${IMAGE_TAG} from ./hmi …"
-docker buildx build --platform linux/amd64 -t "${IMAGE_TAG}" ./hmi --load
-echo ">>> Docker image built."
+if [[ "${SKIP_BUILD}" == "true" ]]; then
+  echo ">>> --skip-build: reusing existing S3 tarball, skipping Docker build."
+else
+  # ── 1. Build the Docker image ──────────────────────────────────────────────
+  echo ">>> Building Docker image ${IMAGE_TAG} from ./hmi …"
+  docker buildx build --platform linux/amd64 -t "${IMAGE_TAG}" ./hmi --load
+  echo ">>> Docker image built."
 
-# ── 2. Save and compress the image ──────────────────────────────────────────
-echo ">>> Saving image to ${LOCAL_TARBALL} …"
-docker save "${IMAGE_TAG}" | gzip > "${LOCAL_TARBALL}"
-echo ">>> Image saved ($(du -sh "${LOCAL_TARBALL}" | cut -f1))."
+  # ── 2. Save and compress the image ────────────────────────────────────────
+  echo ">>> Saving image to ${LOCAL_TARBALL} …"
+  docker save "${IMAGE_TAG}" | gzip > "${LOCAL_TARBALL}"
+  echo ">>> Image saved ($(du -sh "${LOCAL_TARBALL}" | cut -f1))."
 
-# ── 3. Upload to S3 ──────────────────────────────────────────────────────────
-echo ">>> Uploading to s3://${S3_BUCKET}/${S3_KEY} …"
-aws s3 cp "${LOCAL_TARBALL}" "s3://${S3_BUCKET}/${S3_KEY}"
-echo ">>> Upload complete."
+  # ── 3. Upload to S3 ──────────────────────────────────────────────────────
+  echo ">>> Uploading to s3://${S3_BUCKET}/${S3_KEY} …"
+  aws s3 cp "${LOCAL_TARBALL}" "s3://${S3_BUCKET}/${S3_KEY}"
+  echo ">>> Upload complete."
+fi
 
 # ── 4. Find K3s edge instance IDs (exclude sensor-sim) ──────────────────────
 echo ">>> Looking up K3s edge instances tagged WorkshopDeploymentId=${DEPLOYMENT_ID} …"

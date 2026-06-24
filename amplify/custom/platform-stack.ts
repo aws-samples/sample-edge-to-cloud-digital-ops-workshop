@@ -1,20 +1,37 @@
-import { Stack, StackProps, CfnOutput, CfnDeletionPolicy } from "aws-cdk-lib";
+import { Stack, StackProps, CfnOutput, CfnDeletionPolicy, RemovalPolicy } from "aws-cdk-lib";
 import {
   Vpc,
   SubnetType,
   GatewayVpcEndpointAwsService,
   IpAddresses,
   SecurityGroup,
+  Peer,
+  Port,
+  CfnInternetGateway,
+  CfnVPCGatewayAttachment,
 } from "aws-cdk-lib/aws-ec2";
 import {
   Role,
   ServicePrincipal,
   ManagedPolicy,
+  PolicyStatement,
+  Effect,
 } from "aws-cdk-lib/aws-iam";
 import {
   CfnCluster as EksCfnCluster,
   CfnNodegroup,
 } from "aws-cdk-lib/aws-eks";
+import {
+  CfnCluster as MskCluster,
+} from "aws-cdk-lib/aws-msk";
+import {
+  Bucket,
+  BlockPublicAccess,
+  BucketEncryption,
+} from "aws-cdk-lib/aws-s3";
+import {
+  Key as KmsKey,
+} from "aws-cdk-lib/aws-kms";
 import {
   AwsCustomResource,
   AwsCustomResourcePolicy,
@@ -50,6 +67,19 @@ export class PlatformStack extends Stack {
       maxAzs: 3,
       natGateways: 0,
       subnetConfiguration: [], // Participant stacks add their own subnets
+    });
+
+    // IGW for the edge VPC — one per VPC, shared by all participant slots.
+    const edgeIgw = new CfnInternetGateway(this, "EdgeIgw", {
+      tags: [{ key: "Name", value: "workshop-edge-igw" }],
+    });
+    new CfnVPCGatewayAttachment(this, "EdgeIgwAttachment", {
+      vpcId: this.edgeVpc.vpcId,
+      internetGatewayId: edgeIgw.ref,
+    });
+    new CfnOutput(this, "EdgeIgwId", {
+      exportName: "workshop-platform-edge-igw-id",
+      value: edgeIgw.ref,
     });
 
     // Cloud VPC: private + public subnets, 10.1.0.0/16.
@@ -144,6 +174,164 @@ export class PlatformStack extends Stack {
       exportName: "workshop-eks-cluster-name",
       value: eksCluster.ref,
       description: "Run: aws eks update-kubeconfig --name workshop-eks to configure kubectl",
+    });
+
+    // ── Shared S3 bucket ─────────────────────────────────────────────────────
+    // All participant slots share one bucket. Data is partitioned by deployment_id
+    // inside the bucket (e.g. telemetry/deployment_id=ws-slot00/…).
+    const workshopBucket = new Bucket(this, "WorkshopBucket", {
+      bucketName: `workshop-platform-${this.account}`,
+      removalPolicy: RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
+      encryption: BucketEncryption.S3_MANAGED,
+      versioned: false,
+    });
+
+    new CfnOutput(this, "WorkshopBucketName", {
+      exportName: "workshop-platform-bucket-name",
+      value: workshopBucket.bucketName,
+    });
+    new CfnOutput(this, "WorkshopBucketArn", {
+      exportName: "workshop-platform-bucket-arn",
+      value: workshopBucket.bucketArn,
+    });
+
+    // ── KMS key for MSK SCRAM secrets ────────────────────────────────────────
+    // MSK requires SCRAM secrets to use a customer-managed key (not the default
+    // AWS-managed key). One key shared across all participant slots.
+    const mskScramKey = new KmsKey(this, "MskScramKey", {
+      description: "CMK for workshop MSK SCRAM secrets",
+      enableKeyRotation: true,
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+
+    new CfnOutput(this, "MskScramKeyArn", {
+      exportName: "workshop-platform-msk-scram-key-arn",
+      value: mskScramKey.keyArn,
+    });
+
+    // ── Shared MSK cluster ───────────────────────────────────────────────────
+    // One provisioned MSK cluster shared across all participant slots.
+    // Each slot gets its own SCRAM credentials (created in ParticipantStack).
+    const mskSg = new SecurityGroup(this, "MskSg", {
+      vpc: this.cloudVpc,
+      description: "workshop-msk shared cluster",
+      allowAllOutbound: true,
+    });
+    mskSg.addIngressRule(Peer.ipv4(this.cloudVpc.vpcCidrBlock), Port.tcp(9096), "MSK SASL/SCRAM from VPC");
+    mskSg.addIngressRule(Peer.ipv4(this.cloudVpc.vpcCidrBlock), Port.tcp(9098), "MSK IAM from VPC");
+
+    const mskCluster = new MskCluster(this, "MskCluster", {
+      clusterName: "workshop-platform-msk",
+      kafkaVersion: "3.6.0",
+      numberOfBrokerNodes: 2,
+      brokerNodeGroupInfo: {
+        instanceType: "kafka.m5.large",
+        clientSubnets: this.cloudVpc.selectSubnets({ subnetType: SubnetType.PRIVATE_WITH_EGRESS }).subnetIds.slice(0, 2),
+        securityGroups: [mskSg.securityGroupId],
+        storageInfo: {
+          ebsStorageInfo: {
+            volumeSize: 50,
+          },
+        },
+      },
+      clientAuthentication: {
+        sasl: {
+          scram: {
+            enabled: true,
+          },
+          iam: {
+            enabled: true,
+          },
+        },
+      },
+      encryptionInfo: {
+        encryptionInTransit: {
+          clientBroker: "TLS",
+          inCluster: true,
+        },
+        encryptionAtRest: {
+          dataVolumeKmsKeyId: mskScramKey.keyId,
+        },
+      },
+    });
+    // MSK takes 15+ min to create and can't be deleted while CREATING.
+    mskCluster.cfnOptions.deletionPolicy = CfnDeletionPolicy.RETAIN;
+
+    new CfnOutput(this, "MskClusterArn", {
+      exportName: "workshop-platform-msk-arn",
+      value: mskCluster.attrArn,
+    });
+
+    // Resolve SASL/SCRAM bootstrap broker string via a custom resource —
+    // MSK's CFN resource doesn't expose it as a direct attribute.
+    const mskBootstrapLookup = new AwsCustomResource(this, "MskBootstrapScramLookup", {
+      onCreate: {
+        service: "Kafka",
+        action: "getBootstrapBrokers",
+        parameters: { ClusterArn: mskCluster.attrArn },
+        physicalResourceId: PhysicalResourceId.of("MskBootstrapScramLookup"),
+        outputPaths: ["BootstrapBrokerStringSaslScram"],
+      },
+      onUpdate: {
+        service: "Kafka",
+        action: "getBootstrapBrokers",
+        parameters: { ClusterArn: mskCluster.attrArn },
+        physicalResourceId: PhysicalResourceId.of("MskBootstrapScramLookup"),
+        outputPaths: ["BootstrapBrokerStringSaslScram"],
+      },
+      policy: AwsCustomResourcePolicy.fromSdkCalls({
+        resources: [mskCluster.attrArn],
+      }),
+    });
+    mskBootstrapLookup.node.addDependency(mskCluster);
+
+    new CfnOutput(this, "MskBootstrapScram", {
+      exportName: "workshop-platform-msk-bootstrap-scram",
+      value: mskBootstrapLookup.getResponseField("BootstrapBrokerStringSaslScram"),
+    });
+
+    // ── IoT VPC Destination role + outputs ──────────────────────────────────
+    // CfnTopicRuleDestination stays IN_PROGRESS until IoT successfully attaches
+    // ENIs — this can exceed CloudFormation's stabilisation timeout. Instead, we
+    // create the destination via CLI in sandbox-all.sh after the stack deploys
+    // and write the confirmed ARN to SSM (/workshop/platform/iot-vpc-dest-arn).
+    // ParticipantStack reads that SSM parameter at synth time via AwsCustomResource.
+    const iotVpcDestRole = new Role(this, "IotVpcDestRole", {
+      assumedBy: new ServicePrincipal("iot.amazonaws.com"),
+    });
+    iotVpcDestRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: [
+        "ec2:CreateNetworkInterface",
+        "ec2:CreateNetworkInterfacePermission",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DeleteNetworkInterface",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeVpcAttribute",
+      ],
+      resources: ["*"],
+    }));
+
+    // Outputs consumed by scripts/create-iot-vpc-dest.sh
+    new CfnOutput(this, "IotVpcDestRoleArn", {
+      exportName: "workshop-platform-iot-vpc-dest-role-arn",
+      value: iotVpcDestRole.roleArn,
+    });
+    new CfnOutput(this, "CloudVpcId", {
+      exportName: "workshop-platform-cloud-vpc-id",
+      value: this.cloudVpc.vpcId,
+    });
+    new CfnOutput(this, "CloudPrivateSubnets", {
+      exportName: "workshop-platform-cloud-private-subnets",
+      value: this.cloudVpc.selectSubnets({ subnetType: SubnetType.PRIVATE_WITH_EGRESS }).subnetIds.join(","),
+    });
+    new CfnOutput(this, "MskSgId", {
+      exportName: "workshop-platform-msk-sg-id",
+      value: mskSg.securityGroupId,
     });
 
     // Fleet Indexing: enable REGISTRY_AND_SHADOW with named shadow indexing.

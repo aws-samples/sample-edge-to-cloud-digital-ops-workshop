@@ -13,8 +13,10 @@ The telemetry agent currently reports integer values for CPU, memory, and disk (
 ```bash
 sed 's/%d/%.3f/g; s/3\.0\.0/4.0.0/g; s/telemetry-v3/telemetry-v4/g' \
   job-scripts/telemetry-v3.sh > job-scripts/telemetry-v4.sh && \
-chmod +x job-scripts/telemetry-v4.sh
+chmod +x job-scripts/telemetry-v4.sh && \
+ls job-scripts/telemetry-v4.sh
 ```
+<!-- e2e:assert {"contains": "telemetry-v4.sh"} -->
 
 The three measurement lines inside the `while true` loop change from integer to 3-decimal precision:
 
@@ -47,8 +49,9 @@ Also note the `exit 0` at the end of the script — this is the contract with th
 
 ```bash
 aws s3 cp job-scripts/telemetry-v4.sh \
-  s3://workshop-ws-slot00-000000000000/job-scripts/telemetry-v4.sh
+  s3://workshop-platform-000000000000/job-scripts/ws-slot00/telemetry-v4.sh
 ```
+<!-- e2e:assert {"contains": "upload:"} -->
 
 ```bash
 cat > /tmp/telemetry-v4-job-doc.json << 'EOF'
@@ -61,7 +64,7 @@ cat > /tmp/telemetry-v4-job-doc.json << 'EOF'
         "type": "runHandler",
         "input": {
           "handler": "run-script.sh",
-          "args": ["s3://workshop-ws-slot00-000000000000/job-scripts/telemetry-v4.sh"]
+          "args": ["s3://workshop-platform-000000000000/job-scripts/ws-slot00/telemetry-v4.sh"]
         },
         "runAsUser": ""
       }
@@ -71,8 +74,9 @@ cat > /tmp/telemetry-v4-job-doc.json << 'EOF'
 EOF
 
 aws s3 cp /tmp/telemetry-v4-job-doc.json \
-  s3://workshop-ws-slot00-000000000000/job-docs/telemetry-v4-job-doc.json
+  s3://workshop-platform-000000000000/ws-slot00/job-docs/telemetry-v4-job-doc.json
 ```
+<!-- e2e:assert {"contains": "upload:"} -->
 
 **3. [Create the IoT Job in the console](https://us-east-1.console.aws.amazon.com/iot/home#/jobhub):**
 
@@ -85,7 +89,7 @@ aws s3 cp /tmp/telemetry-v4-job-doc.json \
 - **Job document:** select **From S3**, then paste the S3 URL:
 
     ```
-    s3://workshop-ws-slot00-000000000000/job-docs/telemetry-v4-job-doc.json
+    s3://workshop-platform-000000000000/ws-slot00/job-docs/telemetry-v4-job-doc.json
     ```
 
 - **Rollout:** Max rate **1 device/minute**
@@ -93,19 +97,22 @@ aws s3 cp /tmp/telemetry-v4-job-doc.json \
 
 ??? example "AWS CLI equivalent"
     ```bash
+    JOB_ID="ws-slot00-telemetry-v4-$(date +%s)"
     aws iot create-job \
-      --job-id ws-slot00-telemetry-v4 \
+      --job-id "$JOB_ID" \
       --targets "$(aws iot describe-thing-group \
           --thing-group-name ws-slot00-devices \
           --query thingGroupArn --output text)" \
       --document-source \
-          s3://workshop-ws-slot00-000000000000/job-docs/telemetry-v4-job-doc.json \
+          s3://workshop-platform-000000000000/ws-slot00/job-docs/telemetry-v4-job-doc.json \
       --job-executions-rollout-config \
           '{"maximumPerMinute":1}' \
       --abort-config \
           '{"criteriaList":[{"failureType":"ALL","action":"CANCEL","thresholdPercentage":33,"minNumberOfExecutedThings":1}]}' \
-      --timeout-config '{"inProgressTimeoutInMinutes":15}'
+      --timeout-config '{"inProgressTimeoutInMinutes":15}' \
+      --output json
     ```
+    <!-- e2e:assert {"jsonPath": "jobId", "matches": "telemetry-v4-\\d+$", "jobSucceeds": true} -->
 
 **4. Observe job status** per device: `IN_PROGRESS` → `SUCCEEDED`
 
@@ -113,7 +120,7 @@ Monitor from the console at [IoT Core → Manage → Jobs](https://us-east-1.con
 
 ```bash
 aws iot list-job-executions-for-job \
-  --job-id ws-slot00-telemetry-v4 \
+  --job-id "$JOB_ID" \
   --query 'executionSummaries[].{thing:thingArn,status:jobExecutionSummary.status}' \
   --output table
 ```

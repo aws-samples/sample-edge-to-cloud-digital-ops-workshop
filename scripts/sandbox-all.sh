@@ -32,27 +32,45 @@ else
   echo ">>> Platform stack deployed."
 fi
 
-# ── Fan out one Amplify sandbox per participant (parallel) ───────────────────
-echo ">>> Starting ${#DEPLOYMENT_IDS[@]} sandboxes in parallel..."
+# ── Create shared IoT VPC destination (once) ────────────────────────────────
+# CfnTopicRuleDestination can't be confirmed inside CloudFormation's timeout,
+# so we create + confirm it here and store the ARN in SSM.
+echo ">>> Creating/confirming IoT VPC destination..."
+bash "$(dirname "$0")/create-iot-vpc-dest.sh"
 
-PIDS=()
+# ── Upload shared binaries and simulator to S3 (once per platform bucket) ────
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+S3_BUCKET="workshop-platform-${ACCOUNT_ID}"
+LOCAL_BINARY_CACHE="$HOME/.cache/workshop/aws-iot-device-client"
+
+if [[ -f "$LOCAL_BINARY_CACHE" ]]; then
+  echo ">>> Uploading IoT Device Client binary to s3://${S3_BUCKET}/bin/aws-iot-device-client…"
+  aws s3 cp "$LOCAL_BINARY_CACHE" "s3://${S3_BUCKET}/bin/aws-iot-device-client"
+else
+  echo ">>> WARNING: IoT Device Client binary not found at $LOCAL_BINARY_CACHE — run scripts/sandbox.sh once to build it"
+fi
+
+echo ">>> Uploading sensor simulator to s3://${S3_BUCKET}/simulator/sensor-sim.py…"
+aws s3 cp simulator/sensor-sim.py "s3://${S3_BUCKET}/simulator/sensor-sim.py"
+echo ">>> Shared uploads complete."
+
+# ── Deploy one Amplify sandbox per participant (sequential) ──────────────────
+# ampx sandbox locks .amplify/artifacts/cdk.out per project, so parallel synths
+# all race for the lock and fail. Run sequentially to avoid the contention.
+echo ">>> Deploying ${#DEPLOYMENT_IDS[@]} sandboxes sequentially..."
+
+FAILED=0
 for ID in "${DEPLOYMENT_IDS[@]}"; do
-  bash -c '
+  echo ">>> [$ID] Starting sandbox..."
+  if ! bash -c '
     . "$HOME/.nvm/nvm.sh"
     nvm use 22 --silent
     WORKSHOP_DEPLOYMENT_ID="'"$ID"'" npx ampx sandbox --identifier "'"$ID"'" --once
-  ' > >(sed "s/^/[$ID] /") \
-    2> >(sed "s/^/[$ID] /" >&2) &
-  PIDS+=($!)
-  echo ">>> [$ID] sandbox started (pid $!)"
-done
-
-# Wait for all and surface any failures
-FAILED=0
-for i in "${!PIDS[@]}"; do
-  if ! wait "${PIDS[$i]}"; then
-    echo "ERROR: sandbox for ${DEPLOYMENT_IDS[$i]} failed" >&2
+  '; then
+    echo "ERROR: sandbox for $ID failed" >&2
     FAILED=1
+  else
+    echo ">>> [$ID] Sandbox complete."
   fi
 done
 

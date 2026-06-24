@@ -49,7 +49,7 @@ import { Construct } from "constructs";
 
 export interface ParticipantStackProps extends StackProps {
   deploymentId: string;
-  graphqlEndpoint: string;
+  graphqlEndpoint: string; // CloudFormation export name — resolved via Fn.importValue
 }
 
 /**
@@ -85,7 +85,30 @@ export class ParticipantStack extends Stack {
     const mskClusterArn     = Fn.importValue("workshop-platform-msk-arn");
     const mskBootstrapScram = Fn.importValue("workshop-platform-msk-bootstrap-scram");
     const mskScramKeyArn    = Fn.importValue("workshop-platform-msk-scram-key-arn");
-    const iotVpcDestArn     = Fn.importValue("workshop-platform-iot-vpc-dest-arn");
+
+    // IoT VPC destination ARN is written to SSM by scripts/create-iot-vpc-dest.sh
+    // after the platform stack deploys (CfnTopicRuleDestination can't be confirmed
+    // within CloudFormation's stabilisation timeout).
+    const iotVpcDestSsmLookup = new AwsCustomResource(this, "IotVpcDestSsmLookup", {
+      onCreate: {
+        service: "SSM",
+        action: "getParameter",
+        parameters: { Name: "/workshop/platform/iot-vpc-dest-arn" },
+        physicalResourceId: PhysicalResourceId.of("IotVpcDestSsmLookup"),
+        outputPaths: ["Parameter.Value"],
+      },
+      onUpdate: {
+        service: "SSM",
+        action: "getParameter",
+        parameters: { Name: "/workshop/platform/iot-vpc-dest-arn" },
+        physicalResourceId: PhysicalResourceId.of("IotVpcDestSsmLookup"),
+        outputPaths: ["Parameter.Value"],
+      },
+      policy: AwsCustomResourcePolicy.fromSdkCalls({
+        resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/workshop/platform/iot-vpc-dest-arn`],
+      }),
+    });
+    const iotVpcDestArn = iotVpcDestSsmLookup.getResponseField("Parameter.Value");
 
     // ── IAM roles ────────────────────────────────────────────────────────────
     const ec2Role = new Role(this, "EdgeEc2Role", {
@@ -450,25 +473,13 @@ exports.handler = async (event) => {
       tags: [{ key: "Name", value: `workshop-edge-${deploymentId}-rtb` }],
     });
 
-    // The edge VPC has a single shared IGW (owned by whichever slot deployed first).
-    // Look it up instead of creating a new one — a VPC can only have one IGW attached.
-    const sharedIgw = new AwsCustomResource(this, "EdgeIgwLookup", {
-      onUpdate: {
-        service: "EC2",
-        action: "describeInternetGateways",
-        parameters: {
-          Filters: [{ Name: "attachment.vpc-id", Values: [edgeVpc.vpcId] }],
-        },
-        physicalResourceId: PhysicalResourceId.fromResponse("InternetGateways.0.InternetGatewayId"),
-        outputPaths: ["InternetGateways.0.InternetGatewayId"],
-      },
-      policy: AwsCustomResourcePolicy.fromSdkCalls({ resources: AwsCustomResourcePolicy.ANY_RESOURCE }),
-    });
+    // The edge VPC IGW is created once in WorkshopPlatformStack and shared by all slots.
+    const edgeIgwId = Fn.importValue("workshop-platform-edge-igw-id");
 
     new CfnRoute(this, "EdgeDefaultRoute", {
       routeTableId: edgeRtb.ref,
       destinationCidrBlock: "0.0.0.0/0",
-      gatewayId: sharedIgw.getResponseField("InternetGateways.0.InternetGatewayId"),
+      gatewayId: edgeIgwId,
     });
 
     new CfnSubnetRouteTableAssociation(this, "EdgeSubnetRtbAssoc", {
@@ -764,7 +775,7 @@ systemctl start sensor-sim
       role: appSyncBridgeRole,
       timeout: Duration.seconds(5),
       environment: {
-        APPSYNC_GRAPHQL_ENDPOINT: graphqlEndpoint,
+        APPSYNC_GRAPHQL_ENDPOINT: Fn.importValue(graphqlEndpoint),
         DEPLOYMENT_ID: deploymentId,
         REGION: this.region,
       },

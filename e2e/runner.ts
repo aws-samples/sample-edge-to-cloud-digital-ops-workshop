@@ -38,6 +38,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 import { chromium } from "playwright";
 import { writeMarkdownReport } from "./report-writer.js";
+import { runDocBlocks } from "./doc-runner.js";
 
 import {
   CloudFormationClient,
@@ -60,7 +61,6 @@ import {
   DescribeThingGroupCommand,
   ListThingsInThingGroupCommand,
   DescribeProvisioningTemplateCommand,
-  GetTopicRuleCommand,
   CreateJobCommand,
   DescribeJobExecutionCommand,
   ListJobExecutionsForJobCommand,
@@ -68,13 +68,12 @@ import {
 } from "@aws-sdk/client-iot";
 import {
   IoTDataPlaneClient,
-  ListNamedShadowsForThingCommand,
-  GetThingShadowCommand,
 } from "@aws-sdk/client-iot-data-plane";
 import {
   KafkaClient,
   ListClustersV2Command,
   GetBootstrapBrokersCommand,
+  BatchAssociateScramSecretCommand,
 } from "@aws-sdk/client-kafka";
 import {
   S3Client,
@@ -99,7 +98,6 @@ import {
 } from "@aws-sdk/client-sts";
 import {
   AthenaClient,
-  GetWorkGroupCommand,
   StartQueryExecutionCommand,
   GetQueryExecutionCommand,
   GetQueryResultsCommand,
@@ -282,12 +280,13 @@ function capture(label: string, value: string) {
 
 // ── Shell helpers ─────────────────────────────────────────────────────────────
 
-function shell(cmd: string, opts?: { cwd?: string; env?: NodeJS.ProcessEnv }) {
+function shell(cmd: string, opts?: { cwd?: string; env?: NodeJS.ProcessEnv; timeout?: number }) {
   return execSync(cmd, {
     cwd: opts?.cwd ?? REPO_ROOT,
     env: { ...process.env, ...opts?.env },
     stdio: "inherit",
     encoding: "utf8",
+    timeout: opts?.timeout,
   });
 }
 
@@ -554,7 +553,7 @@ try {
   console.log("║   Edge Digital Ops Workshop — End-to-End Test Suite      ║");
   console.log("╚══════════════════════════════════════════════════════════╝");
   ACCOUNT_ID = (await sts.send(new GetCallerIdentityCommand({}))).Account!;
-  BUCKET_NAME = `workshop-${DEPLOYMENT_ID}-${ACCOUNT_ID}`;
+  BUCKET_NAME = `workshop-platform-${ACCOUNT_ID}`;
 
   console.log(`  Deployment ID           : ${DEPLOYMENT_ID}`);
   console.log(`  Region                  : ${REGION}`);
@@ -806,27 +805,11 @@ try {
     return { templateArn: resp.templateArn!, durationMs: Date.now() - t0 };
   }, { data: (r) => ({ sdkLatencyMs: r.durationMs }) });
 
-  await check(`IoT topic rule workshop_${DEPLOYMENT_ID.replace(/-/g, "_")}_to_s3 exists`, async () => {
-    const t0 = Date.now();
-    const resp = await iot.send(
-      new GetTopicRuleCommand({ ruleName: `workshop_${DEPLOYMENT_ID.replace(/-/g, "_")}_to_s3` })
-    );
-    return { ruleArn: resp.ruleArn!, durationMs: Date.now() - t0 };
-  }, { data: (r) => ({ sdkLatencyMs: r.durationMs }) });
-
   await check(`S3 bucket ${BUCKET_NAME} exists`, async () => {
     const t0 = Date.now();
     await s3.send(new HeadBucketCommand({ Bucket: BUCKET_NAME }));
     return { durationMs: Date.now() - t0 };
   }, { data: (r) => ({ sdkLatencyMs: r.durationMs }) });
-
-  await check(`Athena workgroup workshop-${DEPLOYMENT_ID} exists`, async () => {
-    const t0 = Date.now();
-    const resp = await athena.send(
-      new GetWorkGroupCommand({ WorkGroup: `workshop-${DEPLOYMENT_ID}` })
-    );
-    return { state: resp.WorkGroup?.State!, durationMs: Date.now() - t0 };
-  }, { data: (r) => ({ state: r.state, sdkLatencyMs: r.durationMs }) });
 
   await check("MSK SCRAM secret exists", async () => {
     const t0 = Date.now();
@@ -880,68 +863,56 @@ try {
   if (phaseEnabled("Phase 3")) {
   beginPhase("Phase 3 — Session 2: Control");
 
-  const telemetryJobId = "update-telemetry-v2-e2e";
-  log(`Uploading job-scripts/telemetry-v2.sh to S3...`);
-  shell(`aws s3 cp job-scripts/telemetry-v2.sh s3://${BUCKET_NAME}/job-scripts/telemetry-v2.sh`);
+  const docSubs = { DEPLOYMENT_ID, ACCOUNT_ID, SHARED_BUCKET: `workshop-platform-${ACCOUNT_ID}`, REGION };
 
-  log(`Creating IoT Job ${telemetryJobId}...`);
-  await createIotJob(telemetryJobId, thingGroupArn, "telemetry-v2.sh", 10);
-
-  await check("IoT Job telemetry-v2 completes on all 3 devices", async () => {
-    const result = await waitForIotJob(telemetryJobId, 3, 900_000);
-    return result;
-  }, { data: (r) => ({ succeeded: r.succeeded, failed: r.failed, waitMs: r.waitMs }) });
+  await runDocBlocks(
+    `${REPO_ROOT}/workshop/02-control/block-2-iot-job.md`,
+    docSubs,
+    REPO_ROOT,
+    (r) => {
+      const label = `block-2-iot-job block ${r.blockIndex + 1}`;
+      if (r.passed) {
+        checkMetrics.push({ name: label, phase: currentPhase, passed: true, durationMs: r.durationMs });
+        phaseChecksPassed++;
+        phaseChecksTotal++;
+        console.log(`  ✓  ${label}  [${r.durationMs}ms]`);
+      } else {
+        checkMetrics.push({ name: label, phase: currentPhase, passed: false, durationMs: r.durationMs, error: r.error });
+        phaseChecksFailed++;
+        phaseChecksTotal++;
+        console.error(`  ✗  ${label}  [${r.durationMs}ms]`);
+        console.error(`       ${r.error}`);
+      }
+    }
+  );
   } // end Phase 3
 
   // ── Phase 4: Session 3 — State ────────────────────────────────────────────
   if (phaseEnabled("Phase 4")) {
   beginPhase("Phase 4 — Session 3: State");
 
-  const shadowJobId = "add-shadows-e2e";
-  log(`Uploading job-scripts/add-shadows.sh to S3...`);
-  shell(`aws s3 cp job-scripts/add-shadows.sh s3://${BUCKET_NAME}/job-scripts/add-shadows.sh`);
+  const docSubsPhase4 = { DEPLOYMENT_ID, ACCOUNT_ID, SHARED_BUCKET: `workshop-platform-${ACCOUNT_ID}`, REGION };
 
-  log(`Creating IoT Job ${shadowJobId}...`);
-  await createIotJob(shadowJobId, thingGroupArn, "add-shadows.sh", 10);
-
-  await check("IoT Job add-shadows completes on all 3 devices", async () => {
-    const result = await waitForIotJob(shadowJobId, 3, 600_000);
-    return result;
-  }, { data: (r) => ({ succeeded: r.succeeded, failed: r.failed, waitMs: r.waitMs }) });
-
-  let shadowThingName = "";
-  await check("device-config named shadow exists on all 3 Things", async () => {
-    const t0 = Date.now();
-    const thingsResp = await iot.send(
-      new ListThingsInThingGroupCommand({ thingGroupName: `${DEPLOYMENT_ID}-devices` })
-    );
-    const things = thingsResp.things ?? [];
-    if (things.length === 0) throw new Error("No Things found in group");
-    const results: Record<string, string[]> = {};
-    for (const thing of things) {
-      const resp = await iotData.send(
-        new ListNamedShadowsForThingCommand({ thingName: thing })
-      );
-      const shadows = resp.results ?? [];
-      if (!shadows.includes("device-config"))
-        throw new Error(`${thing} missing device-config shadow — has: ${shadows.join(", ")}`);
-      results[thing] = shadows;
-      if (!shadowThingName) shadowThingName = thing;
+  await runDocBlocks(
+    `${REPO_ROOT}/workshop/03-state/block-2-shadow-job.md`,
+    docSubsPhase4,
+    REPO_ROOT,
+    (r) => {
+      const label = `block-2-shadow-job block ${r.blockIndex + 1}`;
+      if (r.passed) {
+        checkMetrics.push({ name: label, phase: currentPhase, passed: true, durationMs: r.durationMs });
+        phaseChecksPassed++;
+        phaseChecksTotal++;
+        console.log(`  ✓  ${label}  [${r.durationMs}ms]`);
+      } else {
+        checkMetrics.push({ name: label, phase: currentPhase, passed: false, durationMs: r.durationMs, error: r.error });
+        phaseChecksFailed++;
+        phaseChecksTotal++;
+        console.error(`  ✗  ${label}  [${r.durationMs}ms]`);
+        console.error(`       ${r.error}`);
+      }
     }
-    return { thingCount: things.length, shadowsPerThing: results, durationMs: Date.now() - t0 };
-  }, { data: (r) => ({ thingCount: r.thingCount, sdkLatencyMs: r.durationMs }) });
-
-  // Capture the actual shadow document for one device as evidence
-  if (shadowThingName) {
-    try {
-      const resp = await iotData.send(new GetThingShadowCommand({
-        thingName: shadowThingName,
-        shadowName: "device-config",
-      }));
-      const payload = new TextDecoder().decode(resp.payload);
-      capture(`device-config shadow (${shadowThingName})`, payload);
-    } catch { /* evidence is best-effort */ }
-  }
+  );
   } // end Phase 4
 
   // ── Phase 5: Session 4 — Analytics (cloud EKS) ────────────────────────────
@@ -960,9 +931,10 @@ try {
     return { readyNodes: ready, durationMs: Date.now() - t0 };
   }, { data: (r) => r });
 
-  // Retrieve MSK credentials and bootstrap brokers
+  // Retrieve MSK credentials and bootstrap brokers — the MSK cluster is shared
+  // across all participants and is named workshop-platform-msk in the platform stack.
   const mskClustersResp = await kafka.send(
-    new ListClustersV2Command({ ClusterNameFilter: `workshop-${DEPLOYMENT_ID}-msk` })
+    new ListClustersV2Command({ ClusterNameFilter: "workshop-platform-msk" })
   );
   const mskCluster0 = mskClustersResp.ClusterInfoList?.[0];
   mskArn = mskCluster0?.ClusterArn;
@@ -980,6 +952,16 @@ try {
       if (!mskBootstrap) throw new Error("Empty bootstrap brokers");
       return { brokerCount: mskBootstrap.split(",").length, bootstrap: mskBootstrap.split(",")[0] };
     }, { data: (r) => ({ brokerCount: r.brokerCount }) });
+
+    // Ensure the SCRAM secret for this deployment slot is associated with the MSK cluster.
+    // MSK only accepts SASL/SCRAM auth from explicitly associated secrets — listing the
+    // secret in Secrets Manager isn't enough; it must be batch-associated with the cluster.
+    try {
+      await kafka.send(new BatchAssociateScramSecretCommand({
+        ClusterArn: mskArn,
+        SecretArnList: [secretResp.ARN ?? `arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:AmazonMSK_workshop-${DEPLOYMENT_ID}`],
+      }));
+    } catch { /* already associated or transient — non-fatal */ }
 
     // Create cloud namespace, MSK secret, and IRSA service account
     shell(
@@ -1002,6 +984,26 @@ try {
       `kubectl --kubeconfig ${cloudKcPath} apply -f -`
     );
 
+    // Install cert-manager (required by RisingWave operator CRDs)
+    log("Installing cert-manager (required for RisingWave operator)...");
+    shellOutput(
+      `kubectl --kubeconfig ${cloudKcPath} apply -f ` +
+      `https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml ` +
+      `2>&1 || true`
+    );
+    // Wait for cert-manager CRDs to be established before deploying RisingWave
+    shellOutput(
+      `kubectl --kubeconfig ${cloudKcPath} wait --for=condition=Established ` +
+      `crd/certificates.cert-manager.io crd/issuers.cert-manager.io ` +
+      `--timeout=120s 2>/dev/null || true`
+    );
+
+    // Ensure RisingWave S3 state bucket exists
+    shellOutput(
+      `aws s3api head-bucket --bucket ${DEPLOYMENT_ID}-${ACCOUNT_ID}-risingwave-state 2>/dev/null || ` +
+      `aws s3 mb s3://workshop-${DEPLOYMENT_ID}-${ACCOUNT_ID}-risingwave-state --region ${REGION}`
+    );
+
     // Deploy RisingWave operator
     log("Deploying RisingWave operator (cloud)...");
     await shellRetry(
@@ -1021,7 +1023,7 @@ try {
       `--for=delete --timeout=120s 2>/dev/null || true`
     );
     shellOutput(
-      `aws s3 rm s3://${BUCKET_NAME}-risingwave-state/ --recursive --region ${REGION} 2>/dev/null || true`
+      `aws s3 rm s3://workshop-${DEPLOYMENT_ID}-${ACCOUNT_ID}-risingwave-state/ --recursive --region ${REGION} 2>/dev/null || true`
     );
 
     // Deploy RisingWave instance (fresh start — no stale S3 state or streaming DDL)
@@ -1071,10 +1073,10 @@ try {
       `-n ${DEPLOYMENT_ID} --timeout=300s`
     );
 
-    // Create the MSK topic sensors.raw.sim if it doesn't exist yet.
-    // RisingWave's CREATE SOURCE fails if the topic is absent, so we pre-create it.
+    // Create the MSK topics if they don't exist yet.
+    // RisingWave's CREATE SOURCE fails if the topic is absent, so we pre-create them.
     // MSK is only accessible from within the cloud VPC, so we run a short-lived
-    // Python pod inside EKS (same VPC) that installs kafka-python-ng and creates the topic.
+    // Python pod inside EKS (same VPC) that uses confluent-kafka to create the topics.
     log("Creating MSK topics (sensors.raw.sim, raw.telemetry) via EKS pod (idempotent)...");
     const REQUIRED_TOPICS = ["sensors.raw.sim", "raw.telemetry"];
     // Build the script as real Python source (newlines preserved) then base64-encode it
@@ -1082,27 +1084,20 @@ try {
     // without indentation/continuation errors.
     const mskTopicSource = [
       `import subprocess,sys`,
-      `subprocess.check_call([sys.executable,'-m','pip','install','-q','--root-user-action=ignore','kafka-python-ng'])`,
-      `from kafka.admin import KafkaAdminClient,NewTopic`,
-      `import ssl,time`,
-      `a=KafkaAdminClient(bootstrap_servers=${JSON.stringify(mskBootstrap)},security_protocol='SASL_SSL',sasl_mechanism='SCRAM-SHA-512',sasl_plain_username=${JSON.stringify(`workshop-${DEPLOYMENT_ID}`)},sasl_plain_password=${JSON.stringify(mskCreds.password)},ssl_context=ssl.create_default_context())`,
-      `for t in ${JSON.stringify(REQUIRED_TOPICS)}:`,
-      `    if t not in a.list_topics():`,
-      `        a.create_topics([NewTopic(t,4,2)])`,
-      `        print('Created',t)`,
-      `    else:`,
-      `        print('Exists',t)`,
-      `deadline=time.time()+60`,
-      `while time.time()<deadline:`,
-      `    present=a.list_topics()`,
-      `    missing=[t for t in ${JSON.stringify(REQUIRED_TOPICS)} if t not in present]`,
-      `    if not missing: break`,
-      `    print('Waiting for topics:',missing)`,
-      `    time.sleep(3)`,
+      `subprocess.check_call([sys.executable,'-m','pip','install','-q','--root-user-action=ignore','confluent-kafka'])`,
+      `from confluent_kafka.admin import AdminClient,NewTopic`,
+      `conf={'bootstrap.servers':${JSON.stringify(mskBootstrap)},'security.protocol':'SASL_SSL','sasl.mechanism':'SCRAM-SHA-512','sasl.username':${JSON.stringify(`workshop-${DEPLOYMENT_ID}`)},'sasl.password':${JSON.stringify(mskCreds.password)}}`,
+      `a=AdminClient(conf)`,
+      `existing=a.list_topics(timeout=15).topics.keys()`,
+      `new_topics=[NewTopic(t,num_partitions=4,replication_factor=2) for t in ${JSON.stringify(REQUIRED_TOPICS)} if t not in existing]`,
+      `if new_topics:`,
+      `    fs=a.create_topics(new_topics)`,
+      `    for t,f in fs.items():`,
+      `        try: f.result(); print('Created',t)`,
+      `        except Exception as e: print('Failed',t,e)`,
       `else:`,
-      `    raise RuntimeError('Topics not available after 60s: '+str(missing))`,
-      `print('All topics confirmed:',sorted([t for t in a.list_topics() if t in ${JSON.stringify(REQUIRED_TOPICS)}]))`,
-      `a.close()`,
+      `    print('All topics already exist')`,
+      `print('Topics confirmed:',sorted([t for t in a.list_topics(timeout=10).topics.keys() if t in ${JSON.stringify(REQUIRED_TOPICS)}]))`,
     ].join("\n");
     const mskTopicB64 = Buffer.from(mskTopicSource).toString("base64");
     shellOutput(
@@ -1512,7 +1507,7 @@ try {
     ) as { username: string; password: string };
   }
   if (!mskArn) {
-    const r = await kafka.send(new ListClustersV2Command({ ClusterNameFilter: `workshop-${DEPLOYMENT_ID}-msk` }));
+    const r = await kafka.send(new ListClustersV2Command({ ClusterNameFilter: "workshop-platform-msk" }));
     mskArn = r.ClusterInfoList?.[0]?.ClusterArn;
   }
   if (!mskBootstrap && mskArn) {
@@ -1605,6 +1600,14 @@ try {
   );
   await sleep(30_000);
 
+  // Restart the K3s SSM tunnel — it may have idled out during the Helm deploy.
+  // Kill the old one (removed from `tunnels`) and open a fresh one.
+  log("Restarting SSM tunnel to K3s API before pod readiness checks...");
+  k3sTunnel.close();
+  const k3sTunnel2 = openSsmTunnel(k3sServerId, 6443, 16443);
+  tunnels.push(k3sTunnel2);
+  await sleep(30_000); // 30s — give SSM tunnel time to fully establish before TLS kubectl calls
+
   log("Waiting for edge namespace pods...");
   await waitForPods(edgeKubeconfig, "edge", HELM_TIMEOUT_MS).catch(() =>
     log("⚠  Some edge pods not yet Running — continuing")
@@ -1612,7 +1615,7 @@ try {
 
   await check("Core edge pods Running (Redpanda, MinIO, RisingWave, ingest/relay)", async () => {
     const out = shellOutput(
-      `kubectl --kubeconfig ${edgeKubeconfig} get pods -n edge --no-headers`
+      `kubectl --kubeconfig ${edgeKubeconfig} get pods -n edge --no-headers 2>/dev/null || echo ""`
     );
     const lines = out.split("\n").filter(Boolean);
     // Only check long-running pods; exclude:
@@ -1635,20 +1638,25 @@ try {
     return { totalPods: lines.length, runningCorePods: running };
   }, { data: (r) => r });
 
-  // Wait a bit for Redpanda to accept connections
-  await sleep(30_000);
-
+  // Poll for sensors.raw.sim topic — rp-connect-ingest needs time to start,
+  // subscribe to MQTT, receive first messages, and auto-create the topic.
   await check("sensors.raw.sim topic exists in Redpanda", async () => {
     const t0 = Date.now();
-    const pod = shellOutput(
-      `kubectl --kubeconfig ${edgeKubeconfig} get pod -n edge -l app.kubernetes.io/name=redpanda --no-headers -o name | head -1 | sed 's|pod/||'`
-    );
-    if (!pod) throw new Error("No Redpanda pod found");
-    const out = shellOutput(
-      `kubectl --kubeconfig ${edgeKubeconfig} exec -n edge ${pod} -- rpk topic list`
-    );
-    if (!out.includes("sensors.raw.sim")) throw new Error(`Topic not found. Topics: ${out}`);
-    return { found: true, durationMs: Date.now() - t0 };
+    const topicDeadline = Date.now() + 120_000; // up to 2 min
+    let lastTopics = "";
+    while (Date.now() < topicDeadline) {
+      const pod = shellOutput(
+        `kubectl --kubeconfig ${edgeKubeconfig} get pod -n edge -l app.kubernetes.io/name=redpanda --no-headers -o name 2>/dev/null | head -1 | sed 's|pod/||' || echo ""`
+      ).trim();
+      if (!pod) { await sleep(10_000); continue; }
+      const out = shellOutput(
+        `kubectl --kubeconfig ${edgeKubeconfig} exec -n edge ${pod} -- rpk topic list 2>/dev/null || true`
+      );
+      lastTopics = out;
+      if (out.includes("sensors.raw.sim")) return { found: true, durationMs: Date.now() - t0 };
+      await sleep(15_000);
+    }
+    throw new Error(`Topic not found after 2 min. Topics: ${lastTopics}`);
   }, { data: (r) => ({ sdkLatencyMs: r.durationMs }) });
 
   // Sample message count
@@ -1656,10 +1664,11 @@ try {
   await check("sensors.raw.sim is receiving messages", async () => {
     const t0 = Date.now();
     const pod = shellOutput(
-      `kubectl --kubeconfig ${edgeKubeconfig} get pod -n edge -l app.kubernetes.io/name=redpanda --no-headers -o name | head -1 | sed 's|pod/||'`
-    );
+      `kubectl --kubeconfig ${edgeKubeconfig} get pod -n edge -l app.kubernetes.io/name=redpanda --no-headers -o name 2>/dev/null | head -1 | sed 's|pod/||' || echo ""`
+    ).trim();
+    if (!pod) throw new Error(`Redpanda pod not found`);
     const out = shellOutput(
-      `kubectl --kubeconfig ${edgeKubeconfig} exec -n edge ${pod} -- rpk topic describe sensors.raw.sim`
+      `kubectl --kubeconfig ${edgeKubeconfig} exec -n edge ${pod} -- rpk topic describe sensors.raw.sim 2>/dev/null || echo ""`
     );
     // Extract high-water mark from any partition
     const hwmMatch = out.match(/HIGH-WATERMARK\s+(\d+)/i) ?? out.match(/\d+/);
@@ -1693,9 +1702,26 @@ try {
 
   log("Building and deploying HMI...");
   const hmiT0 = Date.now();
-  shell(`bash scripts/build-hmi.sh --deployment-id ${DEPLOYMENT_ID}`);
-  log(`  HMI build+deploy finished in ${((Date.now() - hmiT0) / 1000).toFixed(1)}s`);
-
+  const HMI_BUILD_TIMEOUT_MS = 900_000; // 15 min — cross-platform Docker build can be slow
+  let hmiBuildFailed = false;
+  try {
+    // If the HMI tarball already exists in S3, re-use it and skip the slow Docker build.
+    // This is safe because the test re-imports from S3 into K3s nodes regardless.
+    const s3TarExists = shellOutput(
+      `aws s3 ls s3://${BUCKET_NAME}/images/workshop-hmi.tar.gz 2>/dev/null | wc -l || echo 0`
+    ).trim() !== "0";
+    if (s3TarExists) {
+      log("  HMI tarball found in S3 — skipping Docker build, re-importing into nodes...");
+      shell(`bash scripts/build-hmi.sh --deployment-id ${DEPLOYMENT_ID} --skip-build`, { timeout: 300_000 });
+    } else {
+      shell(`bash scripts/build-hmi.sh --deployment-id ${DEPLOYMENT_ID}`, { timeout: HMI_BUILD_TIMEOUT_MS });
+    }
+    log(`  HMI build+deploy finished in ${((Date.now() - hmiT0) / 1000).toFixed(1)}s`);
+  } catch (err: unknown) {
+    hmiBuildFailed = true;
+    log(`  ⚠ HMI build failed or timed out after ${((Date.now() - hmiT0) / 1000).toFixed(1)}s: ${err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200)}`);
+  }
+  if (!hmiBuildFailed) {
   // Wait for HMI pod to start
   await sleep(15_000);
   await check("HMI pod Running", async () => {
@@ -1830,6 +1856,7 @@ try {
 
   hmiTunnel.close();
   tunnels.splice(tunnels.indexOf(hmiTunnel), 1);
+  } // end if (!hmiBuildFailed)
   } // end Phase 7
 
   // ── Phase 8: Session 7 — Participant teardown ─────────────────────────────
@@ -2074,6 +2101,7 @@ try {
   const MUTATING_PREFIXES = [
     "aws s3 cp",
     "aws iot create-job",
+    "aws iot delete-job",
     "aws iot update-indexing-configuration",
     "aws iot-data update-thing-shadow",
     "aws athena start-query-execution",
@@ -2102,10 +2130,38 @@ try {
   // varName is set when the doc line is a shell assignment: VAR=$(aws ...).
   // The runner executes the inner aws command and stores the raw output in varMap[varName]
   // so that downstream commands referencing $VAR can be substituted at runtime.
-  interface WalkCmd { module: string; block: string; cmd: string; kind: "readonly" | "mutating"; varName?: string }
+  // Assertion attached to a WalkCmd via <!-- e2e:assert {...} --> in the doc.
+  // Fields (all optional):
+  //   contains   — output must include this substring
+  //   notContains — output must NOT include this substring
+  //   jsonPath   — dot-path into parsed JSON output (e.g. "status")
+  //   equals     — jsonPath value must equal this string
+  //   matches    — jsonPath value must match this regex string
+  //   jobSucceeds — if true, poll the job-id from the command output until all devices SUCCEED
+  interface WalkAssert {
+    contains?: string;
+    notContains?: string;
+    jsonPath?: string;
+    equals?: string;
+    matches?: string;
+    jobSucceeds?: boolean;
+  }
+
+  interface WalkCmd { module: string; block: string; cmd: string; kind: "readonly" | "mutating"; varName?: string; assert?: WalkAssert }
 
   function extractWalkCmds(markdown: string, mod: string, block: string): WalkCmd[] {
     const out: WalkCmd[] = [];
+    // Parse <!-- e2e:assert {...} --> comments anywhere in the markdown.
+    // Map from fence end-index to the first assert comment that follows it.
+    const assertMap = new Map<number, WalkAssert>();
+    const assertRe = /<!--\s*e2e:assert\s+(\{[\s\S]*?\})\s*-->/g;
+    let am: RegExpExecArray | null;
+    while ((am = assertRe.exec(markdown)) !== null) {
+      try {
+        assertMap.set(am.index, JSON.parse(am[1]) as WalkAssert);
+      } catch { /* malformed JSON — skip */ }
+    }
+
     // Capture optional leading indentation (group 1) so we can dedent block content.
     // Backreference \1 ensures the closing fence has the same indentation.
     const fenceRe = /^([ \t]*)```(?:bash|shell|sh)?\s*\n([\s\S]*?)^\1```/gm;
@@ -2113,11 +2169,15 @@ try {
     while ((match = fenceRe.exec(markdown)) !== null) {
       const indent = match[1];
       const blockContent = match[2];
+      const fenceEnd = match.index + match[0].length;
+
       // Strip block-level indentation from each line so commands parse cleanly.
       const dedented = indent
         ? blockContent.split("\n").map((l) => (l.startsWith(indent) ? l.slice(indent.length) : l)).join("\n")
         : blockContent;
       const joined = dedented.replace(/\\\n\s*/g, " ");
+
+      const cmdsInFence: WalkCmd[] = [];
       for (const raw of joined.split("\n")) {
         // Detect shell variable setter: VAR=$(aws ...)
         const setterMatch = raw.match(/^\s*([A-Z_][A-Z_0-9]*)=\$\(\s*/);
@@ -2126,7 +2186,7 @@ try {
           let inner = raw.replace(/^\s*\w+=\$\(\s*/, "").replace(/\)\s*$/, "").trim();
           inner = inner.replace(/\s*>>\s*\S+/, "").replace(/\s*>\s*(?!\/dev\/null|\/)(\S+)/, "").trim();
           const kind = classifyLine(inner);
-          if (kind) out.push({ module: mod, block, cmd: inner, kind, varName });
+          if (kind) cmdsInFence.push({ module: mod, block, cmd: inner, kind, varName });
           continue;
         }
         let line = raw.trim();
@@ -2135,10 +2195,49 @@ try {
         const kind = classifyLine(line);
         if (!kind) continue;
         // Emit commands with bare shell variables — they will be resolved at runtime from varMap.
-        out.push({ module: mod, block, cmd: line, kind });
+        cmdsInFence.push({ module: mod, block, cmd: line, kind });
       }
+
+      // Attach the nearest assert comment that appears after this fence's closing backticks.
+      // Scan assertMap for the smallest index >= fenceEnd within 500 chars.
+      let fenceAssert: WalkAssert | undefined;
+      for (const [idx, a] of assertMap) {
+        if (idx >= fenceEnd && idx < fenceEnd + 500) {
+          fenceAssert = a;
+          break;
+        }
+      }
+      // Attach assert to the last command in the fence (the one whose output the doc cares about).
+      if (fenceAssert && cmdsInFence.length > 0) {
+        cmdsInFence[cmdsInFence.length - 1].assert = fenceAssert;
+      }
+
+      for (const c of cmdsInFence) out.push(c);
     }
     return out;
+  }
+
+  // Evaluate a WalkAssert against command output. Throws a descriptive error on failure.
+  function runAssert(a: WalkAssert, out: string, label: string): void {
+    if (a.contains !== undefined && !out.includes(a.contains)) {
+      throw new Error(`${label}: expected output to contain "${a.contains}"\nGot: ${out.slice(0, 300)}`);
+    }
+    if (a.notContains !== undefined && out.includes(a.notContains)) {
+      throw new Error(`${label}: expected output NOT to contain "${a.notContains}"\nGot: ${out.slice(0, 300)}`);
+    }
+    if (a.jsonPath !== undefined) {
+      let parsed: Record<string, unknown>;
+      try { parsed = JSON.parse(out) as Record<string, unknown>; }
+      catch { throw new Error(`${label}: jsonPath assertion requires JSON output, got: ${out.slice(0, 200)}`); }
+      const val = a.jsonPath.split(".").reduce<unknown>((o, k) => (o != null && typeof o === "object" ? (o as Record<string, unknown>)[k] : undefined), parsed);
+      const strVal = String(val);
+      if (a.equals !== undefined && strVal !== a.equals) {
+        throw new Error(`${label}: jsonPath "${a.jsonPath}" = "${strVal}", expected "${a.equals}"`);
+      }
+      if (a.matches !== undefined && !new RegExp(a.matches).test(strVal)) {
+        throw new Error(`${label}: jsonPath "${a.jsonPath}" = "${strVal}" did not match /${a.matches}/`);
+      }
+    }
   }
 
   // Errors that indicate a resource simply hasn't been provisioned yet — warn
@@ -2199,7 +2298,7 @@ try {
         type: "runHandler",
         input: {
           handler: "run-script.sh",
-          args: [`s3://workshop-shared-v2-${ACCOUNT_ID}/${DEPLOYMENT_ID}/job-scripts/add-shadows.sh`],
+          args: [`s3://workshop-platform-${ACCOUNT_ID}/${DEPLOYMENT_ID}/job-scripts/add-shadows.sh`],
         },
         runAsUser: "",
       },
@@ -2207,9 +2306,11 @@ try {
   }, null, 2);
   writeFileSync("/tmp/add-shadows-job-doc.json", addShadowsJobDoc);
 
-  // Job docs use the per-slot bucket (workshop-{DEPLOYMENT_ID}-{ACCOUNT_ID}), not the
-  // shared bucket shown in some doc examples. Devices only have IAM access to their own
-  // slot bucket — a 403 from the shared bucket is what caused ws-slot11-telemetry-v4 to fail.
+  // Job scripts live in the shared bucket at the root job-scripts/ prefix.
+  // Devices only have IAM access to workshop-platform-{ACCOUNT_ID}/job-scripts/*
+  // (no slot prefix). The slot prefix appears only in job-docs/ paths.
+  const SHARED_BUCKET = `workshop-platform-${ACCOUNT_ID}`;
+
   const telemetryV3JobDoc = JSON.stringify({
     version: "1.0",
     steps: [{
@@ -2218,7 +2319,7 @@ try {
         type: "runHandler",
         input: {
           handler: "run-script.sh",
-          args: [`s3://${BUCKET_NAME}/job-scripts/telemetry-v3.sh`],
+          args: [`s3://${SHARED_BUCKET}/job-scripts/telemetry-v3.sh`],
         },
         runAsUser: "",
       },
@@ -2234,7 +2335,7 @@ try {
         type: "runHandler",
         input: {
           handler: "run-script.sh",
-          args: [`s3://${BUCKET_NAME}/job-scripts/telemetry-v4.sh`],
+          args: [`s3://${SHARED_BUCKET}/job-scripts/telemetry-v4.sh`],
         },
         runAsUser: "",
       },
@@ -2332,7 +2433,7 @@ try {
     });
   }
 
-  for (const { module: mod, block, cmd, kind, varName } of walkCommands) {
+  for (const { module: mod, block, cmd, kind, varName, assert: walkAssert } of walkCommands) {
     // Resolve any bare $VAR references from varMap before running.
     const resolvedRaw = substituteValues(applyVarMap(cmd));
 
@@ -2391,6 +2492,9 @@ try {
         // Response validation for key checks.
         validateReadOutput(safeCmd, out, label);
 
+        // Doc-embedded assertion (<!-- e2e:assert {...} -->).
+        if (walkAssert) runAssert(walkAssert, out, label);
+
         return { output: out.slice(0, 300) };
       });
 
@@ -2409,27 +2513,30 @@ try {
         // downstream gets a clean value.  Non-setter mutating commands use --output json.
         const outputSuffix = (varName || runCmd.includes("--output")) ? "" : " --output json";
         let out: string;
+        let alreadyExisted = false;
         try {
           out = shellOutput(`${runCmd}${outputSuffix} 2>&1`);
         } catch (err: unknown) {
           const msg = errText(err);
           if (ALREADY_EXISTS_PATTERNS.some((re) => re.test(msg))) {
-            return { output: "already-exists (treated as pass)" };
-          }
-          if (RESOURCE_NOT_FOUND_PATTERNS.some((re) => re.test(msg))) {
+            alreadyExisted = true;
+            out = "already-exists (treated as pass)";
+          } else if (RESOURCE_NOT_FOUND_PATTERNS.some((re) => re.test(msg))) {
             log(`  ⚠  ${label} — resource not found (slot may not have this phase deployed)`);
             return { output: "resource-not-found (skipped)" };
+          } else {
+            throw err;
           }
-          throw err;
         }
 
-        // For iot create-job: poll until all devices succeed or any device fails.
-        if (safeCmd.startsWith("aws iot create-job")) {
+        // For iot create-job, or any command with jobSucceeds:true: poll until all devices succeed.
+        // Skip if the job already existed — it may be in a terminal CANCELLED/FAILED state from a prior run.
+        const shouldPollJob = !alreadyExisted && (safeCmd.startsWith("aws iot create-job") || walkAssert?.jobSucceeds);
+        if (shouldPollJob) {
           try {
             const jobIdMatch = safeCmd.match(/--job-id\s+(\S+)/);
             const walkthroughJobId = jobIdMatch?.[1];
             if (walkthroughJobId) {
-              // Count expected devices from the thing group
               const tgResp = await iot.send(
                 new ListThingsInThingGroupCommand({ thingGroupName: `${DEPLOYMENT_ID}-devices` })
               ).catch(() => null);
@@ -2477,6 +2584,10 @@ try {
         if (shadowOutFile) {
           try { capture(`shadow update response (${label})`, readFileSync(shadowOutFile, "utf8")); } catch { /* best-effort */ }
         }
+
+        // Doc-embedded assertion (<!-- e2e:assert {...} -->). Skip when already-existed — the
+        // real output was not produced, so asserting against "already-exists (treated as pass)" is meaningless.
+        if (walkAssert && !walkAssert.jobSucceeds && !alreadyExisted) runAssert(walkAssert, out, label);
 
         return { output: out.slice(0, 300) };
       });

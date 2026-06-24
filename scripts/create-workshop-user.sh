@@ -21,33 +21,62 @@ if [ -z "$DEPLOYMENT_ID" ]; then
   exit 1
 fi
 
-# Discover the Cognito User Pool ID from CloudFormation outputs
-USER_POOL_ID=$(aws cloudformation describe-stacks \
-  --query "Stacks[?StackName].Outputs[?OutputKey=='AuthUserPoolId'].OutputValue | [0]" \
-  --output text 2>/dev/null || true)
+# Slug used in Amplify sandbox stack names: ws-slot11 → wsslot11
+DEPLOYMENT_SLUG="${DEPLOYMENT_ID//-/}"
 
+# Discover the Cognito User Pool ID from the root Amplify sandbox stack.
+# The root stack name matches the pattern: amplify-edgedigitalopsworkshop-{slug}-sandbox-{10-hex-hash}
+# Sub-stacks append further suffixes (-dataXXX, -authXXX, etc.) so we match the root exactly.
+ROOT_STACK=$(aws cloudformation list-stacks \
+  --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
+  --query "StackSummaries[?contains(StackName,'amplify-edgedigitalopsworkshop-${DEPLOYMENT_SLUG}-sandbox')].StackName" \
+  --output text 2>/dev/null \
+  | tr '\t' '\n' \
+  | grep -E "^amplify-edgedigitalopsworkshop-${DEPLOYMENT_SLUG}-sandbox-[0-9a-f]{10}$" \
+  | head -1 || true)
+
+USER_POOL_ID=""
+if [ -n "$ROOT_STACK" ]; then
+  USER_POOL_ID=$(aws cloudformation describe-stacks \
+    --stack-name "$ROOT_STACK" \
+    --query "Stacks[0].Outputs[?OutputKey=='userPoolId'].OutputValue | [0]" \
+    --output text 2>/dev/null || true)
+fi
+
+# Fall back: search Cognito directly by pool name containing the slug.
 if [ -z "$USER_POOL_ID" ] || [ "$USER_POOL_ID" = "None" ]; then
-  echo "Searching for User Pool by name…"
   USER_POOL_ID=$(aws cognito-idp list-user-pools --max-results 60 \
-    --query "UserPools[?contains(Name,'workshop')].Id | [0]" --output text)
+    --query "UserPools[?contains(Name,'${DEPLOYMENT_SLUG}')].Id | [0]" --output text 2>/dev/null || true)
 fi
 
 if [ -z "$USER_POOL_ID" ] || [ "$USER_POOL_ID" = "None" ]; then
-  echo "ERROR: Could not locate the workshop Cognito User Pool."
-  echo "  Run 'npx ampx sandbox' first, then try again."
+  echo "ERROR: Could not locate the Cognito User Pool for ${DEPLOYMENT_ID}."
+  echo "  Run 'npx ampx sandbox --identifier ${DEPLOYMENT_ID}' first, then try again."
   exit 1
 fi
 
-USERNAME="${USERNAME:-participant@${DEPLOYMENT_ID}.workshop.local}"
+# Discover the Amplify-hosted frontend URL from the Amplify app named
+# "digital-operations-frontend" (deployed separately from the sandbox backend).
+FRONTEND_URL=""
+APP_ID=$(aws amplify list-apps \
+  --query "apps[?name=='digital-operations-frontend'].appId | [0]" \
+  --output text 2>/dev/null || true)
+if [ -n "$APP_ID" ] && [ "$APP_ID" != "None" ]; then
+  DEFAULT_DOMAIN=$(aws amplify get-app --app-id "$APP_ID" \
+    --query "app.defaultDomain" --output text 2>/dev/null || true)
+  if [ -n "$DEFAULT_DOMAIN" ] && [ "$DEFAULT_DOMAIN" != "None" ]; then
+    FRONTEND_URL="https://main.${DEFAULT_DOMAIN}"
+  fi
+fi
 
-echo "Creating user: $USERNAME in pool: $USER_POOL_ID"
+USERNAME="${USERNAME:-participant@${DEPLOYMENT_ID}.workshop.local}"
 
 aws cognito-idp admin-create-user \
   --user-pool-id "$USER_POOL_ID" \
   --username "$USERNAME" \
   --temporary-password "$TEMP_PASSWORD" \
   --user-attributes Name=email,Value="$USERNAME" Name=email_verified,Value=true \
-  --message-action SUPPRESS 2>/dev/null || echo "User may already exist — skipping create"
+  --message-action SUPPRESS > /dev/null 2>&1 || true
 
 aws cognito-idp admin-set-user-password \
   --user-pool-id "$USER_POOL_ID" \
@@ -56,8 +85,10 @@ aws cognito-idp admin-set-user-password \
   --permanent
 
 echo ""
-echo "✓ User created:"
+echo "Workshop login credentials:"
 echo "  Username : $USERNAME"
 echo "  Password : $TEMP_PASSWORD"
+if [ -n "$FRONTEND_URL" ]; then
+  echo "  URL      : $FRONTEND_URL"
+fi
 echo ""
-echo "Load the Amplify-hosted URL and sign in with these credentials."
