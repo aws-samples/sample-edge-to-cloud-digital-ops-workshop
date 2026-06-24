@@ -78,14 +78,16 @@ async function invokeRuntime(
     headers: {
       host: parsed.hostname,
       'content-type': 'application/json',
-      'content-length': String(Buffer.byteLength(body)),
     },
     body,
   });
 
+  // Build final headers: start from signed headers (Authorization, x-amz-date, etc.)
+  // then add content-type. Exclude 'host' — fetch sets Host automatically from the URL.
+  const { host: _host, ...signingHeaders } = signed.headers as Record<string, string>;
   const res = await fetch(url, {
     method: 'POST',
-    headers: signed.headers as Record<string, string>,
+    headers: signingHeaders,
     body,
   });
 
