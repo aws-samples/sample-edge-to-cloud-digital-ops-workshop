@@ -30,7 +30,7 @@ jobs:
           node-version: '20'
 
       - name: Install script dependencies
-        run: npm install --no-save tsx @octokit/rest
+        run: npm install --no-save tsx @octokit/rest @aws-sdk/client-lambda
 
       - name: Invoke agent and post reply
         env:
