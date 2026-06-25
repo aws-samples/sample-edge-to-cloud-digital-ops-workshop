@@ -36,6 +36,8 @@ jobs:
       - name: Invoke agent and post reply
         env:
           INVOKE_AGENT_RUNTIME_ARN: ${{ vars.INVOKE_AGENT_RUNTIME_ARN }}
+          APPSYNC_ENDPOINT: ${{ vars.APPSYNC_ENDPOINT }}
+          APP_URL: ${{ vars.APP_URL }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_REGION: us-east-1
