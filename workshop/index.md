@@ -84,7 +84,8 @@ flowchart TD
         MSK["Amazon MSK<br>(Multi-AZ, Provisioned)"]
         RW_cloud["Cloud RisingWave<br>(fleet analytics)"]
         TSDB_cloud["Cloud TimescaleDB<br>(hot history, business joins)"]
-        S3["S3 / Hudi MoR"]
+        Flink["Amazon Managed Flink<br>(Iceberg sink)"]
+        S3["S3 / Iceberg"]
         Athena["Amazon Athena"]
     end
 
@@ -103,7 +104,8 @@ flowchart TD
 
     MSK --> RW_cloud
     MSK --> TSDB_cloud
-    MSK -->|"MSK Connect Hudi Sink"| S3
+    MSK -->|"IAM / SASL"| Flink
+    Flink -->|"Iceberg commits"| S3
     S3 --> Athena
 
     classDef sensor fill:#FED7AA,stroke:#C2410C,color:#1a1a1a
@@ -115,7 +117,7 @@ flowchart TD
 
     class Sensor,IoTDevice sensor
     class MQTTBroker,IoTCore,IoTRule broker
-    class RPC_relay,RP,MSK streaming
+    class RPC_relay,RP,MSK,Flink streaming
     class RW_edge,RW_cloud inmem
     class TSDB,TSDB_cloud tsdb
     class MinIO,S3,Athena object
