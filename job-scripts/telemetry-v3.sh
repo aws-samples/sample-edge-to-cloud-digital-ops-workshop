@@ -6,12 +6,13 @@
 # Exit 0 = SUCCESS reported to IoT Jobs; non-zero = FAILED.
 set -euo pipefail
 
+_TOKEN=$(curl -s -X PUT --max-time 5 http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || true)
 for _i in $(seq 1 15); do
-  INSTANCE_ID=$(curl -s --max-time 2 http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)
+  INSTANCE_ID=$(curl -s --max-time 2 ${_TOKEN:+-H "X-aws-ec2-metadata-token: $_TOKEN"} http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)
   [ -n "$INSTANCE_ID" ] && break
   sleep 3
 done
-REGION=$(curl -s --max-time 5 http://169.254.169.254/latest/dynamic/instance-identity/document 2>/dev/null | grep -oP '"region"\s*:\s*"\K[^"]+' || curl -s --max-time 5 http://169.254.169.254/latest/meta-data/placement/availability-zone 2>/dev/null | sed 's/.$//' || echo "us-east-1")
+REGION=$(curl -s --max-time 5 ${_TOKEN:+-H "X-aws-ec2-metadata-token: $_TOKEN"} http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "us-east-1")
 IOT_ENDPOINT=$(aws iot describe-endpoint --region "$REGION" --endpoint-type iot:Data-ATS --query endpointAddress --output text)
 
 TELEMETRY_SCRIPT=/etc/aws-iot-device-client/jobs/publish-telemetry.sh
@@ -36,13 +37,14 @@ rm -f "$SHADOW_TMP"
 # ── Write updated telemetry script ────────────────────────────────────────────
 cat > "$TELEMETRY_SCRIPT" <<'TELEMETRY'
 #!/bin/bash
+_TOKEN=$(curl -s -X PUT --max-time 5 http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || true)
 for _i in $(seq 1 15); do
-  INSTANCE_ID=$(curl -s --max-time 2 http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)
+  INSTANCE_ID=$(curl -s --max-time 2 ${_TOKEN:+-H "X-aws-ec2-metadata-token: $_TOKEN"} http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)
   [ -n "$INSTANCE_ID" ] && break
   sleep 3
 done
 DEPLOYMENT_ID="${DEPLOYMENT_ID:-ws-slot00}"
-REGION=$(curl -s --max-time 5 http://169.254.169.254/latest/dynamic/instance-identity/document 2>/dev/null | grep -oP '"region"\s*:\s*"\K[^"]+' || curl -s --max-time 5 http://169.254.169.254/latest/meta-data/placement/availability-zone 2>/dev/null | sed 's/.$//' || echo "us-east-1")
+REGION=$(curl -s --max-time 5 ${_TOKEN:+-H "X-aws-ec2-metadata-token: $_TOKEN"} http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "us-east-1")
 IOT_ENDPOINT=$(aws iot describe-endpoint --endpoint-type iot:Data-ATS --query endpointAddress --output text)
 
 # Read desired config from device-config shadow; fall back to safe defaults

@@ -4,15 +4,25 @@
 # Exit 0 = SUCCESS; non-zero = FAILED.
 set -euo pipefail
 
-INSTANCE_ID=$(ec2-metadata --instance-id | cut -d' ' -f2)
-REGION=$(ec2-metadata --availability-zone | cut -d' ' -f2 | sed 's/.$//')
+_TOKEN=$(curl -s -X PUT --max-time 5 http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || true)
+for _i in $(seq 1 15); do
+  INSTANCE_ID=$(curl -s --max-time 2 ${_TOKEN:+-H "X-aws-ec2-metadata-token: $_TOKEN"} http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)
+  [ -n "$INSTANCE_ID" ] && break
+  sleep 3
+done
+REGION=$(curl -s --max-time 5 ${_TOKEN:+-H "X-aws-ec2-metadata-token: $_TOKEN"} http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "us-east-1")
 IOT_ENDPOINT=$(aws iot describe-endpoint --region "$REGION" --endpoint-type iot:Data-ATS --query endpointAddress --output text)
 
 # ── app-deployment shadow ─────────────────────────────────────────────────────
 cat > /usr/local/bin/report-app-deployment.sh <<SCRIPT
 #!/bin/bash
-INSTANCE_ID=\$(ec2-metadata --instance-id | cut -d' ' -f2)
-REGION=\$(ec2-metadata --availability-zone | cut -d' ' -f2 | sed 's/.\$//')
+_TOKEN=\$(curl -s -X PUT --max-time 5 http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || true)
+for _i in \$(seq 1 15); do
+  INSTANCE_ID=\$(curl -s --max-time 2 \${_TOKEN:+-H "X-aws-ec2-metadata-token: \$_TOKEN"} http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)
+  [ -n "\$INSTANCE_ID" ] && break
+  sleep 3
+done
+REGION=\$(curl -s --max-time 5 \${_TOKEN:+-H "X-aws-ec2-metadata-token: \$_TOKEN"} http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "us-east-1")
 IOT_ENDPOINT=\$(aws iot describe-endpoint --region "\$REGION" --endpoint-type iot:Data-ATS --query endpointAddress --output text)
 
 COMPOSE_VER=\$(docker compose version 2>/dev/null | awk '{print \$NF}' || echo "not-installed")
@@ -53,8 +63,13 @@ TIMER
 # ── device-health shadow ──────────────────────────────────────────────────────
 cat > /usr/local/bin/report-device-health.sh <<SCRIPT
 #!/bin/bash
-INSTANCE_ID=\$(ec2-metadata --instance-id | cut -d' ' -f2)
-REGION=\$(ec2-metadata --availability-zone | cut -d' ' -f2 | sed 's/.\$//')
+_TOKEN=\$(curl -s -X PUT --max-time 5 http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || true)
+for _i in \$(seq 1 15); do
+  INSTANCE_ID=\$(curl -s --max-time 2 \${_TOKEN:+-H "X-aws-ec2-metadata-token: \$_TOKEN"} http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)
+  [ -n "\$INSTANCE_ID" ] && break
+  sleep 3
+done
+REGION=\$(curl -s --max-time 5 \${_TOKEN:+-H "X-aws-ec2-metadata-token: \$_TOKEN"} http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "us-east-1")
 IOT_ENDPOINT=\$(aws iot describe-endpoint --region "\$REGION" --endpoint-type iot:Data-ATS --query endpointAddress --output text)
 
 CPU=\$(top -bn1 | grep "Cpu(s)" | awk '{print \$2}' | tr -d '%us,')
@@ -103,6 +118,10 @@ TIMER
 systemctl daemon-reload
 systemctl enable report-app-deployment.timer report-device-health.timer
 systemctl start  report-app-deployment.timer report-device-health.timer
+
+# ── Run once immediately so fleet indexing has data before the job exits ──────
+/usr/local/bin/report-device-health.sh || true
+/usr/local/bin/report-app-deployment.sh || true
 
 echo "add-shadows applied successfully"
 exit 0

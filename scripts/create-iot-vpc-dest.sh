@@ -69,25 +69,70 @@ if [[ "$IN_PROGRESS_ARN" != "None" && -n "$IN_PROGRESS_ARN" ]]; then
   exit 1
 fi
 
+# ── Resolve which platform stack is live ─────────────────────────────────────
+PLATFORM_STACK=""
+for CANDIDATE in WorkshopPlatformStackV2 WorkshopPlatformStack; do
+  STATUS=$(aws cloudformation describe-stacks \
+    --stack-name "$CANDIDATE" \
+    --query "Stacks[0].StackStatus" \
+    --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+  if [[ "$STATUS" == "CREATE_COMPLETE" || "$STATUS" == "UPDATE_COMPLETE" ]]; then
+    PLATFORM_STACK="$CANDIDATE"
+    break
+  fi
+done
+if [[ -z "$PLATFORM_STACK" ]]; then
+  echo "ERROR: No healthy platform stack found. Is WorkshopPlatformStack deployed?" >&2
+  exit 1
+fi
+
 # ── Look up platform stack outputs ───────────────────────────────────────────
 # Use describe-stacks on the specific stack to avoid list-exports pagination
 # producing multi-line output (each page adds a line, resulting in "None\nvalue").
-ROLE_ARN=$(aws cloudformation describe-stacks --stack-name WorkshopPlatformStack \
+ROLE_ARN=$(aws cloudformation describe-stacks --stack-name "$PLATFORM_STACK" \
   --query "Stacks[0].Outputs[?OutputKey=='IotVpcDestRoleArn'].OutputValue | [0]" \
   --output text)
-VPC_ID=$(aws cloudformation describe-stacks --stack-name WorkshopPlatformStack \
+VPC_ID=$(aws cloudformation describe-stacks --stack-name "$PLATFORM_STACK" \
   --query "Stacks[0].Outputs[?OutputKey=='CloudVpcId'].OutputValue | [0]" \
   --output text)
-SUBNETS=$(aws cloudformation describe-stacks --stack-name WorkshopPlatformStack \
+SUBNETS=$(aws cloudformation describe-stacks --stack-name "$PLATFORM_STACK" \
   --query "Stacks[0].Outputs[?OutputKey=='CloudPrivateSubnets'].OutputValue | [0]" \
   --output text)
-# Dedicated SG for IoT VPC destination ENIs (allows TCP 443 inbound for IoT health-check).
-# The MSK SG only opens 9096/9098 which blocks the IoT validation handshake.
-SG_ID="sg-0a87b81fca83f0234"
+# Dedicated SG for IoT VPC destination ENIs — created by the platform stack
+# (IotVpcDestSgId output). If the output is absent (older stack versions),
+# create the SG here and tag it for idempotency.
+SG_ID=$(aws cloudformation describe-stacks --stack-name "$PLATFORM_STACK" \
+  --query "Stacks[0].Outputs[?OutputKey=='IotVpcDestSgId'].OutputValue | [0]" \
+  --output text 2>/dev/null || echo "None")
 
 if [[ -z "$ROLE_ARN" || "$ROLE_ARN" == "None" ]]; then
-  echo "ERROR: workshop-platform-iot-vpc-dest-role-arn export not found. Is WorkshopPlatformStack deployed?" >&2
+  echo "ERROR: IotVpcDestRoleArn output not found. Is WorkshopPlatformStack deployed?" >&2
   exit 1
+fi
+
+if [[ -z "$SG_ID" || "$SG_ID" == "None" ]]; then
+  echo ">>> IotVpcDestSgId not in stack outputs — checking for existing tagged SG..."
+  SG_ID=$(aws ec2 describe-security-groups \
+    --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Name,Values=workshop-iot-vpc-dest-sg" \
+    --query "SecurityGroups[0].GroupId" --output text 2>/dev/null || echo "None")
+
+  if [[ -z "$SG_ID" || "$SG_ID" == "None" ]]; then
+    echo ">>> Creating IoT VPC destination security group..."
+    SG_ID=$(aws ec2 create-security-group \
+      --group-name "workshop-iot-vpc-dest-sg" \
+      --description "IoT VPC destination ENIs - allow TCP 443 for IoT health-check" \
+      --vpc-id "$VPC_ID" \
+      --query "GroupId" --output text)
+    aws ec2 authorize-security-group-ingress \
+      --group-id "$SG_ID" \
+      --protocol tcp --port 443 --cidr "0.0.0.0/0"
+    aws ec2 create-tags \
+      --resources "$SG_ID" \
+      --tags "Key=Name,Value=workshop-iot-vpc-dest-sg"
+    echo ">>> Created SG: $SG_ID"
+  else
+    echo ">>> Reusing existing tagged SG: $SG_ID"
+  fi
 fi
 
 echo ">>> Creating IoT VPC destination (VPC=$VPC_ID, role=$ROLE_ARN)..."

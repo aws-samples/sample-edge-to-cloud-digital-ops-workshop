@@ -1,58 +1,187 @@
 #!/usr/bin/env bash
 # Usage: ./scripts/sandbox-all.sh ws-a1b2c3 ws-b4c5d6 [...]
-#   Deploys the shared platform stack once (if needed), then starts an
-#   Amplify sandbox for each deployment ID in parallel.
+#   Deploys the shared platform stack (always — cdk deploy is idempotent),
+#   then deploys an Amplify sandbox for each deployment ID sequentially.
 
 set -euo pipefail
 
-if [[ $# -eq 0 ]]; then
+DEPLOYMENT_IDS=()
+for arg in "$@"; do
+  DEPLOYMENT_IDS+=("$arg")
+done
+
+if [[ ${#DEPLOYMENT_IDS[@]} -eq 0 ]]; then
   echo "Usage: $0 <deployment-id> [deployment-id ...]" >&2
   exit 1
 fi
 
-DEPLOYMENT_IDS=("$@")
 PLATFORM_APP="npx tsx amplify/custom/platform-app.ts"
 
-# ── Ensure shared VPCs exist (sequential, safe) ───────────────────────────────
-# Check by VPC name — the platform stack may have been deployed standalone or
-# as a nested stack inside an Amplify sandbox; the VPC names are stable either way.
-EDGE_VPC_ID=$(aws ec2 describe-vpcs \
-  --filters "Name=tag:Name,Values=workshop-edge" \
-  --query "Vpcs[0].VpcId" \
-  --output text 2>/dev/null || echo "None")
+# ── Deploy platform stack (always) ───────────────────────────────────────────
+# cdk deploy is idempotent: if nothing changed it finishes in seconds.
+# Detect whichever stack name exists in this account (V2 takes priority).
+PLATFORM_STACK_NAME="WorkshopPlatformStack"
+for CANDIDATE in WorkshopPlatformStackV2 WorkshopPlatformStack; do
+  STATUS=$(aws cloudformation describe-stacks \
+    --stack-name "$CANDIDATE" \
+    --query "Stacks[0].StackStatus" \
+    --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+  if [[ "$STATUS" == "CREATE_COMPLETE" || "$STATUS" == "UPDATE_COMPLETE" ]]; then
+    PLATFORM_STACK_NAME="$CANDIDATE"
+    break
+  fi
+done
 
-if [[ "$EDGE_VPC_ID" != "None" && -n "$EDGE_VPC_ID" ]]; then
-  echo ">>> Shared VPCs found ($EDGE_VPC_ID). Skipping platform deploy."
+echo ">>> Deploying $PLATFORM_STACK_NAME..."
+PLATFORM_STACK_NAME="$PLATFORM_STACK_NAME" npx cdk deploy \
+  --app "$PLATFORM_APP" \
+  --require-approval never \
+  "$PLATFORM_STACK_NAME"
+echo ">>> Platform stack deployed."
+
+# ── Start Flink application if not already running ───────────────────────────
+FLINK_APP_NAME=$(aws cloudformation list-exports \
+  --query "Exports[?Name=='workshop-platform-flink-app-name'].Value" \
+  --output text 2>/dev/null || echo "")
+if [[ -n "$FLINK_APP_NAME" ]]; then
+  FLINK_STATUS=$(aws kinesisanalyticsv2 describe-application \
+    --application-name "$FLINK_APP_NAME" \
+    --query "ApplicationDetail.ApplicationStatus" \
+    --output text 2>/dev/null || echo "NOT_FOUND")
+  if [[ "$FLINK_STATUS" == "READY" ]]; then
+    echo ">>> Starting Flink application $FLINK_APP_NAME..."
+    aws kinesisanalyticsv2 start-application \
+      --application-name "$FLINK_APP_NAME" \
+      --run-configuration '{"ApplicationRestoreConfiguration":{"ApplicationRestoreType":"SKIP_RESTORE_FROM_SNAPSHOT"}}'
+    echo ">>> Flink application start initiated (status transitions to STARTING then RUNNING)."
+  elif [[ "$FLINK_STATUS" == "RUNNING" || "$FLINK_STATUS" == "STARTING" ]]; then
+    echo ">>> Flink application $FLINK_APP_NAME already $FLINK_STATUS — skipping start."
+  else
+    echo ">>> WARNING: Flink application $FLINK_APP_NAME is in status $FLINK_STATUS — skipping start."
+  fi
 else
-  echo ">>> Shared VPCs not found. Deploying platform stack (one-time step)..."
-  npx cdk deploy \
-    --app "$PLATFORM_APP" \
-    --require-approval never \
-    "WorkshopPlatformStack"
-  echo ">>> Platform stack deployed."
+  echo ">>> WARNING: Could not resolve Flink app name from CloudFormation exports — skipping start."
+fi
+
+# ── Ensure raw.telemetry Kafka topic exists ───────────────────────────────────
+# IoT Kafka action can't auto-create topics. We create it idempotently via a
+# short-lived pod in the EKS cluster (which is in the cloud VPC with MSK access).
+MSK_SCRAM_BROKERS=$(aws cloudformation list-exports \
+  --query "Exports[?Name=='workshop-platform-msk-bootstrap-scram'].Value" \
+  --output text 2>/dev/null || echo "")
+EKS_CLUSTER_NAME=$(aws cloudformation list-exports \
+  --query "Exports[?Name=='workshop-eks-cluster-name'].Value" \
+  --output text 2>/dev/null || echo "workshop-eks")
+ADMIN_SECRET_NAME=$(aws secretsmanager list-secrets \
+  --filter Key=name,Values=AmazonMSK_workshop- \
+  --query "SecretList[0].Name" --output text 2>/dev/null || echo "")
+
+if [[ -n "$MSK_SCRAM_BROKERS" && -n "$ADMIN_SECRET_NAME" ]]; then
+  ADMIN_SECRET=$(aws secretsmanager get-secret-value \
+    --secret-id "$ADMIN_SECRET_NAME" --query "SecretString" --output text 2>/dev/null)
+  ADMIN_USER=$(echo "$ADMIN_SECRET" | python3 -c "import json,sys; print(json.load(sys.stdin)['username'])" 2>/dev/null)
+  ADMIN_PASS=$(echo "$ADMIN_SECRET" | python3 -c "import json,sys; print(json.load(sys.stdin)['password'])" 2>/dev/null)
+
+  aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "${AWS_DEFAULT_REGION:-us-east-1}" 2>/dev/null
+
+  TOPIC_POD_MANIFEST=$(cat << YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kafka-topic-init
+  namespace: default
+spec:
+  restartPolicy: Never
+  containers:
+  - name: kafka
+    image: confluentinc/cp-kafka:7.5.0
+    imagePullPolicy: IfNotPresent
+    command: ["/bin/bash", "-c"]
+    args:
+    - |
+      cat > /tmp/client.properties << 'PROPS'
+      security.protocol=SASL_SSL
+      sasl.mechanism=SCRAM-SHA-512
+      sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${ADMIN_USER}" password="${ADMIN_PASS}";
+      PROPS
+      kafka-topics --bootstrap-server ${MSK_SCRAM_BROKERS} \
+        --command-config /tmp/client.properties \
+        --create --if-not-exists \
+        --topic raw.telemetry \
+        --partitions 2 \
+        --replication-factor 2 && echo "TOPIC_OK" || echo "TOPIC_FAILED"
+YAML
+)
+
+  kubectl delete pod kafka-topic-init --ignore-not-found 2>/dev/null
+  echo "$TOPIC_POD_MANIFEST" | kubectl apply -f - 2>/dev/null
+  echo ">>> Waiting for raw.telemetry topic creation..."
+  kubectl wait --for=condition=ready pod/kafka-topic-init --timeout=120s 2>/dev/null || true
+  TOPIC_RESULT=$(kubectl logs kafka-topic-init 2>/dev/null | grep -E "TOPIC_OK|TOPIC_FAILED" | tail -1)
+  kubectl delete pod kafka-topic-init --ignore-not-found 2>/dev/null
+  echo ">>> Kafka topic init: ${TOPIC_RESULT:-completed}"
+else
+  echo ">>> WARNING: Could not resolve MSK brokers or admin secret — skipping topic creation."
+fi
+
+# ── Publish edge IGW ID to SSM (once) ────────────────────────────────────────
+# //TODO - Move this into the platform stack. This should not be an sdk call.
+EDGE_IGW_SSM="/workshop/platform/edge-igw-id"
+EXISTING_IGW_SSM=$(aws ssm get-parameter --name "$EDGE_IGW_SSM" --query "Parameter.Value" --output text 2>/dev/null || echo "None")
+if [[ "$EXISTING_IGW_SSM" != "None" && -n "$EXISTING_IGW_SSM" ]]; then
+  echo ">>> SSM $EDGE_IGW_SSM already set: $EXISTING_IGW_SSM. Skipping."
+else
+  EDGE_VPC_ID=$(aws ec2 describe-vpcs \
+    --filters "Name=tag:Name,Values=workshop-edge" \
+    --query "Vpcs[0].VpcId" --output text)
+  EDGE_IGW_ID=$(aws ec2 describe-internet-gateways \
+    --filters "Name=attachment.vpc-id,Values=${EDGE_VPC_ID}" \
+    --query "InternetGateways[0].InternetGatewayId" --output text)
+  if [[ -z "$EDGE_IGW_ID" || "$EDGE_IGW_ID" == "None" ]]; then
+    echo "ERROR: No IGW attached to edge VPC $EDGE_VPC_ID — is the platform stack deployed?" >&2
+    exit 1
+  fi
+  aws ssm put-parameter --name "$EDGE_IGW_SSM" --value "$EDGE_IGW_ID" --type String --overwrite
+  echo ">>> SSM $EDGE_IGW_SSM set to $EDGE_IGW_ID."
 fi
 
 # ── Create shared IoT VPC destination (once) ────────────────────────────────
-# CfnTopicRuleDestination can't be confirmed inside CloudFormation's timeout,
-# so we create + confirm it here and store the ARN in SSM.
+# //TODO - This should also be created in the platform stack
 echo ">>> Creating/confirming IoT VPC destination..."
 bash "$(dirname "$0")/create-iot-vpc-dest.sh"
 
-# ── Upload shared binaries and simulator to S3 (once per platform bucket) ────
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-S3_BUCKET="workshop-platform-${ACCOUNT_ID}"
-LOCAL_BINARY_CACHE="$HOME/.cache/workshop/aws-iot-device-client"
+# ── Resolve S3 bucket from CloudFormation export ─────────────────────────────
+S3_BUCKET=$(aws cloudformation list-exports \
+  --query "Exports[?Name=='workshop-platform-bucket-name'].Value" \
+  --output text)
 
+# ── Upload shared binaries and simulator to S3 ───────────────────────────────
+LOCAL_BINARY_CACHE="$HOME/.cache/workshop/aws-iot-device-client"
 if [[ -f "$LOCAL_BINARY_CACHE" ]]; then
-  echo ">>> Uploading IoT Device Client binary to s3://${S3_BUCKET}/bin/aws-iot-device-client…"
+  echo ">>> Uploading IoT Device Client binary to s3://${S3_BUCKET}/bin/aws-iot-device-client..."
   aws s3 cp "$LOCAL_BINARY_CACHE" "s3://${S3_BUCKET}/bin/aws-iot-device-client"
 else
   echo ">>> WARNING: IoT Device Client binary not found at $LOCAL_BINARY_CACHE — run scripts/sandbox.sh once to build it"
 fi
 
-echo ">>> Uploading sensor simulator to s3://${S3_BUCKET}/simulator/sensor-sim.py…"
+echo ">>> Uploading sensor simulator to s3://${S3_BUCKET}/simulator/sensor-sim.py..."
 aws s3 cp simulator/sensor-sim.py "s3://${S3_BUCKET}/simulator/sensor-sim.py"
 echo ">>> Shared uploads complete."
+
+# ── Build and upload Flink JAR to S3 ─────────────────────────────────────────
+# Managed Flink reads the JAR from S3 at app start. Build if the key doesn't
+# exist yet — rebuild is skipped on subsequent runs to avoid the 5-min Maven build.
+FLINK_JAR_KEY="flink-apps/flink-iceberg-sink-1.0.0.jar"
+FLINK_JAR_EXISTS=$(aws s3 ls "s3://${S3_BUCKET}/${FLINK_JAR_KEY}" 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$FLINK_JAR_EXISTS" -eq 0 ]]; then
+  echo ">>> Building Flink JAR..."
+  (cd "$(dirname "$0")/../flink-hudi-sink" && mvn clean package -q -DskipTests)
+  aws s3 cp "$(dirname "$0")/../flink-hudi-sink/target/flink-iceberg-sink-1.0.0.jar" \
+    "s3://${S3_BUCKET}/${FLINK_JAR_KEY}"
+  echo ">>> Flink JAR uploaded to s3://${S3_BUCKET}/${FLINK_JAR_KEY}"
+else
+  echo ">>> Flink JAR already in s3://${S3_BUCKET}/${FLINK_JAR_KEY} — skipping build."
+fi
 
 # ── Deploy one Amplify sandbox per participant (sequential) ──────────────────
 # ampx sandbox locks .amplify/artifacts/cdk.out per project, so parallel synths

@@ -1,29 +1,50 @@
 #!/usr/bin/env bash
-# Usage: ./scripts/sandbox.sh [deployment-id]
+# Usage: ./scripts/sandbox.sh [--force] [deployment-id]
 #   deployment-id defaults to ws-slot00
+#   --force bypasses the platform stack health check and always re-deploys it
 #
 # Checks whether WorkshopPlatformStack is deployed (or in progress).
 # If not, deploys it first. Then starts the Amplify sandbox for this participant.
 
 set -euo pipefail
 
-DEPLOYMENT_ID="${1:-ws-slot00}"
+FORCE=false
+DEPLOYMENT_ID="ws-slot00"
+for arg in "$@"; do
+  if [[ "$arg" == "--force" ]]; then
+    FORCE=true
+  else
+    DEPLOYMENT_ID="$arg"
+  fi
+done
+
 PLATFORM_APP="npx tsx amplify/custom/platform-app.ts"
 
 echo ">>> Deployment ID: $DEPLOYMENT_ID"
 
-# ── Check whether the shared VPCs exist ─────────────────────────────────────
-# The platform stack may have been deployed as a standalone stack OR as a
-# nested stack inside an Amplify sandbox — either way the VPC names are stable.
-EDGE_VPC_ID=$(aws ec2 describe-vpcs \
-  --filters "Name=tag:Name,Values=workshop-edge" \
-  --query "Vpcs[0].VpcId" \
-  --output text 2>/dev/null || echo "None")
-
-if [[ "$EDGE_VPC_ID" != "None" && -n "$EDGE_VPC_ID" ]]; then
-  echo ">>> Shared VPCs found ($EDGE_VPC_ID). Skipping platform deploy."
+# ── Check whether the platform stack is fully deployed ──────────────────────
+# Accept either the original or V2 stack name; check by CloudFormation status
+# rather than VPC presence — a rollback can leave VPCs behind while other
+# resources (S3 bucket, MSK, etc.) are missing.
+PLATFORM_STACK=""
+if [[ "$FORCE" == "false" ]]; then
+  for CANDIDATE in WorkshopPlatformStackV2 WorkshopPlatformStack; do
+    STATUS=$(aws cloudformation describe-stacks \
+      --stack-name "$CANDIDATE" \
+      --query "Stacks[0].StackStatus" \
+      --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+    if [[ "$STATUS" == "CREATE_COMPLETE" || "$STATUS" == "UPDATE_COMPLETE" ]]; then
+      PLATFORM_STACK="$CANDIDATE"
+      echo ">>> Platform stack is healthy ($CANDIDATE / $STATUS). Skipping platform deploy."
+      break
+    fi
+  done
 else
-  echo ">>> Shared VPCs not found. Deploying platform stack (one-time step)..."
+  echo ">>> --force passed. Skipping health check and re-deploying platform stack."
+fi
+
+if [[ -z "$PLATFORM_STACK" ]]; then
+  echo ">>> Deploying WorkshopPlatformStack..."
   npx cdk deploy \
     --app "$PLATFORM_APP" \
     --require-approval never \
@@ -31,12 +52,36 @@ else
   echo ">>> Platform stack deployed."
 fi
 
+# ── Publish edge IGW ID to SSM (once) ────────────────────────────────────────
+# Participant stacks read the edge VPC IGW ID from SSM, decoupled from whichever
+# platform stack version created it.
+EDGE_IGW_SSM="/workshop/platform/edge-igw-id"
+EXISTING_IGW_SSM=$(aws ssm get-parameter --name "$EDGE_IGW_SSM" --query "Parameter.Value" --output text 2>/dev/null || echo "None")
+if [[ "$EXISTING_IGW_SSM" != "None" && -n "$EXISTING_IGW_SSM" ]]; then
+  echo ">>> SSM $EDGE_IGW_SSM already set: $EXISTING_IGW_SSM. Skipping."
+else
+  EDGE_VPC_ID=$(aws ec2 describe-vpcs \
+    --filters "Name=tag:Name,Values=workshop-edge" \
+    --query "Vpcs[0].VpcId" --output text)
+  EDGE_IGW_ID=$(aws ec2 describe-internet-gateways \
+    --filters "Name=attachment.vpc-id,Values=${EDGE_VPC_ID}" \
+    --query "InternetGateways[0].InternetGatewayId" --output text)
+  if [[ -z "$EDGE_IGW_ID" || "$EDGE_IGW_ID" == "None" ]]; then
+    echo "ERROR: No IGW attached to edge VPC $EDGE_VPC_ID — is the platform stack deployed?" >&2
+    exit 1
+  fi
+  aws ssm put-parameter --name "$EDGE_IGW_SSM" --value "$EDGE_IGW_ID" --type String --overwrite
+  echo ">>> SSM $EDGE_IGW_SSM set to $EDGE_IGW_ID."
+fi
+
 # ── Build IoT Device Client binary and stage to S3 ──────────────────────────
 # Uses the official GHCR build image so EC2 user data only needs a fast S3 download.
 # The binary is cached locally after the first build; subsequent runs skip the build step.
 LOCAL_BINARY_CACHE="$HOME/.cache/workshop/aws-iot-device-client"
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-S3_BUCKET="workshop-platform-${ACCOUNT_ID}"
+# Resolve the bucket name from the CloudFormation export — avoids hardcoding.
+S3_BUCKET=$(aws cloudformation list-exports \
+  --query "Exports[?Name=='workshop-platform-bucket-name'].Value" \
+  --output text)
 
 if [[ ! -f "$LOCAL_BINARY_CACHE" ]]; then
   echo ">>> Building AWS IoT Device Client using ECR Public amazonlinux image (one-time, ~8 min)…"
@@ -107,7 +152,7 @@ if [[ "${#THING_NAMES[@]}" -lt 3 ]]; then
   echo "WARNING: Only ${#THING_NAMES[@]} device(s) registered after 10 min — seeding shadows for those that exist."
 fi
 
-for THING in "${THING_NAMES[@]}"; do
+for THING in "${THING_NAMES[@]+"${THING_NAMES[@]}"}"; do
   echo "  Seeding shadows for $THING..."
   aws iot-data update-thing-shadow \
     --endpoint-url "https://$IOT_ENDPOINT" \

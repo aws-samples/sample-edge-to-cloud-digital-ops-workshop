@@ -89,9 +89,15 @@ aws s3 cp job-scripts/add-shadows.sh \
 
     ??? example "AWS CLI equivalent"
         ```bash
-        aws iot search-index --index-name AWS_Things \
-          --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.device-health.reported.cpu_pct:[0 TO *]' \
-          --output json | jq '{"totalResults": (.things | length)}'
+        for _i in $(seq 1 12); do
+          RESULT=$(aws iot search-index --index-name AWS_Things \
+            --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.device-health.reported.cpu_pct:[0 TO *]' \
+            --output json | jq '{"totalResults": (.things | length)}')
+          echo "$RESULT"
+          echo "$RESULT" | jq -e '.totalResults > 0' > /dev/null 2>&1 && break
+          echo "Waiting for fleet index to update... (attempt $_i/12)"
+          sleep 15
+        done
         ```
         <!-- e2e:assert {"jsonPath": "totalResults", "matches": "^[1-9]"} -->
 

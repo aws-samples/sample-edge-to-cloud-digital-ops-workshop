@@ -65,6 +65,7 @@ import {
   DescribeJobExecutionCommand,
   ListJobExecutionsForJobCommand,
   GetIndexingConfigurationCommand,
+  UpdateIndexingConfigurationCommand,
 } from "@aws-sdk/client-iot";
 import {
   IoTDataPlaneClient,
@@ -636,7 +637,7 @@ try {
     log("Deploying WorkshopPlatformStack (CDK)...");
     const t0 = Date.now();
     shell(
-      `npx cdk deploy --app "npx tsx amplify/custom/platform-app.ts" --require-approval never WorkshopPlatformStack`
+      `npx cdk deploy --app "npx tsx amplify/custom/platform-app.ts" --require-approval never --output cdk.out-e2e WorkshopPlatformStack`
     );
     log(`  CDK deploy finished in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   } else {
@@ -694,13 +695,23 @@ try {
     return { readyNodes: ready, durationMs: Date.now() - t0 };
   }, { data: (r) => r });
 
-  await check("IoT Fleet Indexing REGISTRY_AND_SHADOW", async () => {
+  await check("IoT Fleet Indexing REGISTRY_AND_SHADOW + $package shadow", async () => {
     const t0 = Date.now();
     const resp = await iot.send(new GetIndexingConfigurationCommand({}));
-    const mode = resp.thingIndexingConfiguration?.thingIndexingMode;
-    if (mode !== "REGISTRY_AND_SHADOW")
-      throw new Error(`Unexpected indexing mode: ${mode}`);
-    return { mode, durationMs: Date.now() - t0 };
+    const cfg = resp.thingIndexingConfiguration!;
+    if (cfg.thingIndexingMode !== "REGISTRY_AND_SHADOW")
+      throw new Error(`Unexpected indexing mode: ${cfg.thingIndexingMode}`);
+    const namedShadows = cfg.filter?.namedShadowNames ?? [];
+    if (!namedShadows.includes("$package")) {
+      // Auto-fix: add $package to the named shadow filter
+      await iot.send(new UpdateIndexingConfigurationCommand({
+        thingIndexingConfiguration: {
+          ...cfg,
+          filter: { namedShadowNames: [...namedShadows, "$package"] },
+        },
+      }));
+    }
+    return { mode: cfg.thingIndexingMode, namedShadows: [...namedShadows, "$package"].filter((v, i, a) => a.indexOf(v) === i), durationMs: Date.now() - t0 };
   }, { data: (r) => r });
   } // end Phase 0
 
@@ -975,25 +986,29 @@ try {
     } catch { /* already associated or transient — non-fatal */ }
 
     // Create cloud namespace, MSK secret, and IRSA service account
-    shell(
-      `kubectl --kubeconfig ${cloudKcPath} create namespace ${DEPLOYMENT_ID} --dry-run=client -o yaml | kubectl --kubeconfig ${cloudKcPath} apply -f -`
-    );
-    shell(
-      `kubectl --kubeconfig ${cloudKcPath} create secret generic msk-credentials ` +
-      `--namespace ${DEPLOYMENT_ID} ` +
-      `--from-literal=MSK_USERNAME=${mskCreds.username} ` +
-      `--from-literal=MSK_PASSWORD=${mskCreds.password} ` +
-      `--from-literal=MSK_BOOTSTRAP_SERVERS="${mskBootstrap}" ` +
-      `--dry-run=client -o yaml | kubectl --kubeconfig ${cloudKcPath} apply -f -`
-    );
-    // Service account with IRSA annotation — required for RisingWave pods to access S3
-    shell(
-      `kubectl --kubeconfig ${cloudKcPath} create serviceaccount risingwave-cloud ` +
-      `--namespace ${DEPLOYMENT_ID} --dry-run=client -o yaml | ` +
-      `kubectl --kubeconfig ${cloudKcPath} annotate -f - --local -o yaml ` +
-      `eks.amazonaws.com/role-arn=arn:aws:iam::${ACCOUNT_ID}:role/workshop-risingwave-s3 | ` +
-      `kubectl --kubeconfig ${cloudKcPath} apply -f -`
-    );
+    try {
+      shell(
+        `kubectl --kubeconfig ${cloudKcPath} create namespace ${DEPLOYMENT_ID} --dry-run=client -o yaml | kubectl --kubeconfig ${cloudKcPath} apply -f -`
+      );
+      shell(
+        `kubectl --kubeconfig ${cloudKcPath} create secret generic msk-credentials ` +
+        `--namespace ${DEPLOYMENT_ID} ` +
+        `--from-literal=MSK_USERNAME=${mskCreds.username} ` +
+        `--from-literal=MSK_PASSWORD=${mskCreds.password} ` +
+        `--from-literal=MSK_BOOTSTRAP_SERVERS="${mskBootstrap}" ` +
+        `--dry-run=client -o yaml | kubectl --kubeconfig ${cloudKcPath} apply -f -`
+      );
+      // Service account with IRSA annotation — required for RisingWave pods to access S3
+      shell(
+        `kubectl --kubeconfig ${cloudKcPath} create serviceaccount risingwave-cloud ` +
+        `--namespace ${DEPLOYMENT_ID} --dry-run=client -o yaml | ` +
+        `kubectl --kubeconfig ${cloudKcPath} annotate -f - --local -o yaml ` +
+        `eks.amazonaws.com/role-arn=arn:aws:iam::${ACCOUNT_ID}:role/workshop-risingwave-s3 | ` +
+        `kubectl --kubeconfig ${cloudKcPath} apply -f -`
+      );
+    } catch (e) {
+      log(`⚠  EKS namespace/secret setup failed (EKS may not have nodes yet): ${(e as Error).message?.slice(0, 120)}`);
+    }
 
     // Install cert-manager (required by RisingWave operator CRDs)
     log("Installing cert-manager (required for RisingWave operator)...");
@@ -1447,7 +1462,7 @@ try {
   if (phaseEnabled("Phase 6")) {
   beginPhase("Phase 6 — Session 5: Edge Infrastructure");
 
-  const k3sJobId = "deploy-k3s-e2e";
+  const k3sJobId = `deploy-k3s-e2e-${Date.now()}`;
   log("Uploading job-scripts/deploy-k3s.sh to S3...");
   shell(`aws s3 cp job-scripts/deploy-k3s.sh s3://${BUCKET_NAME}/job-scripts/deploy-k3s.sh`);
 
@@ -2052,24 +2067,50 @@ try {
     for (const slot of sandboxSlots) {
       try {
         shellOutput(
-          `npx ampx sandbox delete --identifier ${slot} --yes 2>/dev/null || true`
+          `unset npm_config_prefix; . "$HOME/.nvm/nvm.sh"; nvm use 22 --silent; npx ampx sandbox delete --identifier ${slot} -y 2>&1 || true`
         );
-        log(`  Deleted sandbox ${slot}`);
+        log(`  Sandbox ${slot} delete initiated`);
       } catch { log(`  sandbox ${slot} already gone or delete failed — continuing`); }
     }
-    // Wait for sandbox stacks to finish deleting (up to 10 min)
-    const sandboxDeleteDeadline = Date.now() + 600_000;
+    // Wait for sandbox stacks to finish deleting (up to 15 min)
+    // Use list-stacks (not describe-stacks) since we don't know the exact hash-suffixed stack name.
+    const sandboxDeleteDeadline = Date.now() + 900_000;
     while (Date.now() < sandboxDeleteDeadline) {
       const remaining: string[] = [];
       for (const slot of sandboxSlots) {
-        const stackStatus = shellOutput(
-          `aws cloudformation describe-stacks --stack-name "amplify-edge-digital-ops-workshop-${slot}-sandbox*" --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "DELETED"`
+        // Stack name contains the slot identifier without hyphens (wsslot00, wsslot01, etc.)
+        const slotKey = slot.replace(/-/g, "");
+        const activeStacks = shellOutput(
+          `aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE DELETE_IN_PROGRESS DELETE_FAILED --query "StackSummaries[?contains(StackName, '${slotKey}')].StackName" --output text 2>/dev/null || echo ""`
         ).trim();
-        if (stackStatus !== "DELETED" && stackStatus !== "DELETE_COMPLETE" && stackStatus !== "") remaining.push(slot);
+        if (activeStacks && activeStacks !== "None") remaining.push(slot);
       }
       if (remaining.length === 0) break;
       log(`  Waiting for sandbox stacks to finish deleting: ${remaining.join(", ")}...`);
       await sleep(30_000);
+    }
+
+    // Directly delete any WorkshopCustomResourcesParticipant stacks that survive sandbox delete.
+    // These nested stacks import MSK exports and block platform stack deletion if left behind.
+    log("Ensuring WorkshopCustomResourcesParticipant stacks are gone...");
+    const participantStacks = shellOutput(
+      `aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE --query "StackSummaries[?contains(StackName, 'WorkshopCustomResourcesParticipant')].StackName" --output text 2>/dev/null || echo ""`
+    ).trim();
+    if (participantStacks && participantStacks !== "None" && participantStacks !== "") {
+      for (const stackName of participantStacks.split(/\s+/).filter(Boolean)) {
+        log(`  Deleting blocker: ${stackName}`);
+        shellOutput(`aws cloudformation delete-stack --stack-name "${stackName}" 2>/dev/null || true`);
+      }
+      // Wait for them to finish
+      const participantDeadline = Date.now() + 300_000;
+      while (Date.now() < participantDeadline) {
+        const stillActive = shellOutput(
+          `aws cloudformation list-stacks --stack-status-filter DELETE_IN_PROGRESS CREATE_COMPLETE --query "StackSummaries[?contains(StackName, 'WorkshopCustomResourcesParticipant')].StackName" --output text 2>/dev/null || echo ""`
+        ).trim();
+        if (!stillActive || stillActive === "None" || stillActive === "") break;
+        log(`  Waiting for participant stacks to delete...`);
+        await sleep(15_000);
+      }
     }
 
     log("Destroying WorkshopPlatformStack (CDK)...");

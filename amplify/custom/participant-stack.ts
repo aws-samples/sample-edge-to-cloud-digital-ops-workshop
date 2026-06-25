@@ -86,9 +86,10 @@ export class ParticipantStack extends Stack {
     const mskBootstrapScram = Fn.importValue("workshop-platform-msk-bootstrap-scram");
     const mskScramKeyArn    = Fn.importValue("workshop-platform-msk-scram-key-arn");
 
-    // IoT VPC destination ARN is written to SSM by scripts/create-iot-vpc-dest.sh
-    // after the platform stack deploys (CfnTopicRuleDestination can't be confirmed
-    // within CloudFormation's stabilisation timeout).
+    // IoT VPC destination ARN and edge IGW ID are written to SSM by the sandbox
+    // scripts after the platform stack deploys (CfnTopicRuleDestination can't be
+    // confirmed within CloudFormation's stabilisation timeout; the IGW may be owned
+    // by a different platform stack version).
     const iotVpcDestSsmLookup = new AwsCustomResource(this, "IotVpcDestSsmLookup", {
       onCreate: {
         service: "SSM",
@@ -109,6 +110,26 @@ export class ParticipantStack extends Stack {
       }),
     });
     const iotVpcDestArn = iotVpcDestSsmLookup.getResponseField("Parameter.Value");
+
+    const edgeIgwSsmLookup = new AwsCustomResource(this, "EdgeIgwSsmLookup", {
+      onCreate: {
+        service: "SSM",
+        action: "getParameter",
+        parameters: { Name: "/workshop/platform/edge-igw-id" },
+        physicalResourceId: PhysicalResourceId.of("EdgeIgwSsmLookup"),
+        outputPaths: ["Parameter.Value"],
+      },
+      onUpdate: {
+        service: "SSM",
+        action: "getParameter",
+        parameters: { Name: "/workshop/platform/edge-igw-id" },
+        physicalResourceId: PhysicalResourceId.of("EdgeIgwSsmLookup"),
+        outputPaths: ["Parameter.Value"],
+      },
+      policy: AwsCustomResourcePolicy.fromSdkCalls({
+        resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/workshop/platform/edge-igw-id`],
+      }),
+    });
 
     // ── IAM roles ────────────────────────────────────────────────────────────
     const ec2Role = new Role(this, "EdgeEc2Role", {
@@ -473,8 +494,10 @@ exports.handler = async (event) => {
       tags: [{ key: "Name", value: `workshop-edge-${deploymentId}-rtb` }],
     });
 
-    // The edge VPC IGW is created once in WorkshopPlatformStack and shared by all slots.
-    const edgeIgwId = Fn.importValue("workshop-platform-edge-igw-id");
+    // The edge VPC IGW is created once by the platform stack and its ID is
+    // published to SSM by the sandbox script. Read from SSM to decouple from
+    // whichever platform stack version created it.
+    const edgeIgwId = edgeIgwSsmLookup.getResponseField("Parameter.Value");
 
     new CfnRoute(this, "EdgeDefaultRoute", {
       routeTableId: edgeRtb.ref,

@@ -37,6 +37,7 @@ import {
   AwsCustomResourcePolicy,
   PhysicalResourceId,
 } from "aws-cdk-lib/custom-resources";
+import { CfnApplication as CfnFlinkApplication } from "aws-cdk-lib/aws-kinesisanalyticsv2";
 import { Construct } from "constructs";
 
 export interface PlatformStackProps extends StackProps {}
@@ -292,12 +293,27 @@ export class PlatformStack extends Stack {
       value: mskBootstrapLookup.getResponseField("BootstrapBrokerStringSaslScram"),
     });
 
-    // ── IoT VPC Destination role + outputs ──────────────────────────────────
+    // ── IoT VPC Destination role + security group + outputs ─────────────────
     // CfnTopicRuleDestination stays IN_PROGRESS until IoT successfully attaches
     // ENIs — this can exceed CloudFormation's stabilisation timeout. Instead, we
     // create the destination via CLI in sandbox-all.sh after the stack deploys
     // and write the confirmed ARN to SSM (/workshop/platform/iot-vpc-dest-arn).
     // ParticipantStack reads that SSM parameter at synth time via AwsCustomResource.
+
+    // Dedicated SG for IoT VPC destination ENIs. Allows TCP 443 inbound for
+    // the IoT health-check handshake (the MSK SG only opens 9096/9098).
+    const iotVpcDestSg = new SecurityGroup(this, "IotVpcDestSg", {
+      vpc: this.cloudVpc,
+      description: "IoT VPC destination ENIs - allow TCP 443 for IoT health-check",
+      allowAllOutbound: true,
+    });
+    iotVpcDestSg.addIngressRule(Peer.anyIpv4(), Port.tcp(443), "IoT health-check");
+
+    new CfnOutput(this, "IotVpcDestSgId", {
+      exportName: "workshop-platform-iot-vpc-dest-sg-id",
+      value: iotVpcDestSg.securityGroupId,
+    });
+
     const iotVpcDestRole = new Role(this, "IotVpcDestRole", {
       assumedBy: new ServicePrincipal("iot.amazonaws.com"),
     });
@@ -334,6 +350,190 @@ export class PlatformStack extends Stack {
       value: mskSg.securityGroupId,
     });
 
+    // ── Managed Flink (MSK → Iceberg → S3) ──────────────────────────────────
+    // Reads raw.telemetry from MSK via IAM auth, writes Apache Iceberg table
+    // to S3 via GlueCatalog so Athena sees live snapshots.
+
+    // Resolve IAM bootstrap broker string (port 9098) via custom resource.
+    const mskBootstrapIamLookup = new AwsCustomResource(this, "MskBootstrapIamLookup", {
+      onCreate: {
+        service: "Kafka",
+        action: "getBootstrapBrokers",
+        parameters: { ClusterArn: mskCluster.attrArn },
+        physicalResourceId: PhysicalResourceId.of("MskBootstrapIamLookup"),
+        outputPaths: ["BootstrapBrokerStringSaslIam"],
+      },
+      onUpdate: {
+        service: "Kafka",
+        action: "getBootstrapBrokers",
+        parameters: { ClusterArn: mskCluster.attrArn },
+        physicalResourceId: PhysicalResourceId.of("MskBootstrapIamLookup"),
+        outputPaths: ["BootstrapBrokerStringSaslIam"],
+      },
+      policy: AwsCustomResourcePolicy.fromSdkCalls({
+        resources: [mskCluster.attrArn],
+      }),
+    });
+    mskBootstrapIamLookup.node.addDependency(mskCluster);
+
+    const flinkRole = new Role(this, "FlinkRole", {
+      assumedBy: new ServicePrincipal("kinesisanalytics.amazonaws.com"),
+    });
+
+    flinkRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+      ],
+      resources: [workshopBucket.bucketArn, `${workshopBucket.bucketArn}/*`],
+    }));
+
+    flinkRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: [
+        "glue:GetDatabase",
+        "glue:CreateDatabase",
+        "glue:GetTable",
+        "glue:GetTables",
+        "glue:CreateTable",
+        "glue:UpdateTable",
+        "glue:DeleteTable",
+        "glue:GetPartition",
+        "glue:GetPartitions",
+        "glue:CreatePartition",
+        "glue:UpdatePartition",
+        "glue:DeletePartition",
+        "glue:BatchCreatePartition",
+        "glue:BatchDeletePartition",
+      ],
+      resources: [
+        `arn:aws:glue:${this.region}:${this.account}:catalog`,
+        `arn:aws:glue:${this.region}:${this.account}:database/workshop_telemetry`,
+        `arn:aws:glue:${this.region}:${this.account}:table/workshop_telemetry/*`,
+      ],
+    }));
+
+    flinkRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams",
+      ],
+      resources: ["*"],
+    }));
+
+    flinkRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: [
+        "kafka-cluster:Connect",
+        "kafka-cluster:DescribeCluster",
+        "kafka:DescribeCluster",
+        "kafka:GetBootstrapBrokers",
+      ],
+      resources: [mskCluster.attrArn],
+    }));
+
+    flinkRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: [
+        "kafka-cluster:DescribeTopic",
+        "kafka-cluster:ReadData",
+      ],
+      resources: [`arn:aws:kafka:${this.region}:${this.account}:topic/workshop-platform-msk/*/*`],
+    }));
+
+    flinkRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: [
+        "kafka-cluster:DescribeGroup",
+        "kafka-cluster:AlterGroup",
+      ],
+      resources: [`arn:aws:kafka:${this.region}:${this.account}:group/workshop-platform-msk/*/*`],
+    }));
+
+    flinkRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: [
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeDhcpOptions",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:CreateNetworkInterface",
+        "ec2:CreateNetworkInterfacePermission",
+        "ec2:DeleteNetworkInterface",
+      ],
+      resources: ["*"],
+    }));
+
+    const flinkApp = new CfnFlinkApplication(this, "FlinkIcebergSink", {
+      applicationName: "workshop-iceberg-sink",
+      runtimeEnvironment: "FLINK-1_18",
+      serviceExecutionRole: flinkRole.roleArn,
+      applicationConfiguration: {
+        applicationCodeConfiguration: {
+          codeContent: {
+            s3ContentLocation: {
+              bucketArn: workshopBucket.bucketArn,
+              fileKey: "flink-apps/flink-iceberg-sink-1.0.0.jar",
+            },
+          },
+          codeContentType: "ZIPFILE",
+        },
+        environmentProperties: {
+          propertyGroups: [
+            {
+              propertyGroupId: "FlinkApplicationProperties",
+              propertyMap: {
+                BOOTSTRAP_SERVERS: mskBootstrapIamLookup.getResponseField("BootstrapBrokerStringSaslIam"),
+                S3_BASE_PATH: `s3://${workshopBucket.bucketName}/telemetry`,
+                GLUE_DB: "workshop_telemetry",
+              },
+            },
+          ],
+        },
+        flinkApplicationConfiguration: {
+          checkpointConfiguration: {
+            configurationType: "CUSTOM",
+            checkpointingEnabled: true,
+            checkpointInterval: 60000,
+            minPauseBetweenCheckpoints: 5000,
+          },
+          monitoringConfiguration: {
+            configurationType: "CUSTOM",
+            metricsLevel: "APPLICATION",
+            logLevel: "INFO",
+          },
+          parallelismConfiguration: {
+            configurationType: "CUSTOM",
+            parallelism: 2,
+            parallelismPerKpu: 1,
+            autoScalingEnabled: false,
+          },
+        },
+        vpcConfigurations: [
+          {
+            subnetIds: this.cloudVpc.selectSubnets({ subnetType: SubnetType.PRIVATE_WITH_EGRESS }).subnetIds.slice(0, 2),
+            securityGroupIds: [mskSg.securityGroupId],
+          },
+        ],
+      },
+    });
+    flinkApp.node.addDependency(mskCluster);
+    flinkApp.node.addDependency(mskBootstrapIamLookup);
+
+    new CfnOutput(this, "FlinkAppName", {
+      exportName: "workshop-platform-flink-app-name",
+      value: flinkApp.ref,
+    });
+
     // Fleet Indexing: enable REGISTRY_AND_SHADOW with named shadow indexing.
     // Required for Session 3 shadow-based fleet queries
     // (e.g. shadow.name.device-health.reported.cpu_pct).
@@ -350,7 +550,7 @@ export class PlatformStack extends Stack {
             deviceDefenderIndexingMode: "OFF",
             namedShadowIndexingMode: "ON",
             filter: {
-              namedShadowNames: ["device-health", "device-config", "app-deployment"],
+              namedShadowNames: ["device-health", "device-config", "app-deployment", "$package"],
             },
           },
         },
@@ -366,7 +566,7 @@ export class PlatformStack extends Stack {
             deviceDefenderIndexingMode: "OFF",
             namedShadowIndexingMode: "ON",
             filter: {
-              namedShadowNames: ["device-health", "device-config", "app-deployment"],
+              namedShadowNames: ["device-health", "device-config", "app-deployment", "$package"],
             },
           },
         },
