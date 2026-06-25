@@ -175,7 +175,14 @@ If your response involves code changes, create a new branch off ${defaultBranch}
   const result = await invokeRuntime(
     runtimeArn,
     awsRegion,
-    { sessionId, prompt, sync: true },
+    {
+      sessionId,
+      prompt,
+      sync: true,
+      githubToken: githubToken,
+      githubRepo: event.repository.full_name,
+      githubBranch: defaultBranch,
+    },
     { accessKeyId: awsAccessKeyId, secretAccessKey: awsSecretAccessKey, sessionToken: awsSessionToken },
   );
 
