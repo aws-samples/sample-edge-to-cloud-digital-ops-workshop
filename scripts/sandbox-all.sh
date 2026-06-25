@@ -149,37 +149,49 @@ if [[ -n "$MSK_SCRAM_BROKERS" && -n "$ADMIN_SECRET_NAME" ]]; then
 
   aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "${AWS_DEFAULT_REGION:-us-east-1}" 2>/dev/null
 
-  TOPIC_POD_MANIFEST=$(cat << YAML
-apiVersion: v1
-kind: Pod
-metadata:
-  name: kafka-topic-init
-  namespace: default
-spec:
-  restartPolicy: Never
-  containers:
-  - name: kafka
-    image: confluentinc/cp-kafka:7.5.0
-    imagePullPolicy: IfNotPresent
-    command: ["/bin/bash", "-c"]
-    args:
-    - |
-      cat > /tmp/client.properties << 'PROPS'
-      security.protocol=SASL_SSL
-      sasl.mechanism=SCRAM-SHA-512
-      sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${ADMIN_USER}" password="${ADMIN_PASS}";
-      PROPS
-      kafka-topics --bootstrap-server ${MSK_SCRAM_BROKERS} \
-        --command-config /tmp/client.properties \
-        --create --if-not-exists \
-        --topic raw.telemetry \
-        --partitions 2 \
-        --replication-factor 2 && echo "TOPIC_OK" || echo "TOPIC_FAILED"
-YAML
+  # Write manifest to a temp file using python to safely embed shell command with special chars
+  TOPIC_POD_MANIFEST_FILE=$(mktemp /tmp/kafka-topic-init.XXXXXX)
+  python3 - "$ADMIN_USER" "$ADMIN_PASS" "$MSK_SCRAM_BROKERS" "$TOPIC_POD_MANIFEST_FILE" << 'PYEOF'
+import sys, json
+
+admin_user, admin_pass, brokers, outfile = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+props = (
+    "security.protocol=SASL_SSL\\n"
+    "sasl.mechanism=SCRAM-SHA-512\\n"
+    f"sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required "
+    f'username=\\"{admin_user}\\" password=\\"{admin_pass}\\";\\n'
 )
+cmd = (
+    f"printf '{props}' > /tmp/client.properties && "
+    f"kafka-topics --bootstrap-server {brokers} "
+    "--command-config /tmp/client.properties "
+    "--create --if-not-exists --topic raw.telemetry "
+    "--partitions 2 --replication-factor 2 "
+    "&& echo TOPIC_OK || echo TOPIC_FAILED"
+)
+manifest = {
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "metadata": {"name": "kafka-topic-init", "namespace": "default"},
+    "spec": {
+        "restartPolicy": "Never",
+        "containers": [{
+            "name": "kafka",
+            "image": "confluentinc/cp-kafka:7.5.0",
+            "imagePullPolicy": "IfNotPresent",
+            "command": ["/bin/bash", "-c"],
+            "args": [cmd]
+        }]
+    }
+}
+import yaml
+with open(outfile, "w") as f:
+    yaml.dump(manifest, f, default_flow_style=False)
+PYEOF
 
   kubectl delete pod kafka-topic-init --ignore-not-found 2>/dev/null
-  echo "$TOPIC_POD_MANIFEST" | kubectl apply -f - 2>/dev/null
+  kubectl apply -f "$TOPIC_POD_MANIFEST_FILE" 2>/dev/null
+  rm -f "$TOPIC_POD_MANIFEST_FILE"
   echo ">>> Waiting for raw.telemetry topic creation..."
   kubectl wait --for=condition=ready pod/kafka-topic-init --timeout=120s 2>/dev/null || true
   TOPIC_RESULT=$(kubectl logs kafka-topic-init 2>/dev/null | grep -E "TOPIC_OK|TOPIC_FAILED" | tail -1)
