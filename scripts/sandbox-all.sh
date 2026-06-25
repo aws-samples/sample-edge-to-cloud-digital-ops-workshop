@@ -63,6 +63,71 @@ else
   echo ">>> WARNING: Could not resolve Flink app name from CloudFormation exports — skipping start."
 fi
 
+# ── Patch Glue Iceberg table for Lake Formation compatibility ─────────────────
+# GlueCatalog creates the Iceberg table with null InputFormat/SerdeInfo.
+# On accounts with Lake Formation fine-grained access control this causes Athena
+# to return "Relation contains no accessible columns". Fix by adding Iceberg
+# SerDe + explicit columns so LF can evaluate column-level grants.
+# Idempotent: skipped if InputFormat is already set, or if table doesn't exist yet.
+_patch_glue_iceberg_table() {
+  local glue_db="workshop_telemetry"
+  local glue_table="telemetry"
+  local meta_loc input_fmt s3_bucket_resolved
+
+  meta_loc=$(aws glue get-table \
+    --database-name "$glue_db" --name "$glue_table" \
+    --query "Table.Parameters.metadata_location" --output text 2>/dev/null) || true
+  input_fmt=$(aws glue get-table \
+    --database-name "$glue_db" --name "$glue_table" \
+    --query "Table.StorageDescriptor.InputFormat" --output text 2>/dev/null) || true
+
+  if [[ -z "$meta_loc" || "$meta_loc" == "None" ]]; then
+    echo ">>> Glue table not yet created (Flink creates it on first record) — skipping SerDe patch."
+    return 0
+  fi
+  if [[ -n "$input_fmt" && "$input_fmt" != "None" ]]; then
+    echo ">>> Glue table SerDe already set — skipping patch."
+    return 0
+  fi
+
+  echo ">>> Patching Glue Iceberg table SerDe for Lake Formation compatibility..."
+  s3_bucket_resolved=$(aws cloudformation list-exports \
+    --query "Exports[?Name=='workshop-platform-bucket-name'].Value" \
+    --output text 2>/dev/null)
+  aws glue update-table \
+    --database-name "$glue_db" \
+    --table-input "{
+      \"Name\": \"${glue_table}\",
+      \"TableType\": \"EXTERNAL_TABLE\",
+      \"Parameters\": {\"table_type\": \"ICEBERG\", \"metadata_location\": \"${meta_loc}\"},
+      \"StorageDescriptor\": {
+        \"Location\": \"s3://${s3_bucket_resolved}/telemetry/workshop_telemetry.db/telemetry\",
+        \"Columns\": [
+          {\"Name\":\"thing_name\",\"Type\":\"string\"},
+          {\"Name\":\"message_timestamp\",\"Type\":\"bigint\"},
+          {\"Name\":\"cpu_pct\",\"Type\":\"int\"},
+          {\"Name\":\"mem_used_pct\",\"Type\":\"int\"},
+          {\"Name\":\"disk_used_pct\",\"Type\":\"int\"},
+          {\"Name\":\"net_io_bytes_sent\",\"Type\":\"bigint\"},
+          {\"Name\":\"net_io_bytes_recv\",\"Type\":\"bigint\"},
+          {\"Name\":\"mqtt_topic\",\"Type\":\"string\"},
+          {\"Name\":\"ingest_ts\",\"Type\":\"bigint\"},
+          {\"Name\":\"year\",\"Type\":\"string\"},
+          {\"Name\":\"month\",\"Type\":\"string\"},
+          {\"Name\":\"day\",\"Type\":\"string\"},
+          {\"Name\":\"hour\",\"Type\":\"string\"},
+          {\"Name\":\"deployment_id\",\"Type\":\"string\"}
+        ],
+        \"InputFormat\": \"org.apache.iceberg.mr.mapred.MapredIcebergInputFormat\",
+        \"OutputFormat\": \"org.apache.iceberg.mr.hive.HiveIcebergOutputFormat\",
+        \"SerdeInfo\": {\"SerializationLibrary\": \"org.apache.iceberg.mr.hive.HiveIcebergSerDe\"}
+      }
+    }" 2>&1 \
+    && echo ">>> Glue table SerDe patched." \
+    || echo ">>> WARNING: Glue table patch failed — may need ALTER permission via Lake Formation."
+}
+_patch_glue_iceberg_table
+
 # ── Ensure raw.telemetry Kafka topic exists ───────────────────────────────────
 # IoT Kafka action can't auto-create topics. We create it idempotently via a
 # short-lived pod in the EKS cluster (which is in the cloud VPC with MSK access).
