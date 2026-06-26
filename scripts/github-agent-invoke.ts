@@ -23,7 +23,7 @@
  */
 
 import { Octokit } from '@octokit/rest';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { SignatureV4 } from '@smithy/signature-v4';
 import { Sha256 } from '@aws-crypto/sha256-js';
@@ -214,6 +214,15 @@ If your response involves code changes, create a new branch off ${defaultBranch}
 
   const octokit = new Octokit({ auth: githubToken });
 
+  // Read the status comment ID written by the workflow's Acknowledge trigger step.
+  const statusCommentIdFile = process.env.STATUS_COMMENT_ID_FILE ?? '/tmp/status_comment_id.txt';
+  let statusCommentId: number | null = null;
+  try {
+    const raw = readFileSync(statusCommentIdFile, 'utf8').trim();
+    const parsed = parseInt(raw, 10);
+    if (!isNaN(parsed)) statusCommentId = parsed;
+  } catch { /* file may not exist in local runs */ }
+
   // Create a ChatSession so AG-UI events are associated with a live-viewable session.
   let sessionId = randomUUID();
   if (appsyncEndpoint) {
@@ -226,13 +235,24 @@ If your response involves code changes, create a new branch off ${defaultBranch}
       );
       console.log(`Chat session created: ${sessionId}`);
 
-      // Post a live-link comment immediately so the user can watch while the agent runs.
-      if (appUrl) {
+      // Update the status comment (or post a new one) with the live-chat link.
+      const liveBody = appUrl
+        ? `🤖 Agent is working… [Watch live](${appUrl}/chat-handler?sessionId=${sessionId})`
+        : `🤖 Agent is working… (session \`${sessionId}\`)`;
+
+      if (statusCommentId) {
+        await octokit.rest.issues.updateComment({
+          owner,
+          repo,
+          comment_id: statusCommentId,
+          body: liveBody,
+        });
+      } else {
         await octokit.rest.issues.createComment({
           owner,
           repo,
           issue_number: issueNumber,
-          body: `🤖 Agent is working… [Watch live](${appUrl}/chat-handler?sessionId=${sessionId})`,
+          body: liveBody,
         });
       }
     } catch (err) {
