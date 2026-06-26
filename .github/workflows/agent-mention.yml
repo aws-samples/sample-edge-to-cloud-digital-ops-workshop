@@ -23,15 +23,48 @@ jobs:
       )
 
     steps:
+      - name: Acknowledge trigger
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # React to the triggering comment with 👀 so the user knows immediately
+          if [ -n "${{ github.event.comment.id }}" ]; then
+            curl -s -X POST \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
+              -d '{"content":"eyes"}'
+          fi
+          # Post a status comment so the user knows the agent is starting
+          ISSUE_NUMBER="${{ github.event.issue.number }}"
+          curl -s -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${ISSUE_NUMBER}/comments" \
+            -d '{"body":"⚙️ Agent triggered — creating chat session…"}' \
+            | jq -r '.id' > /tmp/status_comment_id.txt
+          echo "Status comment ID: $(cat /tmp/status_comment_id.txt)"
+
       - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
 
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-agent-invoke-${{ runner.os }}-v1
+          restore-keys: pnpm-agent-invoke-${{ runner.os }}-
+
       - name: Install script dependencies
-        run: npm install --no-save tsx @octokit/rest @smithy/signature-v4 @aws-crypto/sha256-js
+        run: pnpm add --global tsx @octokit/rest @smithy/signature-v4 @aws-crypto/sha256-js
 
       - name: Invoke agent and post reply
         env:
@@ -43,4 +76,5 @@ jobs:
           AWS_REGION: us-east-1
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_BASE_REF: ${{ github.event.repository.default_branch }}
+          STATUS_COMMENT_ID_FILE: /tmp/status_comment_id.txt
         run: npx tsx scripts/github-agent-invoke.ts
