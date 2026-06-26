@@ -184,14 +184,15 @@ async function main() {
 
   const rawText = event.comment?.body ?? event.issue?.body ?? '';
 
-  const mentionMatch = rawText.match(/@agent-([\w-]+)/);
+  const mentionMatch = rawText.match(/@agent(?:-([\w-]+))?(?=\s|$)/);
   if (!mentionMatch) {
-    console.log('No @agent-<slug> mention found; skipping');
+    console.log('No @agent mention found; skipping');
     return;
   }
 
-  const agentSlug = mentionMatch[1];
-  const userPrompt = rawText.replace(`@agent-${agentSlug}`, '').trim() || event.issue?.title || rawText;
+  const agentSlug = mentionMatch[1] ?? 'default';
+  const fullMention = mentionMatch[1] ? `@agent-${agentSlug}` : '@agent';
+  const userPrompt = rawText.replace(fullMention, '').trim() || event.issue?.title || rawText;
 
   const defaultBranch = process.env.GITHUB_BASE_REF || 'main';
   const prompt = `\
