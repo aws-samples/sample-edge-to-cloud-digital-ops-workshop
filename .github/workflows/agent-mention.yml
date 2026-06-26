@@ -15,11 +15,11 @@ permissions:
 jobs:
   invoke-agent:
     runs-on: ubuntu-latest
-    # Only run when a comment contains @agent-<slug> and was not written by a bot
+    # Only run when a comment contains @agent or @agent-<slug> and was not written by a bot
     if: |
       github.event.sender.type != 'Bot' && (
         github.event_name == 'issues' ||
-        contains(github.event.comment.body, '@agent-')
+        contains(github.event.comment.body, '@agent')
       )
 
     steps:
