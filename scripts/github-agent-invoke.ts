@@ -41,7 +41,7 @@ interface GitHubEvent {
   issue?: GitHubIssue;
   comment?: { id: number; body: string; user: { login: string; type: string } };
   sender: { login: string; type: string };
-  repository: { full_name: string; owner: { login: string }; name: string };
+  repository: { full_name: string; owner: { login: string }; name: string; default_branch: string };
 }
 
 interface RuntimeResponse {
@@ -194,7 +194,7 @@ async function main() {
   const fullMention = mentionMatch[1] ? `@agent-${agentSlug}` : '@agent';
   const userPrompt = rawText.replace(fullMention, '').trim() || event.issue?.title || rawText;
 
-  const defaultBranch = process.env.GITHUB_BASE_REF || 'main';
+  const defaultBranch = event.repository.default_branch || 'main';
   const prompt = `\
 You are acting on behalf of a GitHub user in the repository ${event.repository.full_name}.
 

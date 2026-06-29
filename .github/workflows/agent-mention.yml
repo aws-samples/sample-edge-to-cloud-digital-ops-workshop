@@ -71,7 +71,6 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_REGION: us-east-1
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_BASE_REF: ${{ github.event.repository.default_branch }}
           STATUS_COMMENT_ID_FILE: /tmp/status_comment_id.txt
         working-directory: scripts
         run: pnpm exec tsx github-agent-invoke.ts
