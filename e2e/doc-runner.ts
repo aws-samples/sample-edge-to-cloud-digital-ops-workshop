@@ -26,6 +26,7 @@ export interface RunnerSubstitutions {
   ACCOUNT_ID: string;
   SHARED_BUCKET: string;
   REGION: string;
+  GRAPHQL_ENDPOINT?: string;
 }
 
 export interface AssertSpec {
@@ -114,10 +115,14 @@ function parseBlocks(md: string): RawBlock[] {
 // ── Substitute ────────────────────────────────────────────────────────────────
 
 function applySubstitutions(script: string, subs: RunnerSubstitutions): string {
-  return script
+  let out = script
     .replace(/workshop-platform-000000000000/g, subs.SHARED_BUCKET)
     .replace(/ws-slot00/g, subs.DEPLOYMENT_ID)
     .replace(/000000000000/g, subs.ACCOUNT_ID);
+  if (subs.GRAPHQL_ENDPOINT) {
+    out = out.replace(/__GRAPHQL_ENDPOINT__/g, subs.GRAPHQL_ENDPOINT);
+  }
+  return out;
 }
 
 // ── Assert ────────────────────────────────────────────────────────────────────

@@ -126,7 +126,15 @@ for SECRET in "/workshop/${DEPLOYMENT_ID}/claim-cert" "AmazonMSK_workshop-${DEPL
 done
 
 # ── 11. SSM parameters ────────────────────────────────────────────────────────
-for PARAM in "/workshop/${DEPLOYMENT_ID}/k3s-token" "/workshop/${DEPLOYMENT_ID}/kubeconfig"; do
+for PARAM in \
+  "/workshop/${DEPLOYMENT_ID}/k3s-token" \
+  "/workshop/${DEPLOYMENT_ID}/kubeconfig" \
+  "/workshop/${DEPLOYMENT_ID}/graphql-endpoint" \
+  "/workshop/${DEPLOYMENT_ID}/deployment-id" \
+  "/workshop/${DEPLOYMENT_ID}/claim-secret-arn" \
+  "/workshop/${DEPLOYMENT_ID}/eks-cluster-name" \
+  "/workshop/${DEPLOYMENT_ID}/msk-cred-secret-arn" \
+  "/workshop/${DEPLOYMENT_ID}/shared-bucket-name"; do
   run aws ssm delete-parameter --region "$REGION" --name "$PARAM" 2>/dev/null || true
 done
 
