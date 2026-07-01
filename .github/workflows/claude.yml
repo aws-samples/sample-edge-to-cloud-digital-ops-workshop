@@ -72,7 +72,7 @@ jobs:
           github_token: ${{ github.token }}
           use_bedrock: "true"
           claude_args: >-
-            --model us.anthropic.claude-sonnet-4-6
+            --model us.anthropic.claude-sonnet-5
             --allowedTools "Bash(act *),
             Bash(cd *),
             Bash(ls *),
