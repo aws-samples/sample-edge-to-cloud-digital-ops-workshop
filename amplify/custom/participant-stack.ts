@@ -28,6 +28,9 @@ import {
   Secret,
 } from "aws-cdk-lib/aws-secretsmanager";
 import {
+  StringParameter,
+} from "aws-cdk-lib/aws-ssm";
+import {
   Key as KmsKey,
 } from "aws-cdk-lib/aws-kms";
 import {
@@ -956,6 +959,35 @@ systemctl start sensor-sim
       exportName: `workshop-${deploymentId}-shared-bucket`,
       value: sharedBucketName,
       description: "Shared S3 bucket — your Iceberg data is at telemetry/deployment_id=<your-id>/",
+    });
+
+    // ── SSM parameters ──────────────────────────────────────────────────────
+    // Published under a stable path so the e2e/doc-runner tests can resolve
+    // everything they need for a deployment slot with only the deployment ID —
+    // no local amplify_outputs.json or synthesized CDK app required.
+    new StringParameter(this, "DeploymentIdSsmParam", {
+      parameterName: `/workshop/${deploymentId}/deployment-id`,
+      stringValue: deploymentId,
+    });
+
+    new StringParameter(this, "ClaimSecretArnSsmParam", {
+      parameterName: `/workshop/${deploymentId}/claim-secret-arn`,
+      stringValue: claimSecret.secretArn,
+    });
+
+    new StringParameter(this, "EksClusterNameSsmParam", {
+      parameterName: `/workshop/${deploymentId}/eks-cluster-name`,
+      stringValue: "workshop-eks",
+    });
+
+    new StringParameter(this, "MskCredSecretArnSsmParam", {
+      parameterName: `/workshop/${deploymentId}/msk-cred-secret-arn`,
+      stringValue: mskCredSecret.secretArn,
+    });
+
+    new StringParameter(this, "SharedBucketNameSsmParam", {
+      parameterName: `/workshop/${deploymentId}/shared-bucket-name`,
+      stringValue: sharedBucketName,
     });
   }
 }

@@ -1,5 +1,6 @@
 import { defineBackend } from "@aws-amplify/backend";
 import { CfnOutput } from "aws-cdk-lib";
+import { StringParameter } from "aws-cdk-lib/aws-ssm";
 import { auth } from "./auth/resource";
 import { data } from "./data/resource";
 import { ParticipantStack } from "./custom/participant-stack";
@@ -38,6 +39,14 @@ if (!account || !region) {
 new CfnOutput(backend.data.stack, "GraphqlEndpointExport", {
   value: backend.data.graphqlUrl,
   exportName: `workshop-${deploymentId}-graphql-endpoint`,
+});
+
+// Publish the GraphQL endpoint to SSM so the e2e/doc-runner tests (and anyone
+// else) can resolve it by deployment ID alone, without needing a local
+// synthesized app to know the CFN export-name convention.
+new StringParameter(backend.data.stack, "GraphqlEndpointSsmParam", {
+  parameterName: `/workshop/${deploymentId}/graphql-endpoint`,
+  stringValue: backend.data.graphqlUrl,
 });
 
 const customResources = backend.createStack("WorkshopCustomResources");
