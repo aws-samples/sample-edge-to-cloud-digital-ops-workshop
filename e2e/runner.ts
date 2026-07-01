@@ -547,6 +547,7 @@ let mskCreds: { username: string; password: string } = { username: "", password:
 let cloudKcPath = "";
 let ACCOUNT_ID = "";
 let BUCKET_NAME = "";
+let GRAPHQL_ENDPOINT = "";
 
 try {
   console.log("");
@@ -780,6 +781,30 @@ try {
       throw new Error("sensor-sim instance not found or no private IP");
     return { instanceId: sensorSimId, privateIp: sensorSimIp };
   }, { data: (r) => r });
+
+  // These SSM parameters are written by the CDK stacks themselves (not by this
+  // test), so resolving them here proves a deployment slot is fully discoverable
+  // from just its deployment ID — e.g. to run the walkthrough against a slot that
+  // was deployed by someone else, from a different machine, with no local
+  // amplify_outputs.json / synthesized CDK app in this working directory.
+  await check("Deployment config resolvable via SSM (no local build output)", async () => {
+    const t0 = Date.now();
+    const names = [
+      "graphql-endpoint",
+      "deployment-id",
+      "claim-secret-arn",
+      "eks-cluster-name",
+      "msk-cred-secret-arn",
+      "shared-bucket-name",
+    ].map((suffix) => `/workshop/${DEPLOYMENT_ID}/${suffix}`);
+    const values = await Promise.all(
+      names.map((name) => ssm.send(new GetParameterCommand({ Name: name })))
+    );
+    const missing = names.filter((_, i) => !values[i].Parameter?.Value);
+    if (missing.length > 0) throw new Error(`Missing SSM parameters: ${missing.join(", ")}`);
+    GRAPHQL_ENDPOINT = values[0].Parameter!.Value!;
+    return { graphqlEndpoint: GRAPHQL_ENDPOINT, durationMs: Date.now() - t0 };
+  }, { data: (r) => ({ graphqlEndpoint: r.graphqlEndpoint, sdkLatencyMs: r.durationMs }) });
   } // end Phase 1
 
   // ── Phase 2: Session 1 — Observe ──────────────────────────────────────────
@@ -885,7 +910,7 @@ try {
   if (phaseEnabled("Phase 3")) {
   beginPhase("Phase 3 — Session 2: Control");
 
-  const docSubs = { DEPLOYMENT_ID, ACCOUNT_ID, SHARED_BUCKET: `workshop-platform-${ACCOUNT_ID}`, REGION };
+  const docSubs = { DEPLOYMENT_ID, ACCOUNT_ID, SHARED_BUCKET: `workshop-platform-${ACCOUNT_ID}`, REGION, GRAPHQL_ENDPOINT };
 
   await runDocBlocks(
     `${REPO_ROOT}/workshop/02-control/block-2-iot-job.md`,
@@ -913,7 +938,7 @@ try {
   if (phaseEnabled("Phase 4")) {
   beginPhase("Phase 4 — Session 3: State");
 
-  const docSubsPhase4 = { DEPLOYMENT_ID, ACCOUNT_ID, SHARED_BUCKET: `workshop-platform-${ACCOUNT_ID}`, REGION };
+  const docSubsPhase4 = { DEPLOYMENT_ID, ACCOUNT_ID, SHARED_BUCKET: `workshop-platform-${ACCOUNT_ID}`, REGION, GRAPHQL_ENDPOINT };
 
   await runDocBlocks(
     `${REPO_ROOT}/workshop/03-state/block-2-shadow-job.md`,
