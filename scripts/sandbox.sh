@@ -90,19 +90,24 @@ if [[ ! -f "$LOCAL_BINARY_CACHE" ]]; then
     https://github.com/awslabs/aws-iot-device-client "$DC_SRC"
   # Use public.ecr.aws/amazonlinux/amazonlinux instead of the GHCR build image.
   # Run cmake install + build steps directly inside the container.
+  # AL2023 (OpenSSL 3.x) is required — IoT Device Client v1.10.1 needs OpenSSL >= 1.1,
+  # but AL2 ships 1.0.2k. Explicit OPENSSL_*_LIBRARY paths work around cmake's
+  # FindOpenSSL module failing to locate libcrypto/libssl on this image.
   docker run --rm \
     -v "$DC_SRC:/root/aws-iot-device-client" \
-    public.ecr.aws/amazonlinux/amazonlinux:2 \
+    public.ecr.aws/amazonlinux/amazonlinux:2023 \
     bash -c "
-      yum install -y cmake3 gcc gcc-c++ openssl-devel \
+      dnf install -y cmake gcc gcc-c++ openssl-devel \
         libcurl-devel git make zip unzip tar && \
-      ln -sf /usr/bin/cmake3 /usr/local/bin/cmake && \
       cd /root/aws-iot-device-client && \
       cmake -B build -DCMAKE_BUILD_TYPE=Release \
         -DEXCLUDE_JOBS=ON -DEXCLUDE_NAMED_SHADOW=ON \
         -DEXCLUDE_TUNNELING=ON -DEXCLUDE_DEVICE_DEFENDER=ON \
-        -DEXCLUDE_FLEET_PROVISIONING=OFF && \
-      cmake --build build --target aws-iot-device-client -j\$(nproc)
+        -DEXCLUDE_FLEET_PROVISIONING=OFF \
+        -DOPENSSL_CRYPTO_LIBRARY=/usr/lib64/libcrypto.so \
+        -DOPENSSL_SSL_LIBRARY=/usr/lib64/libssl.so && \
+      cmake --build build --target aws-iot-device-client -j\$(nproc) && \
+      chmod -R a+rwX /root/aws-iot-device-client
     "
   mkdir -p "$(dirname "$LOCAL_BINARY_CACHE")"
   cp "$DC_SRC/build/aws-iot-device-client" "$LOCAL_BINARY_CACHE"
@@ -116,8 +121,13 @@ fi
 export WORKSHOP_DEPLOYMENT_ID="$DEPLOYMENT_ID"
 echo ">>> Starting Amplify sandbox --identifier $DEPLOYMENT_ID"
 unset npm_config_prefix
-. "$HOME/.nvm/nvm.sh"
-nvm use 22 --silent
+if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
+  . "$HOME/.nvm/nvm.sh"
+  nvm install 22 --silent || true
+  nvm use 22 --silent || echo ">>> nvm use 22 failed, falling back to system node ($(node -v 2>/dev/null || echo 'not found'))."
+else
+  echo ">>> nvm not found, using system node ($(node -v 2>/dev/null || echo 'not found'))."
+fi
 npx ampx sandbox --identifier "$DEPLOYMENT_ID" --once
 
 # ── Upload binary and simulator to S3 after CDK creates the bucket ──────────
