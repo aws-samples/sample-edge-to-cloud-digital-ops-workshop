@@ -134,6 +134,50 @@ function resolveDotPath(obj: unknown, path: string): unknown {
   }, obj);
 }
 
+// Scan stdout for every well-formed top-level {...}/[...] value, in order.
+// stdout commonly interleaves JSON with non-JSON text — S3 cp progress lines,
+// "Waiting for ..." interstitials, pretty-printed multi-line JSON from `aws
+// --output json` — so a single parse-the-whole-string attempt is too brittle.
+function extractJsonValues(text: string): unknown[] {
+  const values: unknown[] = [];
+  const n = text.length;
+  let i = 0;
+  while (i < n) {
+    const ch = text[i];
+    if (ch === "{" || ch === "[") {
+      const stack: string[] = [ch === "{" ? "}" : "]"];
+      let inString = false;
+      let escape = false;
+      let j = i + 1;
+      for (; j < n && stack.length > 0; j++) {
+        const c = text[j];
+        if (inString) {
+          if (escape) escape = false;
+          else if (c === "\\") escape = true;
+          else if (c === '"') inString = false;
+          continue;
+        }
+        if (c === '"') { inString = true; continue; }
+        if (c === "{" || c === "[") stack.push(c === "{" ? "}" : "]");
+        else if (c === "}" || c === "]") {
+          if (stack[stack.length - 1] === c) stack.pop();
+          else { stack.length = 0; break; } // mismatched brackets — not a valid candidate
+        }
+      }
+      if (stack.length === 0) {
+        const candidate = text.slice(i, j);
+        try {
+          values.push(JSON.parse(candidate));
+          i = j;
+          continue;
+        } catch { /* balanced but not valid JSON (e.g. bare braces in prose) — keep scanning */ }
+      }
+    }
+    i++;
+  }
+  return values;
+}
+
 function evaluateAssert(assert: AssertSpec, stdout: string): string | null {
   if (assert.contains !== undefined) {
     if (!stdout.includes(assert.contains))
@@ -146,26 +190,13 @@ function evaluateAssert(assert: AssertSpec, stdout: string): string | null {
   }
 
   if (assert.jsonPath !== undefined) {
-    let parsed: unknown;
-    try {
-      // stdout may contain progress text before the JSON (e.g. s3 cp progress lines).
-      // Try: (1) each newline-delimited line, (2) each {...} block found in stdout,
-      // (3) the full stdout. Last valid JSON wins.
-      for (const line of stdout.split("\n")) {
-        try { parsed = JSON.parse(line.trim()); } catch { /* skip */ }
-      }
-      if (parsed === undefined) {
-        // stdout may have progress/preamble text before JSON (e.g. s3 cp progress).
-        // Find the first { or [ and try parsing from that point forward.
-        const firstBrace = stdout.search(/[{[]/);
-        if (firstBrace >= 0) {
-          try { parsed = JSON.parse(stdout.slice(firstBrace).trim()); } catch { /* skip */ }
-        }
-      }
-      if (parsed === undefined) parsed = JSON.parse(stdout.trim());
-    } catch {
+    const values = extractJsonValues(stdout);
+    if (values.length === 0) {
       return `Expected JSON output for jsonPath "${assert.jsonPath}" but couldn't parse stdout:\n${stdout.slice(0, 500)}`;
     }
+    // The last JSON value wins — e.g. a polling loop that echoes progress JSON
+    // on each attempt until the final one satisfies the assertion.
+    const parsed = values[values.length - 1];
     const value = resolveDotPath(parsed, assert.jsonPath);
     if (assert.matches !== undefined) {
       const re = new RegExp(assert.matches);
@@ -319,12 +350,12 @@ export async function runDocBlocks(
     // If jobSucceeds: true, extract jobId from the block output and poll
     if (!error && assert.jobSucceeds) {
       let jobId: string | undefined;
-      // Try to parse JSON output for jobId
-      for (const line of blockOut.split("\n")) {
-        try {
-          const parsed = JSON.parse(line.trim()) as { jobId?: string };
-          if (parsed.jobId) { jobId = parsed.jobId; break; }
-        } catch { /* skip */ }
+      // Find the last JSON value in stdout that carries a jobId (e.g. the
+      // `aws iot create-job` response, possibly preceded by S3 upload progress).
+      const jsonValues = extractJsonValues(blockOut);
+      for (let i = jsonValues.length - 1; i >= 0; i--) {
+        const v = jsonValues[i] as { jobId?: string };
+        if (v && typeof v === "object" && typeof v.jobId === "string") { jobId = v.jobId; break; }
       }
       if (!jobId) {
         // Fallback: look for jobId in the combined output
