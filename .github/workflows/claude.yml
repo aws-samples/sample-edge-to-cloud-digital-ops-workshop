@@ -6,7 +6,7 @@ permissions:
   issues: write
   id-token: write   # required for OIDC → AWS credentials
   actions: write    # required for Claude to trigger and monitor the deploy workflow
-
+  
 on:
   issue_comment:
     types: [created]
@@ -73,6 +73,20 @@ jobs:
         env:
           # Needed for ampx pipeline-deploy and gh CLI commands Claude runs in bash
           GH_TOKEN: ${{ github.token }}
+          # ── Live telemetry → CloudWatch (metrics) ──────────────────────────
+          # Claude Code's built-in OTel exporter ships token/cost/session
+          # metrics straight to the CloudWatch OTLP metrics endpoint. Auth is a
+          # long-lived API key (bearer token) — the endpoint is HTTP-only and
+          # bearer auth needs no SigV4/collector, so a static header is all it
+          # takes. The key is scoped to metrics ingestion only.
+          # Docs: https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-OTLP-MetricsBearerTokenAuth.html
+          CLAUDE_CODE_ENABLE_TELEMETRY: "1"
+          OTEL_METRICS_EXPORTER: otlp
+          OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+          OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: https://monitoring.${{ env.AWS_REGION }}.amazonaws.com/v1/metrics
+          OTEL_EXPORTER_OTLP_METRICS_HEADERS: "Authorization=Bearer ${{ secrets.CW_METRICS_API_KEY }}"
+          # Flush metrics quickly so a short session still reports before exit.
+          OTEL_METRIC_EXPORT_INTERVAL: "10000"
         with:
           github_token: ${{ github.token }}
           use_bedrock: "true"
