@@ -92,7 +92,9 @@ jobs:
             Bash(aws * list-*),
             Bash(aws * describe-*),
             Bash(openssl *),
-            Bash(gh *)
+            Bash(gh *),
+            Bash(npx *),
+            Bash(tsc *)
             "
 
       - name: Upload execution log to CloudWatch
