@@ -1,4 +1,4 @@
-import { Stack, StackProps, CfnOutput, CfnDeletionPolicy, RemovalPolicy } from "aws-cdk-lib";
+import { Stack, StackProps, CfnOutput, RemovalPolicy } from "aws-cdk-lib";
 import {
   Vpc,
   SubnetType,
@@ -46,10 +46,12 @@ export interface PlatformStackProps extends StackProps {}
  * Shared platform infrastructure — deployed once per account/region.
  *
  * workshop-edge  10.0.0.0/16  — edge EC2 instances, isolated /24 subnets per slot
- * workshop-cloud 10.1.0.0/16  — shared EKS cluster, per-slot MSK clusters
+ * workshop-cloud 10.1.0.0/16  — shared EKS cluster, shared MSK cluster
  *
  * EKS cluster is shared across all participants. Each participant slot gets its
- * own namespace (e.g. ws-slot00) with RBAC scoped to that namespace.
+ * own namespace (e.g. ws-slot00) with RBAC scoped to that namespace. The MSK
+ * cluster is likewise shared; each slot gets its own SCRAM credentials
+ * (created in ParticipantStack).
  */
 export class PlatformStack extends Stack {
   public readonly edgeVpc: Vpc;
@@ -151,8 +153,6 @@ export class PlatformStack extends Stack {
         bootstrapClusterCreatorAdminPermissions: true,
       },
     });
-    // Retain on stack delete — manual cleanup prevents accidental data loss.
-    eksCluster.cfnOptions.deletionPolicy = CfnDeletionPolicy.RETAIN;
 
     const eksNodegroup = new CfnNodegroup(this, "EksNodegroup", {
       clusterName: eksCluster.ref,
@@ -169,7 +169,6 @@ export class PlatformStack extends Stack {
       diskSize: 20,
     });
     eksNodegroup.addDependency(eksCluster);
-    eksNodegroup.cfnOptions.deletionPolicy = CfnDeletionPolicy.RETAIN;
 
     new CfnOutput(this, "EksClusterName", {
       exportName: "workshop-eks-cluster-name",
@@ -204,7 +203,7 @@ export class PlatformStack extends Stack {
     const mskScramKey = new KmsKey(this, "MskScramKey", {
       description: "CMK for workshop MSK SCRAM secrets",
       enableKeyRotation: true,
-      removalPolicy: RemovalPolicy.RETAIN,
+      removalPolicy: RemovalPolicy.DESTROY,
     });
 
     new CfnOutput(this, "MskScramKeyArn", {
@@ -257,8 +256,6 @@ export class PlatformStack extends Stack {
         },
       },
     });
-    // MSK takes 15+ min to create and can't be deleted while CREATING.
-    mskCluster.cfnOptions.deletionPolicy = CfnDeletionPolicy.RETAIN;
 
     new CfnOutput(this, "MskClusterArn", {
       exportName: "workshop-platform-msk-arn",

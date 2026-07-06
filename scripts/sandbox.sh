@@ -23,22 +23,18 @@ PLATFORM_APP="npx tsx amplify/custom/platform-app.ts"
 echo ">>> Deployment ID: $DEPLOYMENT_ID"
 
 # ── Check whether the platform stack is fully deployed ──────────────────────
-# Accept either the original or V2 stack name; check by CloudFormation status
-# rather than VPC presence — a rollback can leave VPCs behind while other
-# resources (S3 bucket, MSK, etc.) are missing.
+# Check by CloudFormation status rather than VPC presence — a rollback can
+# leave VPCs behind while other resources (S3 bucket, MSK, etc.) are missing.
 PLATFORM_STACK=""
 if [[ "$FORCE" == "false" ]]; then
-  for CANDIDATE in WorkshopPlatformStackV2 WorkshopPlatformStack; do
-    STATUS=$(aws cloudformation describe-stacks \
-      --stack-name "$CANDIDATE" \
-      --query "Stacks[0].StackStatus" \
-      --output text 2>/dev/null || echo "DOES_NOT_EXIST")
-    if [[ "$STATUS" == "CREATE_COMPLETE" || "$STATUS" == "UPDATE_COMPLETE" ]]; then
-      PLATFORM_STACK="$CANDIDATE"
-      echo ">>> Platform stack is healthy ($CANDIDATE / $STATUS). Skipping platform deploy."
-      break
-    fi
-  done
+  STATUS=$(aws cloudformation describe-stacks \
+    --stack-name "WorkshopPlatformStack" \
+    --query "Stacks[0].StackStatus" \
+    --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+  if [[ "$STATUS" == "CREATE_COMPLETE" || "$STATUS" == "UPDATE_COMPLETE" ]]; then
+    PLATFORM_STACK="WorkshopPlatformStack"
+    echo ">>> Platform stack is healthy ($STATUS). Skipping platform deploy."
+  fi
 else
   echo ">>> --force passed. Skipping health check and re-deploying platform stack."
 fi

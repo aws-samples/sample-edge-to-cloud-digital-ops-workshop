@@ -16,7 +16,7 @@ import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
  *   BOOTSTRAP_SERVERS  Kafka bootstrap, e.g. "redpanda:9092" or MSK IAM endpoint
  *   HUDI_BASE_PATH     s3a:// (local) or s3:// (Managed Flink).
  *                      Local default : s3a://workshop-local/hudi-telemetry
- *                      AWS           : s3://workshop-shared-v2-{ACCOUNT_ID}/hudi-telemetry
+ *                      AWS           : s3://workshop-platform-{ACCOUNT_ID}/hudi-telemetry
  *                      (bucket name available in amplify_outputs.json as custom.sharedBucketName)
  */
 public class FlinkHudiSinkJob {

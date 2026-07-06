@@ -16,24 +16,12 @@ if [[ ${#DEPLOYMENT_IDS[@]} -eq 0 ]]; then
 fi
 
 PLATFORM_APP="npx tsx amplify/custom/platform-app.ts"
+PLATFORM_STACK_NAME="WorkshopPlatformStack"
 
 # ── Deploy platform stack (always) ───────────────────────────────────────────
 # cdk deploy is idempotent: if nothing changed it finishes in seconds.
-# Detect whichever stack name exists in this account (V2 takes priority).
-PLATFORM_STACK_NAME="WorkshopPlatformStack"
-for CANDIDATE in WorkshopPlatformStackV2 WorkshopPlatformStack; do
-  STATUS=$(aws cloudformation describe-stacks \
-    --stack-name "$CANDIDATE" \
-    --query "Stacks[0].StackStatus" \
-    --output text 2>/dev/null || echo "DOES_NOT_EXIST")
-  if [[ "$STATUS" == "CREATE_COMPLETE" || "$STATUS" == "UPDATE_COMPLETE" ]]; then
-    PLATFORM_STACK_NAME="$CANDIDATE"
-    break
-  fi
-done
-
 echo ">>> Deploying $PLATFORM_STACK_NAME..."
-PLATFORM_STACK_NAME="$PLATFORM_STACK_NAME" npx cdk deploy \
+npx cdk deploy \
   --app "$PLATFORM_APP" \
   --require-approval never \
   "$PLATFORM_STACK_NAME"
