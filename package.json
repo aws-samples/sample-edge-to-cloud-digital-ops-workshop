@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@10.28.2",
   "scripts": {
     "sandbox": "bash scripts/sandbox.sh",
     "sandbox:all": "bash scripts/sandbox-all.sh",
