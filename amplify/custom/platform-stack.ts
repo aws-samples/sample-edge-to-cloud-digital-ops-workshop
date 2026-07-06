@@ -38,6 +38,7 @@ import {
   PhysicalResourceId,
 } from "aws-cdk-lib/custom-resources";
 import { CfnApplication as CfnFlinkApplication } from "aws-cdk-lib/aws-kinesisanalyticsv2";
+import { CfnWorkGroup } from "aws-cdk-lib/aws-athena";
 import { Construct } from "constructs";
 
 export interface PlatformStackProps extends StackProps {}
@@ -532,6 +533,26 @@ export class PlatformStack extends Stack {
     new CfnOutput(this, "FlinkAppName", {
       exportName: "workshop-platform-flink-app-name",
       value: flinkApp.ref,
+    });
+
+    // ── Athena workgroup ─────────────────────────────────────────────────────
+    // Shared across all participant slots. scripts/athena-query.sh defaults to
+    // this workgroup (ATHENA_WORKGROUP=workshop-shared).
+    const athenaWorkGroup = new CfnWorkGroup(this, "AthenaWorkGroup", {
+      name: "workshop-shared",
+      workGroupConfiguration: {
+        engineVersion: {
+          selectedEngineVersion: "Athena engine version 3",
+        },
+        resultConfiguration: {
+          outputLocation: `s3://${workshopBucket.bucketName}/athena-results/`,
+        },
+      },
+    });
+
+    new CfnOutput(this, "AthenaWorkGroupName", {
+      exportName: "workshop-platform-athena-workgroup-name",
+      value: athenaWorkGroup.name,
     });
 
     // Fleet Indexing: enable REGISTRY_AND_SHADOW with named shadow indexing.
