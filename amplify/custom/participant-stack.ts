@@ -59,7 +59,8 @@ export interface ParticipantStackProps extends StackProps {
  * All resources scoped to a single workshop slot (deploymentId).
  *
  * Deployed resources:
- *  - Edge subnet (/24) in workshop-edge VPC, network-isolated (IGW-only route table)
+ *  - Edge subnet (/24) in workshop-edge VPC, private-with-egress (routes to the
+ *    shared NAT gateway created in WorkshopPlatformStack; no direct IGW route)
  *  - 3× t3.medium EC2 instances with IoT Device Client, fleet provisioning by claim
  *  - IoT Provisioning Template + claim cert (stored in Secrets Manager)
  *  - Pre-provisioning hook Lambda
@@ -89,10 +90,10 @@ export class ParticipantStack extends Stack {
     const mskBootstrapScram = Fn.importValue("workshop-platform-msk-bootstrap-scram");
     const mskScramKeyArn    = Fn.importValue("workshop-platform-msk-scram-key-arn");
 
-    // IoT VPC destination ARN and edge IGW ID are written to SSM by the sandbox
-    // scripts after the platform stack deploys (CfnTopicRuleDestination can't be
-    // confirmed within CloudFormation's stabilisation timeout; the IGW may be owned
-    // by a different platform stack version).
+    // IoT VPC destination ARN and edge NAT gateway ID are written to SSM by the
+    // sandbox scripts after the platform stack deploys (CfnTopicRuleDestination
+    // can't be confirmed within CloudFormation's stabilisation timeout; the NAT
+    // gateway may be owned by a different platform stack version).
     const iotVpcDestSsmLookup = new AwsCustomResource(this, "IotVpcDestSsmLookup", {
       onCreate: {
         service: "SSM",
@@ -114,23 +115,23 @@ export class ParticipantStack extends Stack {
     });
     const iotVpcDestArn = iotVpcDestSsmLookup.getResponseField("Parameter.Value");
 
-    const edgeIgwSsmLookup = new AwsCustomResource(this, "EdgeIgwSsmLookup", {
+    const edgeNatGatewaySsmLookup = new AwsCustomResource(this, "EdgeNatGatewaySsmLookup", {
       onCreate: {
         service: "SSM",
         action: "getParameter",
-        parameters: { Name: "/workshop/platform/edge-igw-id" },
-        physicalResourceId: PhysicalResourceId.of("EdgeIgwSsmLookup"),
+        parameters: { Name: "/workshop/platform/edge-nat-gateway-id" },
+        physicalResourceId: PhysicalResourceId.of("EdgeNatGatewaySsmLookup"),
         outputPaths: ["Parameter.Value"],
       },
       onUpdate: {
         service: "SSM",
         action: "getParameter",
-        parameters: { Name: "/workshop/platform/edge-igw-id" },
-        physicalResourceId: PhysicalResourceId.of("EdgeIgwSsmLookup"),
+        parameters: { Name: "/workshop/platform/edge-nat-gateway-id" },
+        physicalResourceId: PhysicalResourceId.of("EdgeNatGatewaySsmLookup"),
         outputPaths: ["Parameter.Value"],
       },
       policy: AwsCustomResourcePolicy.fromSdkCalls({
-        resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/workshop/platform/edge-igw-id`],
+        resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/workshop/platform/edge-nat-gateway-id`],
       }),
     });
 
@@ -480,15 +481,17 @@ exports.handler = async (event) => {
     });
     // --8<-- [end:provisioning-template]
 
-    // ── Edge subnet (network-isolated /24) ───────────────────────────────────
+    // ── Edge subnet (private-with-egress /24, network-isolated per slot) ────
     const slotIndex = parseInt(deploymentId.replace(/\D/g, "").slice(-2), 10) || 0;
-    const edgeSubnetCidr = `10.0.${slotIndex}.0/24`;
+    // Slot subnets start above the platform-reserved edge-public/edge-private
+    // tiers (10.0.0.0/24 - 10.0.5.0/24 for 3 AZs), so offset by 16.
+    const edgeSubnetCidr = `10.0.${16 + slotIndex}.0/24`;
 
     const edgeSubnet = new CfnSubnet(this, "EdgeSubnet", {
       vpcId: edgeVpc.vpcId,
       cidrBlock: edgeSubnetCidr,
       availabilityZone: `${this.region}a`,
-      mapPublicIpOnLaunch: true,
+      mapPublicIpOnLaunch: false,
       tags: [{ key: "Name", value: `workshop-edge-${deploymentId}` }],
     });
 
@@ -497,15 +500,15 @@ exports.handler = async (event) => {
       tags: [{ key: "Name", value: `workshop-edge-${deploymentId}-rtb` }],
     });
 
-    // The edge VPC IGW is created once by the platform stack and its ID is
-    // published to SSM by the sandbox script. Read from SSM to decouple from
+    // The edge VPC NAT gateway is created once by the platform stack and its ID
+    // is published to SSM by the sandbox script. Read from SSM to decouple from
     // whichever platform stack version created it.
-    const edgeIgwId = edgeIgwSsmLookup.getResponseField("Parameter.Value");
+    const edgeNatGatewayId = edgeNatGatewaySsmLookup.getResponseField("Parameter.Value");
 
     new CfnRoute(this, "EdgeDefaultRoute", {
       routeTableId: edgeRtb.ref,
       destinationCidrBlock: "0.0.0.0/0",
-      gatewayId: edgeIgwId,
+      natGatewayId: edgeNatGatewayId,
     });
 
     new CfnSubnetRouteTableAssociation(this, "EdgeSubnetRtbAssoc", {

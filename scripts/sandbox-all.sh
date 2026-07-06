@@ -201,25 +201,25 @@ else
   echo ">>> WARNING: Could not resolve MSK brokers or admin secret — skipping topic creation."
 fi
 
-# ── Publish edge IGW ID to SSM (once) ────────────────────────────────────────
+# ── Publish edge NAT gateway ID to SSM (once) ────────────────────────────────
 # //TODO - Move this into the platform stack. This should not be an sdk call.
-EDGE_IGW_SSM="/workshop/platform/edge-igw-id"
-EXISTING_IGW_SSM=$(aws ssm get-parameter --name "$EDGE_IGW_SSM" --query "Parameter.Value" --output text 2>/dev/null || echo "None")
-if [[ "$EXISTING_IGW_SSM" != "None" && -n "$EXISTING_IGW_SSM" ]]; then
-  echo ">>> SSM $EDGE_IGW_SSM already set: $EXISTING_IGW_SSM. Skipping."
+EDGE_NAT_SSM="/workshop/platform/edge-nat-gateway-id"
+EXISTING_NAT_SSM=$(aws ssm get-parameter --name "$EDGE_NAT_SSM" --query "Parameter.Value" --output text 2>/dev/null || echo "None")
+if [[ "$EXISTING_NAT_SSM" != "None" && -n "$EXISTING_NAT_SSM" ]]; then
+  echo ">>> SSM $EDGE_NAT_SSM already set: $EXISTING_NAT_SSM. Skipping."
 else
   EDGE_VPC_ID=$(aws ec2 describe-vpcs \
     --filters "Name=tag:Name,Values=workshop-edge" \
     --query "Vpcs[0].VpcId" --output text)
-  EDGE_IGW_ID=$(aws ec2 describe-internet-gateways \
-    --filters "Name=attachment.vpc-id,Values=${EDGE_VPC_ID}" \
-    --query "InternetGateways[0].InternetGatewayId" --output text)
-  if [[ -z "$EDGE_IGW_ID" || "$EDGE_IGW_ID" == "None" ]]; then
-    echo "ERROR: No IGW attached to edge VPC $EDGE_VPC_ID — is the platform stack deployed?" >&2
+  EDGE_NAT_ID=$(aws ec2 describe-nat-gateways \
+    --filter "Name=vpc-id,Values=${EDGE_VPC_ID}" "Name=state,Values=available" \
+    --query "NatGateways[0].NatGatewayId" --output text)
+  if [[ -z "$EDGE_NAT_ID" || "$EDGE_NAT_ID" == "None" ]]; then
+    echo "ERROR: No NAT gateway found in edge VPC $EDGE_VPC_ID — is the platform stack deployed?" >&2
     exit 1
   fi
-  aws ssm put-parameter --name "$EDGE_IGW_SSM" --value "$EDGE_IGW_ID" --type String --overwrite
-  echo ">>> SSM $EDGE_IGW_SSM set to $EDGE_IGW_ID."
+  aws ssm put-parameter --name "$EDGE_NAT_SSM" --value "$EDGE_NAT_ID" --type String --overwrite
+  echo ">>> SSM $EDGE_NAT_SSM set to $EDGE_NAT_ID."
 fi
 
 # ── Create shared IoT VPC destination (once) ────────────────────────────────

@@ -20,7 +20,7 @@ Each deployment gets a unique **`DEPLOYMENT_ID`** (e.g., `ws-a1b2c3`). All resou
 |---|---|---|
 | VPC `workshop-edge` | 1× per account, shared | 10.0.0.0/16; checked for existence before create |
 | VPC `workshop-cloud` | 1× per account, shared | 10.1.0.0/16; checked for existence before create |
-| Edge subnets (`/24`) | 1× per deployment, in `workshop-edge` VPC | Route table: IGW only; no cross-subnet routes — network-isolated |
+| Edge subnets (`/24`) | 1× per deployment, in `workshop-edge` VPC | Private-with-egress; routes to the shared NAT gateway, no cross-subnet routes — network-isolated |
 | Cloud subnets | 1× per deployment, in `workshop-cloud` VPC | Standard routing |
 | EC2 instances (t3.medium) | 3× per deployment | User data installs IoT Device Client; fleet provisioning by claim |
 | IoT Provisioning Template | 1× per deployment | Claim cert embedded in user data; permanent cert issued on first boot |
@@ -852,13 +852,13 @@ Participants explore the Site View:
 Navigate to the **Digital Ops View**.
 
 **Simulate a network failure:**
-1. Use EC2 console to modify the edge subnet's route table — remove the IGW route (simulates WAN link down)
+1. Use EC2 console to modify the edge subnet's route table — remove the NAT gateway route (simulates WAN link down)
 2. Observe in the Digital Ops View:
    - WAN relay lag counter starts climbing
    - Queue depth increases as sensor data accumulates in Redpanda
    - Site View continues updating normally — the HMI is running fully local
 3. Discuss: this is the resilience story — edge-local dashboard continues even with no cloud connectivity
-4. Restore the IGW route
+4. Restore the NAT gateway route
 5. Observe: WAN relay catches up automatically from committed offset; queue depth returns to zero
 6. Discuss: Redpanda's Kafka-compatible offset model means no data was lost; the relay simply resumes
 
