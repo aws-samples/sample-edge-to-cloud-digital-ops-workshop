@@ -13,7 +13,7 @@ on:
   pull_request_review_comment:
     types: [created]
   issues:
-    types: [opened, assigned]
+    types: [opened]
 
 env:
   AWS_REGION: us-east-1
