@@ -327,6 +327,8 @@ export class ParticipantStack extends Stack {
     });
 
     // ── Pre-provisioning hook Lambda ─────────────────────────────────────────
+    // Log-only hook needs no IoT/EC2 read permissions — just CloudWatch Logs
+    // from the basic execution role.
     const preProvisionLambdaRole = new Role(this, "PreProvisionLambdaRole", {
       assumedBy: new ServicePrincipal("lambda.amazonaws.com"),
       managedPolicies: [
@@ -336,62 +338,32 @@ export class ParticipantStack extends Stack {
       ],
     });
 
-    preProvisionLambdaRole.addToPolicy(
-      new PolicyStatement({
-        effect: Effect.ALLOW,
-        actions: ["iot:DescribeThing"],
-        resources: ["*"],
-      })
-    );
-
-    preProvisionLambdaRole.addToPolicy(
-      new PolicyStatement({
-        effect: Effect.ALLOW,
-        actions: ["ec2:DescribeInstances"],
-        resources: ["*"],
-      })
-    );
-
     // --8<-- [start:pre-provision-hook]
+    // Log-only pre-provisioning hook: it records every provisioning attempt for
+    // observability but always allows registration. Participants register their
+    // own lab devices (e.g. a Raspberry Pi over SSH — see scripts/register-device-ssh.sh),
+    // which have no EC2 instance ID, so the hook must not gate on EC2 identity.
+    // The shared claim certificate (delivered to a device by an authenticated
+    // operator) is what controls who can register.
     const preProvisionLambda = new LambdaFn(this, "PreProvisionHook", {
       functionName: `workshop-${deploymentId}-pre-provision`,
       runtime: Runtime.NODEJS_22_X,
       architecture: Architecture.ARM_64,
       handler: "index.handler",
       code: Code.fromInline(`
-const { IoTClient, DescribeThingCommand } = require("@aws-sdk/client-iot");
-const { EC2Client, DescribeInstancesCommand } = require("@aws-sdk/client-ec2");
-
-const iot = new IoTClient({});
-const ec2 = new EC2Client({});
 const DEPLOYMENT_ID = "${deploymentId}";
 
 exports.handler = async (event) => {
   const thingName = event.parameters?.ThingName;
-  if (!thingName) return { allowProvisioning: false };
+  const serialNumber = event.parameters?.SerialNumber;
 
-  // Reject if Thing already exists (prevent duplicate registration)
-  try {
-    await iot.send(new DescribeThingCommand({ thingName }));
-    console.log("Thing already exists, rejecting:", thingName);
-    return { allowProvisioning: false };
-  } catch (err) {
-    if (err.name !== "ResourceNotFoundException") throw err;
-  }
-
-  // Verify the requesting instance ID exists in EC2 and has the deployment tag
-  const result = await ec2.send(new DescribeInstancesCommand({
-    Filters: [
-      { Name: "instance-id", Values: [thingName] },
-      { Name: "tag:WorkshopDeploymentId", Values: [DEPLOYMENT_ID] },
-    ],
+  // Log-only: record the attempt for observability, then always allow.
+  console.log(JSON.stringify({
+    msg: "provisioning attempt",
+    deploymentId: DEPLOYMENT_ID,
+    thingName: thingName ?? null,
+    serialNumber: serialNumber ?? null,
   }));
-
-  const instances = result.Reservations?.flatMap(r => r.Instances ?? []) ?? [];
-  if (instances.length === 0) {
-    console.log("No matching EC2 instance for", thingName, "in deployment", DEPLOYMENT_ID);
-    return { allowProvisioning: false };
-  }
 
   return { allowProvisioning: true };
 };

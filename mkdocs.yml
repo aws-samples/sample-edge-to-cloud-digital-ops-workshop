@@ -116,6 +116,7 @@ nav:
       - Block 4 — Teardown: 07-capstone/block-4-teardown.md
   - Reference:
       - Architecture Decisions: reference/decisions.md
+      - Registering a Device over SSH: reference/register-device-over-ssh.md
       - Gotchas & Watch-Outs: reference/gotchas.md
       - Repository Structure: reference/repo-structure.md
       - Contributing to the Docs: reference/contributing.md
