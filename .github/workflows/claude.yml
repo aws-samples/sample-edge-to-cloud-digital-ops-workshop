@@ -13,7 +13,7 @@ on:
   pull_request_review_comment:
     types: [created]
   issues:
-    types: [opened, assigned]
+    types: [opened]
 
 env:
   AWS_REGION: us-east-1
@@ -55,3 +55,4 @@ jobs:
           github_token: ${{ github.token }}
           use_bedrock: "true"
           claude_args: "--model us.anthropic.claude-sonnet-4-6"
+          branch_name_template: "claude/issue-{{entityNumber}}"
