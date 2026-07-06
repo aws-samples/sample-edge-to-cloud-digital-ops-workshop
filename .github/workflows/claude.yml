@@ -76,10 +76,6 @@ jobs:
         with:
           github_token: ${{ github.token }}
           use_bedrock: "true"
-<<<<<<< HEAD
-          claude_args: "--model us.anthropic.claude-sonnet-4-6"
-          branch_name_template: "claude/issue-{{entityNumber}}"
-=======
           claude_args: >-
             --model us.anthropic.claude-sonnet-5
             --allowedTools "Bash(act *),
@@ -112,4 +108,3 @@ jobs:
           ISSUE: ${{ github.event.issue.number || github.event.pull_request.number }}
         run: |
           gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --remove-label "agent-working" 2>/dev/null || true
->>>>>>> b237a22593a047422121183be37b01f05a4b04c7
