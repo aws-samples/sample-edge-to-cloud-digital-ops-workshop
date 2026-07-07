@@ -178,6 +178,8 @@ Claude Code Action runs are ephemeral — nothing you background inside a run (e
 
 The pattern: when Claude reports it kicked off a long-running operation, it will include a small bash monitor script in its PR/issue comment. Run that script **on your own machine** (it needs your AWS CLI credentials, not Claude's CI role) — it polls AWS for completion, then uses `gh` to post a comment containing `@claude` back onto the same PR/issue, which re-triggers the Claude Code Action workflow with the result baked into the comment body.
 
+Before kicking off the monitored operation, Claude applies the `awaiting-monitor` label (see below) to the issue/PR; the monitor script removes it as its final step, right before posting the `@claude` comment. This makes "is anything waiting on an external AWS operation" visible at a glance in the issue list, without having to read thread history.
+
 Shape of the script Claude should produce for this:
 
 ```bash
@@ -197,6 +199,7 @@ while true; do
   sleep "$POLL_INTERVAL"
 done
 
+gh issue edit "$PR_NUMBER" --repo "$REPO" --remove-label "awaiting-monitor" || true
 gh pr comment "$PR_NUMBER" --repo "$REPO" --body "@claude deploy finished with status \`$STATUS\`. Please continue: <next step>."
 ```
 
@@ -204,6 +207,7 @@ Rules for this pattern:
 - Poll AWS state directly (`describe-stacks`, `describe-cluster`, etc.) — don't poll GitHub Actions run status, that only tells you Claude's own invocation ended, not whether the AWS operation succeeded.
 - The final `gh pr comment` / `gh issue comment` body must contain the literal `@claude` mention (that's what the workflow listens for) and should state the outcome plus the concrete next step, so the re-triggered run has enough context without re-reading the whole thread.
 - Never have Claude run this script itself in the background and call it done — Claude's own sandbox doesn't persist between invocations, so a script it starts won't survive to post the follow-up comment. It must be handed to the user to run.
+- Claude applies the `awaiting-monitor` label when it hands off the monitor script, and the monitor script removes it as part of its final `gh` call (`gh issue edit ... --remove-label`, which works on PRs too since PRs are issues under the hood) — right before the `@claude` comment that re-triggers Claude. `gh issue edit` (not `pr edit`) is used because a PR number and an issue number are the same underlying entity in this repo's numbering.
 
 ## Local / Internal Notes (not committed)
 
