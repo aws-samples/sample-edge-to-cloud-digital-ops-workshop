@@ -140,26 +140,39 @@ jobs:
                     "~editorString~'%s~source~(~'%s))") % (enc(query), enc(group))
           insights_url = base + "logsV2:logs-insights?queryDetail=" + detail
 
-          # ── 3. Terminal one-liner: aws logs tail --follow | jq transcript ────
-          # `--format short` emits one "<ts> <compact-json>" line per event. jq's
-          # -R reads each line as a string; sub() drops the leading timestamp so
-          # fromjson gets pure JSON, then we build pipe-separated columns:
-          # time | event | message | tool. `--since 1h` seeds the session-so-far
-          # immediately (each run has its own stream, so you see where the agent
-          # is on launch), then `--follow` tails live. Raw string keeps jq's
-          # bare double-quotes and \( ) interpolation intact.
+          # ── 3. Terminal poll-loop: watch this run as YAML in your shell ──────
+          # NOTE: we deliberately do NOT use `aws logs tail --follow` here. aws-cli
+          # v2 is a frozen binary that block-buffers stdout when piped, and a
+          # single run's history is well under that ~8KB flush threshold, so a
+          # piped `--follow` shows nothing until it grows/exits. Instead we poll:
+          # each iteration runs `tail` WITHOUT --follow (so it exits and flushes),
+          # renders new events as YAML, and dedupes on event.timestamp so only
+          # fresh events print. `--format short` gives "<ts> <compact-json>" per
+          # line; jq's sub() strips the leading ts so fromjson gets pure JSON.
+          # Raw string keeps jq's bare double-quotes and \( ) interpolation.
           jqf = (
-              r'''sub("^[^ ]+ ";"") | fromjson | ['''
-              r'''(.attributes["event.timestamp"] // "")[11:23], '''
-              r'''(.body // "" | ltrimstr("claude_code.")), '''
-              r'''(.attributes.prompt // .attributes.response // .attributes.tool_name // ""), '''
-              r'''(if (.body // "" | test("tool_")) then "tool=\(.attributes.tool_name // "") \(.attributes.decision // "")\(.attributes.success // "")" else "" end)'''
-              r'''] | join("  |  ")'''
+              r'''sub("^[^ ]+ ";"") | fromjson '''
+              r'''| [ (.attributes["event.timestamp"] // ""), '''
+              r'''( "- time: \"\(.attributes["event.timestamp"] // "" | .[11:23])\"\n'''
+              r'''  event: \(.body // "" | ltrimstr("claude_code."))\n'''
+              r'''  message: \((.attributes.prompt // .attributes.response // .attributes.tool_name // "") | @json)" '''
+              r'''+ (if (.body // "" | test("tool_")) '''
+              r'''then "\n  tool: {name: \(.attributes.tool_name // ""), decision: \(.attributes.decision // "-"), success: \(.attributes.success // "-"), id: \(.attributes.tool_use_id // "")}" '''
+              r'''else "" end) ) ] | @tsv'''
           )
           tail_cmd = (
-              "aws logs tail %s --region %s --log-stream-names \"%s\" \\\n"
-              "  --since 1h --follow --format short \\\n"
-              "  | jq -Rr --unbuffered '%s'"
+              "seen=$(mktemp)\n"
+              "while true; do\n"
+              "  aws logs tail %s --region %s --log-stream-names \"%s\" \\\n"
+              "    --since 1h --format short 2>/dev/null \\\n"
+              "  | jq -Rr '%s' \\\n"
+              "  | while IFS=$'\\t' read -r ts block; do\n"
+              "      grep -qF \"$ts\" \"$seen\" && continue\n"
+              "      echo \"$ts\" >> \"$seen\"\n"
+              "      printf '%%b\\n' \"$block\"\n"
+              "    done\n"
+              "  sleep 3\n"
+              "done"
           ) % (group, region, stream, jqf)
 
           print("## 📊 CloudWatch logs for this run\n")
@@ -167,8 +180,8 @@ jobs:
                 "(filtered to this session)." % live_url)
           print("- **[Logs Insights transcript](%s)** — timestamp-first, readable view with "
                 "`message` and `tool_call` columns; press **Run query** to refresh." % insights_url)
-          print("\nOr **follow it live in your terminal** (seeds the session so far, then tails). "
-                "Needs AWS creds for this account + `jq`:\n")
+          print("\nOr **watch it in your terminal as YAML** — polls every 3s and prints new "
+                "events only (Ctrl-C to stop). Needs AWS creds for this account + `jq`:\n")
           print("```bash\n%s\n```" % tail_cmd)
           print("\n_All three are scoped to this run's log stream. The console links require "
                 "sign-in to the AWS account._")
