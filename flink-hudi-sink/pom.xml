@@ -101,7 +101,7 @@
     <dependency>
       <groupId>org.apache.kafka</groupId>
       <artifactId>kafka-clients</artifactId>
-      <version>3.4.0</version>
+      <version>3.9.2</version>
     </dependency>
 
     <!-- MSK IAM auth — must be Java 8/11 bytecode (≤class 55); 2.3.5+ requires Java 17 -->
