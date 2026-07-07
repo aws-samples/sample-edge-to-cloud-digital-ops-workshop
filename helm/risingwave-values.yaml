@@ -9,7 +9,8 @@
 #     -f helm/risingwave-values.yaml
 #
 # After the operator is running, apply the RisingWave CR into your participant namespace:
-#   sed "s/\${DEPLOYMENT_ID}/ws-slot00/g" k8s/risingwave-cloud.yaml | kubectl apply -n ws-slot00 -f -
+#   sed -e "s/\${DEPLOYMENT_ID}/ws-slot00/g" -e "s/\${ACCOUNT_ID}/123456789012/g" \
+#     k8s/risingwave-cloud.yaml | kubectl apply -n ws-slot00 -f -
 # ──────────────────────────────────────────────────────────────────────────────
 
 # The operator itself is stateless and lightweight — one pod manages CRs

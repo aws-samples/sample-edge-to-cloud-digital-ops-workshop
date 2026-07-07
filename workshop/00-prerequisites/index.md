@@ -19,7 +19,7 @@ The entire workshop runs on an AWS Amplify Gen 2 project. The Amplify project is
 flowchart TB
     subgraph participant["Participant Stack — 1× per DEPLOYMENT_ID"]
         subgraph edge_vpc["VPC workshop-edge · 10.0.0.0/16"]
-            subgraph edge_subnet["Edge Subnet /24 · IGW-only route table"]
+            subgraph edge_subnet["Edge Subnet /24 · private, routes via shared NAT gateway"]
                 devices["3× EC2 t3.medium\nIoT Device Client\nfleet provisioning by claim"]
                 sim["EC2 t3.medium\nSensor Simulator\nMosquitto + Python"]
             end
@@ -73,7 +73,7 @@ Each participant slot gets a unique **`DEPLOYMENT_ID`** (e.g., `ws-a1b2c3`). All
 |---|---|---|
 | VPC `workshop-edge` | 1× per account, shared | 10.0.0.0/16; checked for existence before create |
 | VPC `workshop-cloud` | 1× per account, shared | 10.1.0.0/16; checked for existence before create |
-| Edge subnets (`/24`) | 1× per deployment | Route table: IGW only; no cross-subnet routes |
+| Edge subnets (`/24`) | 1× per deployment | Private-with-egress; routes via shared NAT gateway, no cross-subnet routes |
 | Cloud subnets | 1× per deployment | Standard routing |
 | EC2 instances (t3.medium) | 3× per deployment | User data installs IoT Device Client; fleet provisioning by claim |
 | IoT Provisioning Template | 1× per deployment | Claim cert embedded via Secrets Manager |

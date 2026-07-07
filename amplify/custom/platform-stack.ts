@@ -1,4 +1,4 @@
-import { Stack, StackProps, CfnOutput, RemovalPolicy } from "aws-cdk-lib";
+import { Stack, StackProps, CfnOutput, CfnDeletionPolicy, RemovalPolicy, Fn, CfnJson } from "aws-cdk-lib";
 import {
   Vpc,
   SubnetType,
@@ -7,8 +7,7 @@ import {
   SecurityGroup,
   Peer,
   Port,
-  CfnInternetGateway,
-  CfnVPCGatewayAttachment,
+  CfnNatGateway,
 } from "aws-cdk-lib/aws-ec2";
 import {
   Role,
@@ -16,6 +15,9 @@ import {
   ManagedPolicy,
   PolicyStatement,
   Effect,
+  FederatedPrincipal,
+  OpenIdConnectProvider,
+  Conditions,
 } from "aws-cdk-lib/aws-iam";
 import {
   CfnCluster as EksCfnCluster,
@@ -38,6 +40,7 @@ import {
   PhysicalResourceId,
 } from "aws-cdk-lib/custom-resources";
 import { CfnApplication as CfnFlinkApplication } from "aws-cdk-lib/aws-kinesisanalyticsv2";
+import { CfnWorkGroup } from "aws-cdk-lib/aws-athena";
 import { Construct } from "constructs";
 
 export interface PlatformStackProps extends StackProps {
@@ -57,8 +60,8 @@ export interface PlatformStackProps extends StackProps {
 /**
  * Shared platform infrastructure — deployed once per account/region.
  *
- * workshop-edge  10.0.0.0/16  — edge EC2 instances, isolated /24 subnets per slot
- * workshop-cloud 10.1.0.0/16  — shared EKS cluster, shared MSK cluster
+ * workshop-edge  10.0.0.0/16  — edge EC2 instances, private-with-egress /24 subnets per slot
+ * workshop-cloud 10.1.0.0/16  — shared EKS cluster, per-slot MSK clusters
  *
  * EKS cluster is shared across all participants. Each participant slot gets its
  * own namespace (e.g. ws-slot00) with RBAC scoped to that namespace. The MSK
@@ -72,29 +75,50 @@ export class PlatformStack extends Stack {
   constructor(scope: Construct, id: string, props?: PlatformStackProps) {
     super(scope, id, props);
 
-    // Edge VPC: public subnets only, 10.0.0.0/16.
-    // Each participant slot gets one /24 added by ParticipantStack.
-    // The VPC-level route table has an IGW entry; per-subnet isolation is
-    // enforced by the subnet route tables written in ParticipantStack.
+    // Edge VPC: public + private-with-egress subnets, 10.0.0.0/16.
+    // Mirrors the cloud VPC below — one shared NAT gateway, edge instances land
+    // in the private tier so they aren't directly internet-reachable. Each
+    // participant slot carves its EdgeInstance subnet out of the private tier
+    // (see ParticipantStack) rather than creating its own subnet/IGW/route table.
     this.edgeVpc = new Vpc(this, "WorkshopEdgeVpc", {
       vpcName: "workshop-edge",
       ipAddresses: IpAddresses.cidr("10.0.0.0/16"),
       maxAzs: 3,
-      natGateways: 0,
-      subnetConfiguration: [], // Participant stacks add their own subnets
+      natGateways: 1,
+      subnetConfiguration: [
+        {
+          name: "edge-public",
+          subnetType: SubnetType.PUBLIC,
+          cidrMask: 24,
+        },
+        {
+          name: "edge-private",
+          subnetType: SubnetType.PRIVATE_WITH_EGRESS,
+          cidrMask: 24,
+        },
+      ],
     });
 
-    // IGW for the edge VPC — one per VPC, shared by all participant slots.
-    const edgeIgw = new CfnInternetGateway(this, "EdgeIgw", {
-      tags: [{ key: "Name", value: "workshop-edge-igw" }],
+    // S3 gateway endpoint on the edge VPC — the IoT Device Client build/binary
+    // pulls and job-script downloads hit S3; this keeps that traffic off the
+    // NAT gateway's metered data-processing path.
+    this.edgeVpc.addGatewayEndpoint("EdgeS3Endpoint", {
+      service: GatewayVpcEndpointAwsService.S3,
     });
-    new CfnVPCGatewayAttachment(this, "EdgeIgwAttachment", {
-      vpcId: this.edgeVpc.vpcId,
-      internetGatewayId: edgeIgw.ref,
+
+    // Single shared NAT gateway for the edge VPC's private tier. ParticipantStack
+    // reads this ID (via SSM, written by the sandbox scripts) so each slot's own
+    // EdgeInstance subnet routes 0.0.0.0/0 through it instead of an IGW.
+    const [edgeNatGateway] = this.edgeVpc.node.findAll().filter(
+      (n): n is CfnNatGateway => n instanceof CfnNatGateway
+    );
+    new CfnOutput(this, "EdgeVpcId", {
+      exportName: "workshop-platform-edge-vpc-id",
+      value: this.edgeVpc.vpcId,
     });
-    new CfnOutput(this, "EdgeIgwId", {
-      exportName: "workshop-platform-edge-igw-id",
-      value: edgeIgw.ref,
+    new CfnOutput(this, "EdgeNatGatewayId", {
+      exportName: "workshop-platform-edge-nat-gateway-id",
+      value: edgeNatGateway.ref,
     });
 
     // Cloud VPC: private + public subnets, 10.1.0.0/16.
@@ -186,6 +210,52 @@ export class PlatformStack extends Stack {
       exportName: "workshop-eks-cluster-name",
       value: eksCluster.ref,
       description: "Run: aws eks update-kubeconfig --name workshop-eks to configure kubectl",
+    });
+
+    // ── IRSA for cloud RisingWave (S3 state store) ──────────────────────────
+    // One OIDC provider + one IAM role, shared across all participant namespaces.
+    // Each participant's risingwave-cloud ServiceAccount (created manually in
+    // Session 4, Block 1) assumes this role via IRSA to read/write its own
+    // workshop-<slot>-<account>-risingwave-state bucket.
+    const eksOidcProvider = new OpenIdConnectProvider(this, "EksOidcProvider", {
+      url: eksCluster.attrOpenIdConnectIssuerUrl,
+    });
+    const oidcProviderHost = Fn.select(1, Fn.split("//", eksCluster.attrOpenIdConnectIssuerUrl));
+    // Each condition operator's inner map has a key built from a deploy-time
+    // token (the OIDC host), so each map must be resolved via CfnJson rather
+    // than a plain object literal.
+    const audCondition = new CfnJson(this, "RisingwaveS3AudCondition", {
+      value: { [`${oidcProviderHost}:aud`]: "sts.amazonaws.com" },
+    });
+    const subCondition = new CfnJson(this, "RisingwaveS3SubCondition", {
+      value: { [`${oidcProviderHost}:sub`]: "system:serviceaccount:*:risingwave-cloud" },
+    });
+
+    const risingwaveS3Role = new Role(this, "RisingwaveS3Role", {
+      roleName: "workshop-risingwave-s3",
+      assumedBy: new FederatedPrincipal(
+        eksOidcProvider.openIdConnectProviderArn,
+        {
+          StringEquals: audCondition,
+          StringLike: subCondition,
+        } as unknown as Conditions,
+        "sts:AssumeRoleWithWebIdentity"
+      ),
+    });
+    risingwaveS3Role.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:ListBucket"],
+      resources: [`arn:aws:s3:::workshop-*-${this.account}-risingwave-state`],
+    }));
+    risingwaveS3Role.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      resources: [`arn:aws:s3:::workshop-*-${this.account}-risingwave-state/*`],
+    }));
+
+    new CfnOutput(this, "RisingwaveS3RoleArn", {
+      exportName: "workshop-platform-risingwave-s3-role-arn",
+      value: risingwaveS3Role.roleArn,
     });
 
     // ── Shared S3 bucket ─────────────────────────────────────────────────────
@@ -543,6 +613,26 @@ export class PlatformStack extends Stack {
       value: flinkApp.ref,
     });
     }
+
+    // ── Athena workgroup ─────────────────────────────────────────────────────
+    // Shared across all participant slots. scripts/athena-query.sh defaults to
+    // this workgroup (ATHENA_WORKGROUP=workshop-shared).
+    const athenaWorkGroup = new CfnWorkGroup(this, "AthenaWorkGroup", {
+      name: "workshop-shared",
+      workGroupConfiguration: {
+        engineVersion: {
+          selectedEngineVersion: "Athena engine version 3",
+        },
+        resultConfiguration: {
+          outputLocation: `s3://${workshopBucket.bucketName}/athena-results/`,
+        },
+      },
+    });
+
+    new CfnOutput(this, "AthenaWorkGroupName", {
+      exportName: "workshop-platform-athena-workgroup-name",
+      value: athenaWorkGroup.name,
+    });
 
     // Fleet Indexing: enable REGISTRY_AND_SHADOW with named shadow indexing.
     // Required for Session 3 shadow-based fleet queries

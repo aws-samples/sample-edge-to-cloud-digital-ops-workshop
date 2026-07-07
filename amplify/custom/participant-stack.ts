@@ -59,7 +59,8 @@ export interface ParticipantStackProps extends StackProps {
  * All resources scoped to a single workshop slot (deploymentId).
  *
  * Deployed resources:
- *  - Edge subnet (/24) in workshop-edge VPC, network-isolated (IGW-only route table)
+ *  - Edge subnet (/24) in workshop-edge VPC, private-with-egress (routes to the
+ *    shared NAT gateway created in WorkshopPlatformStack; no direct IGW route)
  *  - 3× t3.medium EC2 instances with IoT Device Client, fleet provisioning by claim
  *  - IoT Provisioning Template + claim cert (stored in Secrets Manager)
  *  - Pre-provisioning hook Lambda
@@ -89,10 +90,10 @@ export class ParticipantStack extends Stack {
     const mskBootstrapScram = Fn.importValue("workshop-platform-msk-bootstrap-scram");
     const mskScramKeyArn    = Fn.importValue("workshop-platform-msk-scram-key-arn");
 
-    // IoT VPC destination ARN and edge IGW ID are written to SSM by the sandbox
-    // scripts after the platform stack deploys (CfnTopicRuleDestination can't be
-    // confirmed within CloudFormation's stabilisation timeout; the IGW may be owned
-    // by a different platform stack version).
+    // IoT VPC destination ARN and edge NAT gateway ID are written to SSM by the
+    // sandbox scripts after the platform stack deploys (CfnTopicRuleDestination
+    // can't be confirmed within CloudFormation's stabilisation timeout; the NAT
+    // gateway may be owned by a different platform stack version).
     const iotVpcDestSsmLookup = new AwsCustomResource(this, "IotVpcDestSsmLookup", {
       onCreate: {
         service: "SSM",
@@ -114,23 +115,23 @@ export class ParticipantStack extends Stack {
     });
     const iotVpcDestArn = iotVpcDestSsmLookup.getResponseField("Parameter.Value");
 
-    const edgeIgwSsmLookup = new AwsCustomResource(this, "EdgeIgwSsmLookup", {
+    const edgeNatGatewaySsmLookup = new AwsCustomResource(this, "EdgeNatGatewaySsmLookup", {
       onCreate: {
         service: "SSM",
         action: "getParameter",
-        parameters: { Name: "/workshop/platform/edge-igw-id" },
-        physicalResourceId: PhysicalResourceId.of("EdgeIgwSsmLookup"),
+        parameters: { Name: "/workshop/platform/edge-nat-gateway-id" },
+        physicalResourceId: PhysicalResourceId.of("EdgeNatGatewaySsmLookup"),
         outputPaths: ["Parameter.Value"],
       },
       onUpdate: {
         service: "SSM",
         action: "getParameter",
-        parameters: { Name: "/workshop/platform/edge-igw-id" },
-        physicalResourceId: PhysicalResourceId.of("EdgeIgwSsmLookup"),
+        parameters: { Name: "/workshop/platform/edge-nat-gateway-id" },
+        physicalResourceId: PhysicalResourceId.of("EdgeNatGatewaySsmLookup"),
         outputPaths: ["Parameter.Value"],
       },
       policy: AwsCustomResourcePolicy.fromSdkCalls({
-        resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/workshop/platform/edge-igw-id`],
+        resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/workshop/platform/edge-nat-gateway-id`],
       }),
     });
 
@@ -327,6 +328,8 @@ export class ParticipantStack extends Stack {
     });
 
     // ── Pre-provisioning hook Lambda ─────────────────────────────────────────
+    // Log-only hook needs no IoT/EC2 read permissions — just CloudWatch Logs
+    // from the basic execution role.
     const preProvisionLambdaRole = new Role(this, "PreProvisionLambdaRole", {
       assumedBy: new ServicePrincipal("lambda.amazonaws.com"),
       managedPolicies: [
@@ -336,62 +339,32 @@ export class ParticipantStack extends Stack {
       ],
     });
 
-    preProvisionLambdaRole.addToPolicy(
-      new PolicyStatement({
-        effect: Effect.ALLOW,
-        actions: ["iot:DescribeThing"],
-        resources: ["*"],
-      })
-    );
-
-    preProvisionLambdaRole.addToPolicy(
-      new PolicyStatement({
-        effect: Effect.ALLOW,
-        actions: ["ec2:DescribeInstances"],
-        resources: ["*"],
-      })
-    );
-
     // --8<-- [start:pre-provision-hook]
+    // Log-only pre-provisioning hook: it records every provisioning attempt for
+    // observability but always allows registration. Participants register their
+    // own lab devices (e.g. a Raspberry Pi over SSH — see scripts/register-device-ssh.sh),
+    // which have no EC2 instance ID, so the hook must not gate on EC2 identity.
+    // The shared claim certificate (delivered to a device by an authenticated
+    // operator) is what controls who can register.
     const preProvisionLambda = new LambdaFn(this, "PreProvisionHook", {
       functionName: `workshop-${deploymentId}-pre-provision`,
       runtime: Runtime.NODEJS_22_X,
       architecture: Architecture.ARM_64,
       handler: "index.handler",
       code: Code.fromInline(`
-const { IoTClient, DescribeThingCommand } = require("@aws-sdk/client-iot");
-const { EC2Client, DescribeInstancesCommand } = require("@aws-sdk/client-ec2");
-
-const iot = new IoTClient({});
-const ec2 = new EC2Client({});
 const DEPLOYMENT_ID = "${deploymentId}";
 
 exports.handler = async (event) => {
   const thingName = event.parameters?.ThingName;
-  if (!thingName) return { allowProvisioning: false };
+  const serialNumber = event.parameters?.SerialNumber;
 
-  // Reject if Thing already exists (prevent duplicate registration)
-  try {
-    await iot.send(new DescribeThingCommand({ thingName }));
-    console.log("Thing already exists, rejecting:", thingName);
-    return { allowProvisioning: false };
-  } catch (err) {
-    if (err.name !== "ResourceNotFoundException") throw err;
-  }
-
-  // Verify the requesting instance ID exists in EC2 and has the deployment tag
-  const result = await ec2.send(new DescribeInstancesCommand({
-    Filters: [
-      { Name: "instance-id", Values: [thingName] },
-      { Name: "tag:WorkshopDeploymentId", Values: [DEPLOYMENT_ID] },
-    ],
+  // Log-only: record the attempt for observability, then always allow.
+  console.log(JSON.stringify({
+    msg: "provisioning attempt",
+    deploymentId: DEPLOYMENT_ID,
+    thingName: thingName ?? null,
+    serialNumber: serialNumber ?? null,
   }));
-
-  const instances = result.Reservations?.flatMap(r => r.Instances ?? []) ?? [];
-  if (instances.length === 0) {
-    console.log("No matching EC2 instance for", thingName, "in deployment", DEPLOYMENT_ID);
-    return { allowProvisioning: false };
-  }
 
   return { allowProvisioning: true };
 };
@@ -480,15 +453,17 @@ exports.handler = async (event) => {
     });
     // --8<-- [end:provisioning-template]
 
-    // ── Edge subnet (network-isolated /24) ───────────────────────────────────
+    // ── Edge subnet (private-with-egress /24, network-isolated per slot) ────
     const slotIndex = parseInt(deploymentId.replace(/\D/g, "").slice(-2), 10) || 0;
-    const edgeSubnetCidr = `10.0.${slotIndex}.0/24`;
+    // Slot subnets start above the platform-reserved edge-public/edge-private
+    // tiers (10.0.0.0/24 - 10.0.5.0/24 for 3 AZs), so offset by 16.
+    const edgeSubnetCidr = `10.0.${16 + slotIndex}.0/24`;
 
     const edgeSubnet = new CfnSubnet(this, "EdgeSubnet", {
       vpcId: edgeVpc.vpcId,
       cidrBlock: edgeSubnetCidr,
       availabilityZone: `${this.region}a`,
-      mapPublicIpOnLaunch: true,
+      mapPublicIpOnLaunch: false,
       tags: [{ key: "Name", value: `workshop-edge-${deploymentId}` }],
     });
 
@@ -497,15 +472,15 @@ exports.handler = async (event) => {
       tags: [{ key: "Name", value: `workshop-edge-${deploymentId}-rtb` }],
     });
 
-    // The edge VPC IGW is created once by the platform stack and its ID is
-    // published to SSM by the sandbox script. Read from SSM to decouple from
+    // The edge VPC NAT gateway is created once by the platform stack and its ID
+    // is published to SSM by the sandbox script. Read from SSM to decouple from
     // whichever platform stack version created it.
-    const edgeIgwId = edgeIgwSsmLookup.getResponseField("Parameter.Value");
+    const edgeNatGatewayId = edgeNatGatewaySsmLookup.getResponseField("Parameter.Value");
 
     new CfnRoute(this, "EdgeDefaultRoute", {
       routeTableId: edgeRtb.ref,
       destinationCidrBlock: "0.0.0.0/0",
-      gatewayId: edgeIgwId,
+      natGatewayId: edgeNatGatewayId,
     });
 
     new CfnSubnetRouteTableAssociation(this, "EdgeSubnetRtbAssoc", {

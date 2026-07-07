@@ -40,7 +40,7 @@ This is what happened when the CDK stack deployed the 3 devices:
 
 4. **On first boot:** the user data script calls `aws secretsmanager get-secret-value`, writes the claim cert to disk, and starts the Device Client. The Device Client calls `CreateKeysAndCertificate` → `RegisterThing` → IoT Core creates the Thing and issues a permanent cert
 5. **Claim cert files are deleted** immediately after `RegisterThing` succeeds
-6. **Pre-provisioning hook Lambda** validates the request before IoT Core acts — rejects duplicate registrations and verifies the requesting instance exists in EC2 with the expected deployment tags
+6. **Pre-provisioning hook Lambda** runs before IoT Core acts on the request. In this workshop it is **log-only** — it records each provisioning attempt (deployment, Thing name, serial) for observability and always allows provisioning. This lets participants register their own lab devices (see below), which have no EC2 instance ID to validate against.
 
     ??? example "View CDK source — pre-provisioning hook"
         [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/amplify/custom/participant-stack.ts){ .md-button target=_blank }
@@ -50,7 +50,10 @@ This is what happened when the CDK stack deployed the 3 devices:
         ```
 
     !!! info "Teaching point"
-        The specific hook logic matters less than the pattern. A shared claim cert is a wide key — any holder can attempt provisioning. The pre-hook is where you narrow that surface: verify the device is known to some authoritative source (EC2 tags, device registry, manufacturing database).
+        The hook is the control point, and what you enforce there is a policy choice. A shared claim cert is a wide key — any holder can attempt provisioning. A production hook is where you'd narrow that surface: verify the device against an authoritative source (a device registry, a manufacturing database) and reject unknown or duplicate devices. This workshop deliberately runs it **log-only** so you can register any device you bring; the shared claim cert (delivered to a device by an authenticated operator) is then the only gate.
+
+!!! tip "Register your own device"
+    You can register a device you own — a Raspberry Pi, or any Linux host — into your slot over SSH using [`scripts/register-device-ssh.sh`](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/scripts/register-device-ssh.sh). It runs the same by-claim flow described above. See [Register your own device](../02-control/block-1-device-client.md).
 
 ---
 

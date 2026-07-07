@@ -6,14 +6,14 @@ permissions:
   issues: write
   id-token: write   # required for OIDC → AWS credentials
   actions: write    # required for Claude to trigger and monitor the deploy workflow
-
+  
 on:
   issue_comment:
     types: [created]
   pull_request_review_comment:
     types: [created]
   issues:
-    types: [opened, assigned]
+    types: [opened]
 
 env:
   AWS_REGION: us-east-1
@@ -38,17 +38,19 @@ jobs:
         (github.event_name == 'issues' && contains(github.event.issue.body, '@claude'))
       )
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
 
-      - name: Mark in-progress (remove needs-review label)
+      - name: Mark in-progress
         env:
           GH_TOKEN: ${{ github.token }}
+          # Pass event context through env vars, not shell interpolation, so an
+          # attacker-controlled value can't inject commands (ACAT ScriptInjection).
+          ISSUE: ${{ github.event.issue.number || github.event.pull_request.number }}
         run: |
-          ISSUE=${{ github.event.issue.number || github.event.pull_request.number }}
-          gh label create "needs-review" --repo "$GITHUB_REPOSITORY" --color "0075ca" --description "Claude has responded and is awaiting review" 2>/dev/null || true
-          gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --remove-label "needs-review" 2>/dev/null || true
+          gh label create "agent-working" --repo "$GITHUB_REPOSITORY" --color "e4e669" --description "Claude is actively working on this" 2>/dev/null || true
+          gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --add-label "agent-working" 2>/dev/null || true
 
       - uses: pnpm/action-setup@v4
         with:
@@ -64,11 +66,166 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 21600
+
+      - name: Create OTLP log stream for this run
+        # The CloudWatch Logs OTLP endpoint writes to a specific log group/stream
+        # named via the x-aws-log-* headers below. The stream must exist first,
+        # so create a per-run stream using the OIDC role (which has
+        # logs:CreateLogStream on this repo's group). The group (per-repo) +
+        # bearer-token auth are provisioned by the CloudFormation stack. The
+        # group name mirrors deploy-to-repo.sh: /github-actions/claude-code-otlp/<repo-slug>
+        # where <repo-slug> is the bare repo name with non-[A-Za-z0-9_-] → '-'.
+        env:
+          REPO_NAME: ${{ github.event.repository.name }}
+          OTLP_LOG_STREAM: ${{ github.repository }}/${{ github.run_id }}
+        run: |
+          REPO_SLUG="${REPO_NAME//[^a-zA-Z0-9_-]/-}"
+          OTLP_LOG_GROUP="/github-actions/claude-code-otlp/${REPO_SLUG}"
+          echo "OTLP_LOG_GROUP=$OTLP_LOG_GROUP" >> "$GITHUB_ENV"
+          aws logs create-log-stream \
+            --region "$AWS_REGION" \
+            --log-group-name "$OTLP_LOG_GROUP" \
+            --log-stream-name "$OTLP_LOG_STREAM" 2>/dev/null || true
+
+      - name: Post CloudWatch log links
+        # Comment on the issue/PR with TWO CloudWatch deep-links, both scoped to
+        # THIS run's log stream (so only the invoked session shows, not other
+        # concurrent agent sessions):
+        #   1. Live Tail — auto-streaming raw events as they arrive (logStreamNames
+        #      filter pins it to this run's stream).
+        #   2. Logs Insights — a readable transcript: @timestamp first, a unified
+        #      "message" column (prompt / response / tool name / event body), a
+        #      "tool_call" JSON column on tool events, then context columns.
+        # Both encode their fragment in the console's rison codec: unreserved
+        # chars pass through, everything else becomes '*' + 2 lowercase hex digits.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number || github.event.pull_request.number }}
+          # OTLP_LOG_GROUP is inherited from $GITHUB_ENV (set by the stream step).
+          OTLP_LOG_STREAM: ${{ github.repository }}/${{ github.run_id }}
+        run: |
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          ACCOUNT_ID="$ACCOUNT_ID" python3 <<'PY' > /tmp/cw-comment.md
+          import os
+          region  = os.environ["AWS_REGION"]
+          group   = os.environ["OTLP_LOG_GROUP"]
+          stream  = os.environ["OTLP_LOG_STREAM"]
+          account = os.environ["ACCOUNT_ID"]
+
+          # Console rison string codec: keep [A-Za-z0-9-._], else *<2-hex-lower>.
+          def enc(s):
+              return "".join(c if (c.isalnum() or c in "-._") else "*%02x" % ord(c) for c in s)
+
+          base = "https://%s.console.aws.amazon.com/cloudwatch/home?region=%s#" % (region, region)
+
+          # ── 1. Live Tail, filtered to this run's stream ──────────────────────
+          arn = "arn:aws:logs:%s:%s:log-group:%s:*" % (region, account, group)
+          live_url = (base + "logsV2:live-tail?logGroupArns=~(~'%s)~logStreamNames~(~'%s)"
+                      % (enc(arn), enc(stream)))
+
+          # ── 2. Logs Insights transcript, filtered to this run's stream ───────
+          # tool_call is built only for tool_ events (blank otherwise) and carries
+          # call metadata. Keep field count modest — Insights caps total function
+          # arguments per query.
+          query = (
+              "fields @timestamp, "
+              "coalesce(attributes.prompt, attributes.response, attributes.tool_name, body) as message, "
+              'if(body like /tool_/, concat('
+              '"{tool:", coalesce(attributes.tool_name,""), '
+              '", decision:", coalesce(attributes.decision,""), '
+              '", success:", coalesce(attributes.success,""), '
+              '", id:", coalesce(attributes.tool_use_id,""), "}"), "") as tool_call, '
+              "body as event, attributes.model, attributes.cost_usd, attributes.duration_ms\n"
+              '| filter @logStream = "%s"\n'
+              "| sort @timestamp asc\n"
+              "| limit 1000"
+          ) % stream
+          detail = ("~(end~0~start~-604800~timeType~'RELATIVE~unit~'seconds"
+                    "~editorString~'%s~source~(~'%s))") % (enc(query), enc(group))
+          insights_url = base + "logsV2:logs-insights?queryDetail=" + detail
+
+          # ── 3. Terminal poll-loop: watch this run as YAML in your shell ──────
+          # NOTE: we deliberately do NOT use `aws logs tail --follow` here. aws-cli
+          # v2 is a frozen binary that block-buffers stdout when piped, and a
+          # single run's history is well under that ~8KB flush threshold, so a
+          # piped `--follow` shows nothing until it grows/exits. Instead we poll:
+          # each iteration runs `tail` WITHOUT --follow (so it exits and flushes),
+          # renders new events as YAML, and dedupes on event.timestamp so only
+          # fresh events print. `--format short` gives "<ts> <compact-json>" per
+          # line; jq's sub() strips the leading ts so fromjson gets pure JSON.
+          # Raw string keeps jq's bare double-quotes and \( ) interpolation.
+          jqf = (
+              r'''sub("^[^ ]+ ";"") | fromjson '''
+              r'''| [ (.attributes["event.timestamp"] // ""), '''
+              r'''( "- time: \"\(.attributes["event.timestamp"] // "" | .[11:23])\"\n'''
+              r'''  event: \(.body // "" | ltrimstr("claude_code."))\n'''
+              r'''  message: \((.attributes.prompt // .attributes.response // .attributes.tool_name // "") | @json)" '''
+              r'''+ (if (.body // "" | test("tool_")) '''
+              r'''then "\n  tool: {name: \(.attributes.tool_name // ""), decision: \(.attributes.decision // "-"), success: \(.attributes.success // "-"), id: \(.attributes.tool_use_id // "")}" '''
+              r'''else "" end) ) ] | @tsv'''
+          )
+          tail_cmd = (
+              "seen=$(mktemp)\n"
+              "while true; do\n"
+              "  aws logs tail %s --region %s --log-stream-names \"%s\" \\\n"
+              "    --since 1h --format short 2>/dev/null \\\n"
+              "  | jq -Rr '%s' \\\n"
+              "  | while IFS=$'\\t' read -r ts block; do\n"
+              "      grep -qF \"$ts\" \"$seen\" && continue\n"
+              "      echo \"$ts\" >> \"$seen\"\n"
+              "      printf '%%b\\n' \"$block\"\n"
+              "    done\n"
+              "  sleep 3\n"
+              "done"
+          ) % (group, region, stream, jqf)
+
+          print("## 📊 CloudWatch logs for this run\n")
+          print("- **[Live Tail](%s)** — auto-streaming raw log events as Claude works "
+                "(filtered to this session)." % live_url)
+          print("- **[Logs Insights transcript](%s)** — timestamp-first, readable view with "
+                "`message` and `tool_call` columns; press **Run query** to refresh." % insights_url)
+          print("\nOr **watch it in your terminal as YAML** — polls every 3s and prints new "
+                "events only (Ctrl-C to stop). Needs AWS creds for this account + `jq`:\n")
+          print("```bash\n%s\n```" % tail_cmd)
+          print("\n_All three are scoped to this run's log stream. The console links require "
+                "sign-in to the AWS account._")
+          PY
+          gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file /tmp/cw-comment.md
 
       - uses: anthropics/claude-code-action@v1
+        timeout-minutes: 300
         env:
           # Needed for ampx pipeline-deploy and gh CLI commands Claude runs in bash
           GH_TOKEN: ${{ github.token }}
+          # ── Live telemetry → CloudWatch (metrics) ──────────────────────────
+          # Claude Code's built-in OTel exporter ships token/cost/session
+          # metrics straight to the CloudWatch OTLP metrics endpoint. Auth is a
+          # long-lived API key (bearer token) — the endpoint is HTTP-only and
+          # bearer auth needs no SigV4/collector, so a static header is all it
+          # takes. The key is scoped to metrics ingestion only.
+          # Docs: https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-OTLP-MetricsBearerTokenAuth.html
+          CLAUDE_CODE_ENABLE_TELEMETRY: "1"
+          OTEL_METRICS_EXPORTER: otlp
+          OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+          OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: https://monitoring.${{ env.AWS_REGION }}.amazonaws.com/v1/metrics
+          OTEL_EXPORTER_OTLP_METRICS_HEADERS: "Authorization=Bearer ${{ secrets.CW_METRICS_API_KEY }}"
+          # Flush metrics quickly so a short session still reports before exit.
+          OTEL_METRIC_EXPORT_INTERVAL: "10000"
+          # ── Live telemetry → CloudWatch (log events) ───────────────────────
+          # Ships user_prompt / tool_decision / api_error events to the Logs
+          # OTLP endpoint. Needs its own bearer token (logs scope) plus the
+          # x-aws-log-group / x-aws-log-stream headers that route the events to
+          # the bearer-auth-enabled group and the per-run stream created above.
+          # Docs: https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/CWL_HTTP_Endpoints_BearerTokenAuth.html
+          OTEL_LOGS_EXPORTER: otlp
+          OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: https://logs.${{ env.AWS_REGION }}.amazonaws.com/v1/logs
+          # env.OTLP_LOG_GROUP was set into $GITHUB_ENV by the stream-creation step.
+          OTEL_EXPORTER_OTLP_LOGS_HEADERS: "Authorization=Bearer ${{ secrets.CW_LOGS_API_KEY }},x-aws-log-group=${{ env.OTLP_LOG_GROUP }},x-aws-log-stream=${{ github.repository }}/${{ github.run_id }}"
+          OTEL_LOGS_EXPORT_INTERVAL: "5000"
+          # Log the prompt/tool decisions (no raw tool I/O) so the events carry
+          # useful audit content. Prompt/response bodies stay off by default.
+          OTEL_LOG_USER_PROMPTS: "1"
         with:
           github_token: ${{ github.token }}
           use_bedrock: "true"
@@ -79,35 +236,27 @@ jobs:
             Bash(ls *),
             Bash(cat *),
             Bash(curl *),
-            Bash(npx ampx sandbox*),
+            Bash(npx ampx *),
             Bash(node scripts/*),
             Bash(bash scripts/*),
-            Bash(bash scripts/act-deploy.sh*),
-            Bash(pnpm act:deploy*),
-            Bash(pnpm act:deploy:draft*),
-            Bash(pnpm install*),
-            Bash(pnpm run build*),
-            Bash(pnpm run sandbox*),
-            Bash(pnpm run test*),
-            Bash(pnpm run e2e*),
-            Bash(pnpm run deploy*),
-            Bash(pnpm run act:deploy*),
-            Bash(docker info*),
-            Bash(docker ps*),
-            Bash(aws sts get-caller-identity*),
+            Bash(pnpm *),
+            Bash(docker *),
             Bash(aws * get-*),
             Bash(aws * list-*),
             Bash(aws * describe-*),
-            Bash(gh workflow run*),
-            Bash(gh workflow list*),
-            Bash(gh run list*),
-            Bash(gh run watch*),
-            Bash(gh run view*)"
+            Bash(openssl *),
+            Bash(gh *),
+            Bash(npx *),
+            Bash(tsc *),
+            Bash(mkdocs *),
+            Bash(python*),
+            Bash(pip*)
+            "
 
-      - name: Mark needs-review
+      - name: Remove agent-working label
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number || github.event.pull_request.number }}
         run: |
-          ISSUE=${{ github.event.issue.number || github.event.pull_request.number }}
-          gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --add-label "needs-review" 2>/dev/null || true
+          gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --remove-label "agent-working" 2>/dev/null || true

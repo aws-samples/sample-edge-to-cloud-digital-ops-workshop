@@ -1005,124 +1005,19 @@ try {
       }));
     } catch { /* already associated or transient — non-fatal */ }
 
-    // Create cloud namespace, MSK secret, and IRSA service account
-    try {
-      shell(
-        `kubectl --kubeconfig ${cloudKcPath} create namespace ${DEPLOYMENT_ID} --dry-run=client -o yaml | kubectl --kubeconfig ${cloudKcPath} apply -f -`
-      );
-      shell(
-        `kubectl --kubeconfig ${cloudKcPath} create secret generic msk-credentials ` +
-        `--namespace ${DEPLOYMENT_ID} ` +
-        `--from-literal=MSK_USERNAME=${mskCreds.username} ` +
-        `--from-literal=MSK_PASSWORD=${mskCreds.password} ` +
-        `--from-literal=MSK_BOOTSTRAP_SERVERS="${mskBootstrap}" ` +
-        `--dry-run=client -o yaml | kubectl --kubeconfig ${cloudKcPath} apply -f -`
-      );
-      // Service account with IRSA annotation — required for RisingWave pods to access S3
-      shell(
-        `kubectl --kubeconfig ${cloudKcPath} create serviceaccount risingwave-cloud ` +
-        `--namespace ${DEPLOYMENT_ID} --dry-run=client -o yaml | ` +
-        `kubectl --kubeconfig ${cloudKcPath} annotate -f - --local -o yaml ` +
-        `eks.amazonaws.com/role-arn=arn:aws:iam::${ACCOUNT_ID}:role/workshop-risingwave-s3 | ` +
-        `kubectl --kubeconfig ${cloudKcPath} apply -f -`
-      );
-    } catch (e) {
-      log(`⚠  EKS namespace/secret setup failed (EKS may not have nodes yet): ${(e as Error).message?.slice(0, 120)}`);
-    }
-
-    // Install cert-manager (required by RisingWave operator CRDs)
-    log("Installing cert-manager (required for RisingWave operator)...");
-    shellOutput(
-      `kubectl --kubeconfig ${cloudKcPath} apply -f ` +
-      `https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml ` +
-      `2>&1 || true`
-    );
-    // Wait for cert-manager CRDs to be established before deploying RisingWave
-    shellOutput(
-      `kubectl --kubeconfig ${cloudKcPath} wait --for=condition=Established ` +
-      `crd/certificates.cert-manager.io crd/issuers.cert-manager.io ` +
-      `--timeout=120s 2>/dev/null || true`
-    );
-
-    // Ensure RisingWave S3 state bucket exists
-    shellOutput(
-      `aws s3api head-bucket --bucket ${DEPLOYMENT_ID}-${ACCOUNT_ID}-risingwave-state 2>/dev/null || ` +
-      `aws s3 mb s3://workshop-${DEPLOYMENT_ID}-${ACCOUNT_ID}-risingwave-state --region ${REGION}`
-    );
-
-    // Deploy RisingWave operator
-    log("Deploying RisingWave operator (cloud)...");
-    await shellRetry(
-      `helm --kubeconfig ${cloudKcPath} upgrade --install risingwave-operator risingwavelabs/risingwave-operator ` +
-      `--namespace risingwave-system --create-namespace --wait --timeout 3m`
-    );
-
-    // Delete the RisingWave CR and wait for all pods to terminate before clearing S3.
-    // This avoids two problems: (1) cluster_id conflicts when pods restart into an empty bucket,
-    // and (2) DROP MATERIALIZED VIEW blocking indefinitely on stale streaming state.
-    shellOutput(
-      `kubectl --kubeconfig ${cloudKcPath} delete risingwave risingwave-cloud -n ${DEPLOYMENT_ID} --ignore-not-found 2>&1 || true`
-    );
-    shellOutput(
-      `kubectl --kubeconfig ${cloudKcPath} wait pod -n ${DEPLOYMENT_ID} ` +
-      `-l risingwave.risingwavelabs.com/cr-name=risingwave-cloud ` +
-      `--for=delete --timeout=120s 2>/dev/null || true`
-    );
-    shellOutput(
-      `aws s3 rm s3://workshop-${DEPLOYMENT_ID}-${ACCOUNT_ID}-risingwave-state/ --recursive --region ${REGION} 2>/dev/null || true`
-    );
-
-    // Deploy RisingWave instance (fresh start — no stale S3 state or streaming DDL)
-    const rwManifest = readFileSync(`${REPO_ROOT}/k8s/risingwave-cloud.yaml`, "utf8")
-      .replace(/\$\{DEPLOYMENT_ID\}/g, DEPLOYMENT_ID)
-      .replace(/\$\{ACCOUNT_ID\}/g, ACCOUNT_ID);
-    const rwManifestPath = join(tmpdir(), `risingwave-cloud-${DEPLOYMENT_ID}.yaml`);
-    writeFileSync(rwManifestPath, rwManifest);
-    shell(`kubectl --kubeconfig ${cloudKcPath} apply -n ${DEPLOYMENT_ID} -f ${rwManifestPath}`);
-
-    // Deploy CNPG operator
-    log("Deploying CNPG operator (cloud)...");
-    await shellRetry(
-      `helm --kubeconfig ${cloudKcPath} upgrade --install cnpg cloudnative-pg/cloudnative-pg ` +
-      `--namespace cnpg-system --create-namespace --wait --timeout 3m`
-    );
-
-    // Deploy TimescaleDB
-    shell(`kubectl --kubeconfig ${cloudKcPath} apply -f ${REPO_ROOT}/k8s/timescaledb-cloud-cluster.yaml -n ${DEPLOYMENT_ID}`);
-
-    // Deploy cloud Redpanda Connect sink (MSK → TimescaleDB).
-    // Needs timescaledb-credentials secret — we'll create/update it after CNPG generates the password.
-    // For now register the repo; the secret and helm install happen after CNPG is ready below.
-    try {
-      shellOutput(`helm repo add redpanda https://charts.redpanda.com 2>/dev/null || true`);
-      shellOutput(`helm repo update redpanda 2>/dev/null || true`);
-    } catch { /* best-effort */ }
-
-    log("Waiting for cloud namespace pods...");
-    await waitForPods(cloudKcPath, DEPLOYMENT_ID, HELM_TIMEOUT_MS).catch(() =>
-      log("⚠  Some cloud pods not yet Running — continuing")
-    );
-
-    await check("Cloud namespace has Running pods", async () => {
-      const out = shellOutput(
-        `kubectl --kubeconfig ${cloudKcPath} get pods -n ${DEPLOYMENT_ID} --no-headers 2>/dev/null`
-      );
-      const running = out.split("\n").filter((l) => l.includes("Running")).length;
-      if (running === 0) throw new Error("No Running pods in cloud namespace");
-      return { runningPods: running };
-    }, { data: (r) => r });
-
-    // Wait for RisingWave frontend deployment to be Available before port-forwarding
-    log("Waiting for RisingWave frontend to be Available...");
-    shellOutput(
-      `kubectl --kubeconfig ${cloudKcPath} rollout status deployment/risingwave-cloud-frontend-default ` +
-      `-n ${DEPLOYMENT_ID} --timeout=300s`
-    );
-
     // Create the MSK topics if they don't exist yet.
     // RisingWave's CREATE SOURCE fails if the topic is absent, so we pre-create them.
     // MSK is only accessible from within the cloud VPC, so we run a short-lived
     // Python pod inside EKS (same VPC) that uses confluent-kafka to create the topics.
+    // Run before the doc's deploy steps so the RisingWave DDL step (which creates
+    // sources against these topics) doesn't race topic creation.
+    try {
+      shell(
+        `kubectl --kubeconfig ${cloudKcPath} create namespace ${DEPLOYMENT_ID} --dry-run=client -o yaml | kubectl --kubeconfig ${cloudKcPath} apply -f -`
+      );
+    } catch (e) {
+      log(`⚠  Cloud namespace create failed (EKS may not have nodes yet): ${(e as Error).message?.slice(0, 120)}`);
+    }
     log("Creating MSK topics (sensors.raw.sim, raw.telemetry) via EKS pod (idempotent)...");
     const REQUIRED_TOPICS = ["sensors.raw.sim", "raw.telemetry"];
     // Build the script as real Python source (newlines preserved) then base64-encode it
@@ -1154,101 +1049,102 @@ try {
     );
     log("  MSK topic creation complete");
 
-    // Apply RisingWave DDL via kubectl port-forward to the EKS frontend service
-    log("Applying cloud RisingWave DDL...");
-    shellOutput(`lsof -ti:14567 | xargs kill -9 2>/dev/null || true`);
-    await sleep(1_000);
-    const rwPfProc = spawn(
-      "kubectl",
-      ["--kubeconfig", cloudKcPath, "port-forward", "-n", DEPLOYMENT_ID,
-       "svc/risingwave-cloud-frontend", "14567:4567"],
-      { stdio: "ignore" }
+    // Delete a pre-existing RisingWave CR and wait for pods to terminate before
+    // clearing S3 — avoids (1) cluster_id conflicts when pods restart into an
+    // empty bucket, and (2) DROP MATERIALIZED VIEW blocking on stale streaming
+    // state. The doc's deploy steps below always start from a fresh CR.
+    shellOutput(
+      `kubectl --kubeconfig ${cloudKcPath} delete risingwave risingwave-cloud -n ${DEPLOYMENT_ID} --ignore-not-found 2>&1 || true`
     );
-    const rwPfTunnel = { localPort: 14567, proc: rwPfProc, close: () => { try { rwPfProc.kill(); } catch { /* */ } } };
-    tunnels.push(rwPfTunnel);
-    // Poll until port-forward is ready (up to 30s)
-    await (async () => {
-      const deadline = Date.now() + 30_000;
-      while (Date.now() < deadline) {
-        try {
-          const c = new pg.Client({ host: "localhost", port: 14567, user: "root", database: "dev", password: "", connectionTimeoutMillis: 2000 });
-          await c.connect();
-          await c.end();
-          return;
-        } catch { await sleep(1_000); }
+    shellOutput(
+      `kubectl --kubeconfig ${cloudKcPath} wait pod -n ${DEPLOYMENT_ID} ` +
+      `-l risingwave.risingwavelabs.com/cr-name=risingwave-cloud ` +
+      `--for=delete --timeout=120s 2>/dev/null || true`
+    );
+    shellOutput(
+      `aws s3 rm s3://workshop-${DEPLOYMENT_ID}-${ACCOUNT_ID}-risingwave-state/ --recursive --region ${REGION} 2>/dev/null || true`
+    );
+
+    // Run the documented deploy steps from workshop/04-analytics/block-1-deploy.md
+    // verbatim — this is the actual workshop script participants run by hand,
+    // so passing here proves the doc (not a parallel reimplementation) works.
+    const docSubsPhase5 = { DEPLOYMENT_ID, ACCOUNT_ID, SHARED_BUCKET: `workshop-platform-${ACCOUNT_ID}`, REGION, GRAPHQL_ENDPOINT };
+    await runDocBlocks(
+      `${REPO_ROOT}/workshop/04-analytics/block-1-deploy.md`,
+      docSubsPhase5,
+      REPO_ROOT,
+      (r) => {
+        const label = `block-1-deploy block ${r.blockIndex + 1}`;
+        if (r.passed) {
+          checkMetrics.push({ name: label, phase: currentPhase, passed: true, durationMs: r.durationMs });
+          phaseChecksPassed++;
+          phaseChecksTotal++;
+          console.log(`  ✓  ${label}  [${r.durationMs}ms]`);
+        } else {
+          checkMetrics.push({ name: label, phase: currentPhase, passed: false, durationMs: r.durationMs, error: r.error });
+          phaseChecksFailed++;
+          phaseChecksTotal++;
+          console.error(`  ✗  ${label}  [${r.durationMs}ms]`);
+          console.error(`       ${r.error}`);
+        }
       }
-      throw new Error("Timed out waiting for RisingWave port-forward on 14567");
-    })();
+    );
 
-    const ddlTemplate = readFileSync(`${REPO_ROOT}/risingwave/ddl-cloud.sql`, "utf8");
-    const ddl = ddlTemplate
-      .replace(/__MSK_BOOTSTRAP__/g, mskBootstrap)
-      .replace(/__MSK_USER__/g, `workshop-${DEPLOYMENT_ID}`)
-      .replace(/__MSK_PASS__/g, mskCreds.password);
+    log("Waiting for cloud namespace pods...");
+    await waitForPods(cloudKcPath, DEPLOYMENT_ID, HELM_TIMEOUT_MS).catch(() =>
+      log("⚠  Some cloud pods not yet Running — continuing")
+    );
 
-    let rwCloudClient: pg.Client | undefined;
-    try {
-      // Cluster is always fresh (CR deleted + S3 cleared above), so no stale objects to drop.
-      rwCloudClient = new pg.Client({ host: "localhost", port: 14567, user: "root", database: "dev", password: "", query_timeout: 60_000 });
-      await rwCloudClient.connect();
-      const { durationMs } = await pgQuery(rwCloudClient, ddl);
-      log(`  Cloud DDL applied in ${durationMs}ms`);
+    await check("Cloud namespace has Running pods", async () => {
+      const out = shellOutput(
+        `kubectl --kubeconfig ${cloudKcPath} get pods -n ${DEPLOYMENT_ID} --no-headers 2>/dev/null`
+      );
+      const running = out.split("\n").filter((l) => l.includes("Running")).length;
+      if (running === 0) throw new Error("No Running pods in cloud namespace");
+      return { runningPods: running };
+    }, { data: (r) => r });
 
-      await check("Cloud RisingWave mv_sensor_fleet_latest exists and queryable", async () => {
-        const { rows, durationMs } = await pgQuery(rwCloudClient!, "SELECT COUNT(*) AS cnt FROM mv_sensor_fleet_latest");
+    await check("Cloud RisingWave mv_sensor_fleet_latest exists and queryable", async () => {
+      shellOutput(`lsof -ti:14567 | xargs kill -9 2>/dev/null || true`);
+      await sleep(1_000);
+      const rwPfProc = spawn(
+        "kubectl",
+        ["--kubeconfig", cloudKcPath, "port-forward", "-n", DEPLOYMENT_ID,
+         "svc/risingwave-cloud-frontend", "14567:4567"],
+        { stdio: "ignore" }
+      );
+      const rwPfTunnel = { localPort: 14567, proc: rwPfProc, close: () => { try { rwPfProc.kill(); } catch { /* */ } } };
+      tunnels.push(rwPfTunnel);
+      let rwCloudClient: pg.Client | undefined;
+      try {
+        const deadline = Date.now() + 30_000;
+        while (Date.now() < deadline) {
+          try {
+            rwCloudClient = new pg.Client({ host: "localhost", port: 14567, user: "root", database: "dev", password: "", connectionTimeoutMillis: 2000 });
+            await rwCloudClient.connect();
+            break;
+          } catch { rwCloudClient = undefined; await sleep(1_000); }
+        }
+        if (!rwCloudClient) throw new Error("Timed out waiting for RisingWave port-forward on 14567");
+        const { rows, durationMs } = await pgQuery(rwCloudClient, "SELECT COUNT(*) AS cnt FROM mv_sensor_fleet_latest");
+
+        // Capture a sample of rows from the view as evidence (up to 5)
+        try {
+          const { rows: sampleRows } = await pgQuery(
+            rwCloudClient,
+            "SELECT * FROM mv_sensor_fleet_latest ORDER BY ts_ms DESC LIMIT 5"
+          );
+          if (sampleRows.length > 0)
+            capture("mv_sensor_fleet_latest rows (cloud)", JSON.stringify(sampleRows, null, 2));
+        } catch { /* evidence is best-effort */ }
+
         return { rowCount: Number(rows[0].cnt), queryMs: durationMs };
-      }, { data: (r) => ({ rowCount: r.rowCount, queryMs: r.queryMs }) });
-
-      // Capture a sample of rows from the view as evidence (up to 5)
-      try {
-        const { rows: sampleRows } = await pgQuery(
-          rwCloudClient!,
-          "SELECT * FROM mv_sensor_fleet_latest ORDER BY ts_ms DESC LIMIT 5"
-        );
-        if (sampleRows.length > 0)
-          capture("mv_sensor_fleet_latest rows (cloud)", JSON.stringify(sampleRows, null, 2));
-      } catch { /* evidence is best-effort */ }
-    } finally {
-      await rwCloudClient?.end().catch(() => {});
-      rwPfTunnel.close();
-      tunnels.splice(tunnels.indexOf(rwPfTunnel), 1);
-    }
-
-    // ── Deploy cloud rp-connect-timescaledb sink ─────────────────────────────
-    // Wait for CNPG to generate the timescaledb-cloud-app secret, then create
-    // the timescaledb-credentials secret and deploy the Helm chart.
-    log("Waiting for TimescaleDB CNPG secret to be available...");
-    let tsdbInitPassword = "";
-    const tsdbSecretDeadline = Date.now() + 120_000;
-    while (Date.now() < tsdbSecretDeadline) {
-      try {
-        const raw = shellOutput(
-          `kubectl --kubeconfig ${cloudKcPath} get secret timescaledb-cloud-app ` +
-          `-n ${DEPLOYMENT_ID} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d`
-        ).trim();
-        if (raw) { tsdbInitPassword = raw; break; }
-      } catch { /* not ready yet */ }
-      await sleep(5_000);
-    }
-    if (tsdbInitPassword) {
-      const tsdbDsn = `postgres://workshop:${tsdbInitPassword}@timescaledb-cloud-rw.${DEPLOYMENT_ID}.svc:5432/edge`;
-      shell(
-        `kubectl --kubeconfig ${cloudKcPath} create secret generic timescaledb-credentials ` +
-        `-n ${DEPLOYMENT_ID} ` +
-        `--from-literal=TIMESCALE_DSN=${JSON.stringify(tsdbDsn)} ` +
-        `--dry-run=client -o yaml | kubectl --kubeconfig ${cloudKcPath} apply -f -`
-      );
-      log("Deploying cloud rp-connect-timescaledb...");
-      await shellRetry(
-        `helm --kubeconfig ${cloudKcPath} upgrade --install rp-connect-timescaledb redpanda/connect ` +
-        `-n ${DEPLOYMENT_ID} ` +
-        `-f ${REPO_ROOT}/helm/rp-connect-timescaledb.yaml ` +
-        `--wait --timeout 3m`
-      );
-      log("  rp-connect-timescaledb deployed");
-    } else {
-      log("  ⚠  TimescaleDB secret not ready in 120s — skipping rp-connect deploy");
-    }
+      } finally {
+        await rwCloudClient?.end().catch(() => {});
+        rwPfTunnel.close();
+        tunnels.splice(tunnels.indexOf(rwPfTunnel), 1);
+      }
+    }, { data: (r) => ({ rowCount: r.rowCount, queryMs: r.queryMs }) });
 
     // ── Data freshness comparison: Datalake / TimescaleDB / RisingWave ─────────
     // All three tiers query the same source data: IoT node telemetry (cpu_pct,

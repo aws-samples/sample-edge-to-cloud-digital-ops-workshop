@@ -85,6 +85,73 @@ There is **no `JOB_DOCUMENT` environment variable**. All parameters the handler 
 
 ---
 
+## Register Your Own Device
+
+The 3 EC2 instances self-registered on boot. You can also register a device **you** bring —
+a Raspberry Pi, a spare Linux box, a VM — into your slot over SSH. This runs the same
+fleet-provisioning-by-claim flow from [Block 0](../01-observe/block-0-fleet-provisioning.md),
+driven from your laptop by [`scripts/register-device-ssh.sh`](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/scripts/register-device-ssh.sh).
+
+**How it works:** the script runs on *your* machine with *your* AWS credentials. It fetches
+the shared claim certificate from Secrets Manager, connects to the device over SSH, builds the
+Device Client on the device, installs the claim cert + config, and starts the `systemd`
+service. The device self-registers and IoT Core mints it a unique per-device certificate.
+**The device never holds AWS credentials** — its only secret is the claim cert, scoped to the
+provisioning topics.
+
+```bash
+./scripts/register-device-ssh.sh \
+  --ssh pi@raspberrypi.local \
+  --deployment-id ws-slot00 \
+  --thing-name my-pi-01
+```
+
+### Building the Device Client for your device
+
+The script builds the Device Client **on the device itself**, so the binary matches the
+device's architecture, libc, and OpenSSL version automatically — no cross-compilation. The
+default install line targets **Raspberry Pi OS / Debian / Ubuntu (arm64)**:
+
+??? example "View source — build the Device Client on the device"
+    [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/scripts/register-device-ssh.sh){ .md-button target=_blank }
+
+    ```bash
+    --8<-- "scripts/register-device-ssh.sh:build-device-client"
+    ```
+
+To register a device on a **different OS stack**, change only the package-install line in that
+block:
+
+| OS stack | Install command |
+|---|---|
+| Raspberry Pi OS / Debian / Ubuntu (arm64) — *default* | `sudo apt-get install -y cmake gcc g++ libssl-dev libcurl4-openssl-dev git make` |
+| Amazon Linux 2023 / RHEL / Fedora | `sudo dnf install -y cmake gcc gcc-c++ openssl-devel libcurl-devel git make` |
+| Alpine | `sudo apk add cmake g++ openssl-dev curl-dev git make` |
+
+The rule: **build on the same OS/arch family the binary will run on.** IoT Device Client
+v1.10.1 needs OpenSSL ≥ 1.1 (Raspberry Pi OS Bookworm ships 3.x).
+
+### The claim cert and config
+
+After the build, the script splits the claim cert out of Secrets Manager, copies it to the
+device, and writes the Device Client config with a `fleet-provisioning` block:
+
+??? example "View source — push claim cert and write config"
+    [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/scripts/register-device-ssh.sh){ .md-button target=_blank }
+
+    ```bash
+    --8<-- "scripts/register-device-ssh.sh:provision"
+    ```
+
+The script then polls the IoT registry until your new Thing appears.
+
+!!! warning "The claim cert is a shared secret"
+    Because the pre-provisioning hook is log-only in this workshop, anyone holding the claim
+    cert can register a device into your slot. Only deliver it to a device over SSH from your
+    own machine — never commit it or paste it into a shared channel.
+
+---
+
 ## Reference
 
 - [AWS IoT Device Client GitHub](https://github.com/awslabs/aws-iot-device-client)

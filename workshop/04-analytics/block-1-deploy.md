@@ -15,12 +15,14 @@ aws eks update-kubeconfig \
   --region us-east-1 \
   --name workshop-eks
 ```
+<!-- e2e:assert {"contains": "context"} -->
 
 Confirm nodes are Ready:
 
 ```bash
 kubectl get nodes
 ```
+<!-- e2e:assert {"contains": "Ready"} -->
 
 **2. Add Helm repos**
 
@@ -30,6 +32,7 @@ helm repo add redpanda https://charts.redpanda.com
 helm repo add cloudnative-pg https://cloudnative-pg.github.io/charts
 helm repo update
 ```
+<!-- e2e:assert {"contains": "Update Complete"} -->
 
 **3. Retrieve MSK credentials**
 
@@ -52,7 +55,7 @@ aws kafka get-bootstrap-brokers \
 Create a Kubernetes Secret with these values (used by Redpanda Connect and RisingWave):
 
 ```bash
-kubectl create namespace ws-slot00
+kubectl create namespace ws-slot00 --dry-run=client -o yaml | kubectl apply -f -
 
 MSK_PASS=$(aws secretsmanager get-secret-value \
   --secret-id AmazonMSK_workshop-ws-slot00 \
@@ -66,8 +69,10 @@ kubectl create secret generic msk-credentials \
   --namespace ws-slot00 \
   --from-literal=MSK_USERNAME=workshop-ws-slot00 \
   --from-literal=MSK_PASSWORD="$MSK_PASS" \
-  --from-literal=MSK_BOOTSTRAP_SERVERS="$MSK_BOOTSTRAP"
+  --from-literal=MSK_BOOTSTRAP_SERVERS="$MSK_BOOTSTRAP" \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
+<!-- e2e:assert {"contains": "secret/msk-credentials"} -->
 
 !!! warning "MSK auto-create topics is disabled"
     Create the sensor topics before running the DDL.
@@ -91,7 +96,36 @@ kubectl create secret generic msk-credentials \
 
     `--if-not-exists` makes it safe to re-run. Pass `--dry-run` to preview the commands.
 
-**4. Deploy RisingWave operator and instance**
+**4. Install cert-manager**
+
+The RisingWave operator's CRDs use `cert-manager`-issued webhook certificates — install it once per cluster if not already present:
+
+```bash
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
+
+kubectl wait --for=condition=Established \
+  crd/certificates.cert-manager.io crd/issuers.cert-manager.io \
+  --timeout=120s
+```
+<!-- e2e:assert {"contains": "condition met"} -->
+
+**5. Create the RisingWave S3 state bucket and service account**
+
+Each participant slot gets its own S3 bucket for RisingWave's state store, and a Kubernetes ServiceAccount annotated for IRSA so RisingWave pods can read/write it without static credentials. The `workshop-risingwave-s3` IAM role (trusting any `risingwave-cloud` service account cluster-wide) is created once by `WorkshopPlatformStack`:
+
+```bash
+aws s3api head-bucket --bucket workshop-ws-slot00-000000000000-risingwave-state 2>/dev/null || \
+  aws s3 mb s3://workshop-ws-slot00-000000000000-risingwave-state --region us-east-1
+
+kubectl create serviceaccount risingwave-cloud \
+  --namespace ws-slot00 --dry-run=client -o yaml | \
+  kubectl annotate -f - --local -o yaml \
+    eks.amazonaws.com/role-arn=arn:aws:iam::000000000000:role/workshop-risingwave-s3 | \
+  kubectl apply -f -
+```
+<!-- e2e:assert {"contains": "serviceaccount/risingwave-cloud"} -->
+
+**6. Deploy RisingWave operator and instance**
 
 The RisingWave operator is cluster-scoped and shared — install it once into `risingwave-system` if not already present:
 
@@ -105,10 +139,15 @@ kubectl wait --for=condition=available deployment/risingwave-operator-controller
   -n risingwave-system --timeout=120s
 
 # Deploy the RisingWave CR into your participant namespace
-sed "s/\${DEPLOYMENT_ID}/ws-slot00/g" k8s/risingwave-cloud.yaml | kubectl apply -n ws-slot00 -f -
+sed -e "s/\${DEPLOYMENT_ID}/ws-slot00/g" -e "s/\${ACCOUNT_ID}/000000000000/g" \
+  k8s/risingwave-cloud.yaml | kubectl apply -n ws-slot00 -f -
 ```
+<!-- e2e:assert {"contains": "risingwave-cloud"} -->
 
-**5. Deploy TimescaleDB via CloudNativePG**
+!!! warning "Service account must exist first"
+    The RisingWave CR references `serviceAccountName: risingwave-cloud` (Step 5) — apply the CR only after the service account exists, or the pods will fail to schedule.
+
+**7. Deploy TimescaleDB via CloudNativePG**
 
 The CNPG operator is cluster-scoped and shared — install once into `cnpg-system` if not already present:
 
@@ -122,33 +161,59 @@ kubectl wait --for=condition=available deployment/cnpg-cloudnative-pg \
 
 kubectl apply -f k8s/timescaledb-cloud-cluster.yaml -n ws-slot00
 ```
+<!-- e2e:assert {"contains": "timescaledb-cloud"} -->
 
-**6. Deploy Redpanda Connect (MSK → TimescaleDB)**
-
-Update `helm/rp-connect-timescaledb.yaml` with the MSK bootstrap brokers, then:
+Wait for CNPG to initialize the cluster and generate the `timescaledb-cloud-app` credentials Secret:
 
 ```bash
+kubectl wait --for=condition=Ready pod \
+  -l cnpg.io/cluster=timescaledb-cloud -n ws-slot00 --timeout=300s
+```
+<!-- e2e:assert {"contains": "condition met"} -->
+
+**8. Deploy Redpanda Connect (MSK → TimescaleDB)**
+
+Create the `timescaledb-credentials` Secret from the password CNPG generated, then install the chart — the MSK bootstrap brokers come from the `msk-credentials` Secret created in Step 3, referenced via `envFrom` in `helm/rp-connect-timescaledb.yaml`:
+
+```bash
+TSDB_PASS=$(kubectl get secret timescaledb-cloud-app -n ws-slot00 \
+  -o jsonpath='{.data.password}' | base64 -d)
+
+kubectl create secret generic timescaledb-credentials \
+  --namespace ws-slot00 \
+  --from-literal=TIMESCALE_DSN="postgres://workshop:${TSDB_PASS}@timescaledb-cloud-rw.ws-slot00.svc:5432/edge" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 helm upgrade --install rp-connect-timescaledb redpanda/connect \
   --namespace ws-slot00 \
   -f helm/rp-connect-timescaledb.yaml
 ```
+<!-- e2e:assert {"contains": "rp-connect-timescaledb"} -->
 
-**7. Bootstrap RisingWave DDL**
+**9. Bootstrap RisingWave DDL**
 
 RisingWave's PostgreSQL wire protocol is on port **4567** (the HTTP dashboard is 4560):
 
 ```bash
+kubectl rollout status deployment/risingwave-cloud-frontend-default -n ws-slot00 --timeout=300s
+
 # Port-forward — keep running in a separate terminal
-kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567 &
+kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567 > /tmp/risingwave-cloud-pf.log 2>&1 &
+RW_PF_PID=$!
+sleep 5
 
 # Substitute credentials and apply
 sed -e "s|__MSK_BOOTSTRAP__|$MSK_BOOTSTRAP|g" \
     -e "s|__MSK_USER__|workshop-ws-slot00|g" \
     -e "s|__MSK_PASS__|$MSK_PASS|g" \
     risingwave/ddl-cloud.sql | psql -h localhost -p 4567 -U root -d dev
-```
 
-**8. Wait for all pods**
+# Stop the background port-forward once the DDL has applied
+kill "$RW_PF_PID" 2>/dev/null || true
+```
+<!-- e2e:assert {"contains": "CREATE MATERIALIZED VIEW"} -->
+
+**10. Wait for all pods**
 
 ```bash
 kubectl get pods -n ws-slot00

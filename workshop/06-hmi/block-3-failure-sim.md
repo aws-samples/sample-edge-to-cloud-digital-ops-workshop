@@ -19,7 +19,7 @@ All metrics should read near-zero when the network is healthy.
 
 ## Simulate a Network Failure
 
-1. **Use the EC2 console** to modify the edge subnet's route table — remove the IGW route (simulates WAN link down)
+1. **Use the EC2 console** to modify the edge subnet's route table — remove the NAT gateway route (simulates WAN link down)
 
 2. **Observe in the Digital Ops View:**
    - WAN relay lag counter starts climbing
@@ -28,7 +28,7 @@ All metrics should read near-zero when the network is healthy.
 
 3. **Discuss:** This is the resilience story. The edge-local dashboard continues with no cloud connectivity. Redpanda durably buffers all data.
 
-4. **Restore the IGW route** in the EC2 console
+4. **Restore the NAT gateway route** in the EC2 console
 
 5. **Observe recovery:**
    - WAN relay resumes automatically from the committed Kafka offset
