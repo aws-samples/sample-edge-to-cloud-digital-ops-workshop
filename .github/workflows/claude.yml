@@ -105,11 +105,20 @@ jobs:
           group  = os.environ["OTLP_LOG_GROUP"]
           stream = os.environ["OTLP_LOG_STREAM"]
 
-          # Transcript query: timestamp | message | context columns, this session only.
+          # Transcript query: timestamp | message | tool_call | context columns,
+          # this session only. tool_call is a JSON-ish object built only for
+          # tool_decision / tool_result events (blank otherwise); it carries the
+          # call metadata (name, decision, success, tool_use_id). Keep the field
+          # count modest — Logs Insights caps total function arguments per query.
           query = (
               "fields @timestamp, "
               "coalesce(attributes.prompt, attributes.response, attributes.tool_name, body) as message, "
-              "body as event, attributes.decision, attributes.model, attributes.cost_usd, attributes.duration_ms\n"
+              'if(body like /tool_/, concat('
+              '"{tool:", coalesce(attributes.tool_name,""), '
+              '", decision:", coalesce(attributes.decision,""), '
+              '", success:", coalesce(attributes.success,""), '
+              '", id:", coalesce(attributes.tool_use_id,""), "}"), "") as tool_call, '
+              "body as event, attributes.model, attributes.cost_usd, attributes.duration_ms\n"
               '| filter @logStream = "%s"\n'
               "| sort @timestamp asc\n"
               "| limit 1000"
