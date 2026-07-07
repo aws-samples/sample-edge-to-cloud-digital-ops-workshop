@@ -145,57 +145,76 @@ jobs:
                     "~editorString~'%s~source~(~'%s))") % (enc(query), enc(group))
           insights_url = base + "logsV2:logs-insights?queryDetail=" + detail
 
-          # ── 3. Terminal poll-loop: watch this run as YAML in your shell ──────
+          # ── 3. Terminal poll-loop: follow this run as a readable YAML transcript ──
           # NOTE: we deliberately do NOT use `aws logs tail --follow` here. aws-cli
-          # v2 is a frozen binary that block-buffers stdout when piped, and a
-          # single run's history is well under that ~8KB flush threshold, so a
-          # piped `--follow` shows nothing until it grows/exits. Instead we poll:
-          # each iteration runs `tail` WITHOUT --follow (so it exits and flushes),
-          # renders new events as YAML, and dedupes on event.timestamp so only
-          # fresh events print. `--format short` gives "<ts> <compact-json>" per
-          # line; jq's sub() strips the leading ts so fromjson gets pure JSON.
-          # Raw string keeps jq's bare double-quotes and \( ) interpolation.
-          # The jq builds one YAML object per event. First array element is the
-          # event.timestamp (dedupe key for the outer loop); second is the YAML
-          # block. Columns: time, event, message (prompt/response text), tool +
-          # tool_input (arguments) on tool events, a compact api {model,tokens,cost}
-          # summary on api_request, and for the big api_request_body/api_response_body
-          # events either the full JSON (when SHOW_BODIES=1) or a one-line note with
-          # the byte size (default — those bodies are the whole conversation, huge).
-          jqf = (
-              r'''sub("^[^ ]+ ";"") | fromjson '''
-              r'''| [ (.attributes["event.timestamp"] // ""), '''
-              r'''( "- time: \"\(.attributes["event.timestamp"] // "" | .[11:23])\"\n'''
-              r'''  event: \(.body // "" | ltrimstr("claude_code."))" '''
-              r'''+ ((.attributes.prompt // .attributes.response) | if . then "\n  message: \(. | @json)" else "" end) '''
-              r'''+ (if (.body // "" | test("claude_code.tool_")) then '''
-              r'''"\n  tool: \(.attributes.tool_name // "")" '''
-              r'''+ (if .attributes.decision then "\n  decision: \(.attributes.decision)" else "" end) '''
-              r'''+ (if .attributes.success then "\n  success: \(.attributes.success)" else "" end) '''
-              r'''+ (if .attributes.tool_input then "\n  tool_input: \(.attributes.tool_input | @json)" else "" end) '''
-              r'''else "" end) '''
-              r'''+ (if (.body // "") == "claude_code.api_request" then '''
-              r'''"\n  api: {model: \(.attributes.model // ""), in: \(.attributes.input_tokens // 0), out: \(.attributes.output_tokens // 0), cost_usd: \(.attributes.cost_usd // 0)}" '''
-              r'''else "" end) '''
-              r'''+ (if (.body // "" | test("api_(request|response)_body")) then '''
-              r'''if $show_bodies == "1" then "\n  model: \(.attributes.model // "")\n  api_body: \(.attributes.body // "" | @json)" '''
-              r'''else "\n  model: \(.attributes.model // "")  # full JSON hidden — rerun with SHOW_BODIES=1 (\(.attributes.body_length // "?") bytes)" end '''
-              r'''else "" end) ) ] | @tsv'''
+          # v2 is a frozen binary that block-buffers stdout when piped, and a single
+          # run's history is under that ~8KB flush threshold, so a piped `--follow`
+          # shows nothing until it grows/exits. Instead we poll: each iteration runs
+          # `tail` WITHOUT --follow (so it exits and flushes), renders new events,
+          # and dedupes on event.timestamp so only fresh events print. `--format
+          # short` gives "<ts> <compact-json>" per line; jq's sub() strips the ts.
+          #
+          # The jq program (written to a temp file so the multi-line defs stay
+          # readable) turns each event into a YAML block: time, event, message
+          # (prompt/response as a block scalar when multi-line), tool + decoded
+          # tool INPUT args (real nested YAML, not an escaped blob), a compact
+          # api {model,tokens,cost} line, and for the big *_body events either the
+          # full decoded JSON (SHOW_BODIES=1) or a one-line size note (default —
+          # those bodies are the whole conversation, huge). A helper recursively
+          # emits JSON as YAML with block scalars, so it reads like a transcript.
+          # First @tsv column is the timestamp (dedupe key); second is the block.
+          JQ_PROG = (
+              'def pad0(n): " " * n;\n'
+              'def toyaml(ind):\n'
+              '  if type == "object" then\n'
+              '    if (.|length)==0 then " {}"\n'
+              '    else "\\n" + ( to_entries | map( pad0(ind) + (.key|tostring) + ":" + (.value | toyaml(ind+2)) ) | join("\\n") ) end\n'
+              '  elif type == "array" then\n'
+              '    if (.|length)==0 then " []"\n'
+              '    else "\\n" + ( map( ( toyaml(ind+2) | ltrimstr("\\n") ) as $r | if (type=="object" or type=="array") then pad0(ind) + "- " + ($r[ind+2:]) else pad0(ind) + "-" + $r end ) | join("\\n") ) end\n'
+              '  elif type == "string" then\n'
+              '    if (. | contains("\\n")) then " |\\n" + ( split("\\n") | map(pad0(ind+2) + .) | join("\\n") ) else " " + (@json) end\n'
+              '  else " " + (tostring) end;\n'
+              'def emit_scalar(key; val; ind): pad0(ind) + key + ":" + (val | toyaml(ind));\n'
+              'def emit_json(key; raw; ind):\n'
+              '  (raw | try (fromjson|true) catch false) as $ok\n'
+              '  | if $ok then pad0(ind) + key + ":" + ((raw|fromjson) | toyaml(ind+2)) else emit_scalar(key; raw; ind) end;\n'
+              'sub("^[^ ]+ ";"") | fromjson as $e\n'
+              '| [ ($e.attributes["event.timestamp"] // ""),\n'
+              '( "- time:  \\"\\($e.attributes["event.timestamp"] // "" | .[11:23])\\""\n'
+              '  + "\\n  event: \\($e.body // "" | ltrimstr("claude_code."))"\n'
+              '  + ( ($e.attributes.prompt // $e.attributes.response) | if . then "\\n" + emit_scalar("message"; .; 2) else "" end )\n'
+              '  + ( if ($e.body // "" | test("claude_code.tool_")) then\n'
+              '        "\\n  tool:   \\($e.attributes.tool_name // "")"\n'
+              '        + (if $e.attributes.decision then "\\n  decision: \\($e.attributes.decision)" else "" end)\n'
+              '        + (if $e.attributes.success then "\\n  success: \\($e.attributes.success)" else "" end)\n'
+              '        + (if $e.attributes.tool_input then "\\n" + emit_json("input"; $e.attributes.tool_input; 2) else "" end)\n'
+              '      else "" end )\n'
+              '  + ( if ($e.body // "") == "claude_code.api_request" then\n'
+              '        "\\n  api:    {model: \\($e.attributes.model // ""), in: \\($e.attributes.input_tokens // 0), out: \\($e.attributes.output_tokens // 0), cost_usd: \\($e.attributes.cost_usd // 0)}"\n'
+              '      else "" end )\n'
+              '  + ( if ($e.body // "" | test("api_(request|response)_body")) then\n'
+              '        if $show_bodies == "1" then "\\n  model:  \\($e.attributes.model // "")\\n" + emit_json("api_body"; ($e.attributes.body // "\\"\\""); 2)\n'
+              '        else "\\n  model:  \\($e.attributes.model // "")  # full JSON hidden — SHOW_BODIES=1 (\\($e.attributes.body_length // "?") bytes)" end\n'
+              '      else "" end ) ) ] | @tsv'
           )
           tail_cmd = (
+              "jqf=$(mktemp); cat > \"$jqf\" <<'JQ'\n"
+              "%s\n"
+              "JQ\n"
               "seen=$(mktemp)\n"
               "while true; do\n"
               "  aws logs tail %s --region %s --log-stream-names \"%s\" \\\n"
               "    --since 1h --format short 2>/dev/null \\\n"
-              "  | jq -Rr --arg show_bodies \"${SHOW_BODIES:-}\" '%s' \\\n"
+              "  | jq -Rr --arg show_bodies \"${SHOW_BODIES:-}\" -f \"$jqf\" \\\n"
               "  | while IFS=$'\\t' read -r ts block; do\n"
               "      grep -qF \"$ts\" \"$seen\" && continue\n"
               "      echo \"$ts\" >> \"$seen\"\n"
-              "      printf '%%b\\n' \"$block\"\n"
+              "      printf '\\n%%b\\n' \"$block\"\n"
               "    done\n"
               "  sleep 3\n"
               "done"
-          ) % (group, region, stream, jqf)
+          ) % (JQ_PROG, group, region, stream)
 
           print("## 📊 CloudWatch logs for this run\n")
           print("- **[Live Tail](%s)** — auto-streaming raw log events as Claude works "
