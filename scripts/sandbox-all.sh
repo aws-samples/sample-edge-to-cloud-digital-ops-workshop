@@ -151,9 +151,9 @@ ADMIN_SECRET_NAME=$(aws secretsmanager list-secrets \
 
 if [[ -n "$MSK_SCRAM_BROKERS" && -n "$ADMIN_SECRET_NAME" ]]; then
   ADMIN_SECRET=$(aws secretsmanager get-secret-value \
-    --secret-id "$ADMIN_SECRET_NAME" --query "SecretString" --output text 2>/dev/null)
-  ADMIN_USER=$(echo "$ADMIN_SECRET" | python3 -c "import json,sys; print(json.load(sys.stdin)['username'])" 2>/dev/null)
-  ADMIN_PASS=$(echo "$ADMIN_SECRET" | python3 -c "import json,sys; print(json.load(sys.stdin)['password'])" 2>/dev/null)
+    --secret-id "$ADMIN_SECRET_NAME" --query "SecretString" --output text 2>/dev/null || echo "")
+  ADMIN_USER=$(echo "$ADMIN_SECRET" | python3 -c "import json,sys; print(json.load(sys.stdin)['username'])" 2>/dev/null || echo "")
+  ADMIN_PASS=$(echo "$ADMIN_SECRET" | python3 -c "import json,sys; print(json.load(sys.stdin)['password'])" 2>/dev/null || echo "")
 
   aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "${AWS_DEFAULT_REGION:-us-east-1}" 2>/dev/null || true
 
