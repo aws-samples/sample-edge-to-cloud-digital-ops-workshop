@@ -17,13 +17,32 @@ fi
 
 PLATFORM_APP="npx tsx amplify/custom/platform-app.ts"
 PLATFORM_STACK_NAME="WorkshopPlatformStack"
+FLINK_JAR_KEY="flink-apps/flink-iceberg-sink-1.0.0.jar"
 
 # ── Deploy platform stack (always) ───────────────────────────────────────────
 # cdk deploy is idempotent: if nothing changed it finishes in seconds.
+#
+# The Managed Flink app reads its code JAR from the shared bucket this same
+# stack creates. On a fresh account neither the bucket nor the JAR exist yet,
+# so a normal deploy fails on the Flink resource and CloudFormation rolls
+# back everything else that was just created (VPCs/EKS/MSK included). Detect
+# that case up front and deploy without the Flink app first; it gets added
+# back in a second deploy below once the JAR has been uploaded.
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+PLATFORM_BUCKET="workshop-platform-${ACCOUNT_ID}"
+NEEDS_FLINK_REDEPLOY=0
+DEPLOY_CONTEXT_ARGS=()
+if ! aws s3api head-object --bucket "$PLATFORM_BUCKET" --key "$FLINK_JAR_KEY" >/dev/null 2>&1; then
+  echo ">>> Flink JAR not found at s3://${PLATFORM_BUCKET}/${FLINK_JAR_KEY} — deploying platform stack without the Flink app first."
+  DEPLOY_CONTEXT_ARGS=(--context deployFlinkApp=false)
+  NEEDS_FLINK_REDEPLOY=1
+fi
+
 echo ">>> Deploying $PLATFORM_STACK_NAME..."
 npx cdk deploy \
   --app "$PLATFORM_APP" \
   --require-approval never \
+  "${DEPLOY_CONTEXT_ARGS[@]}" \
   "$PLATFORM_STACK_NAME"
 echo ">>> Platform stack deployed."
 
@@ -236,7 +255,6 @@ echo ">>> Shared uploads complete."
 # ── Build and upload Flink JAR to S3 ─────────────────────────────────────────
 # Managed Flink reads the JAR from S3 at app start. Build if the key doesn't
 # exist yet — rebuild is skipped on subsequent runs to avoid the 5-min Maven build.
-FLINK_JAR_KEY="flink-apps/flink-iceberg-sink-1.0.0.jar"
 FLINK_JAR_EXISTS=$(aws s3 ls "s3://${S3_BUCKET}/${FLINK_JAR_KEY}" 2>/dev/null | wc -l | tr -d ' ')
 if [[ "$FLINK_JAR_EXISTS" -eq 0 ]]; then
   echo ">>> Building Flink JAR..."
@@ -246,6 +264,16 @@ if [[ "$FLINK_JAR_EXISTS" -eq 0 ]]; then
   echo ">>> Flink JAR uploaded to s3://${S3_BUCKET}/${FLINK_JAR_KEY}"
 else
   echo ">>> Flink JAR already in s3://${S3_BUCKET}/${FLINK_JAR_KEY} — skipping build."
+fi
+
+# ── Redeploy platform stack with the Flink app now that the JAR exists ──────
+if [[ "$NEEDS_FLINK_REDEPLOY" -eq 1 ]]; then
+  echo ">>> Redeploying $PLATFORM_STACK_NAME with the Flink app enabled..."
+  npx cdk deploy \
+    --app "$PLATFORM_APP" \
+    --require-approval never \
+    "$PLATFORM_STACK_NAME"
+  echo ">>> Platform stack redeployed with Flink app."
 fi
 
 # ── Deploy one Amplify sandbox per participant (sequential) ──────────────────

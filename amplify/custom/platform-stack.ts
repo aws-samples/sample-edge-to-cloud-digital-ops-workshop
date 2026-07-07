@@ -40,7 +40,19 @@ import {
 import { CfnApplication as CfnFlinkApplication } from "aws-cdk-lib/aws-kinesisanalyticsv2";
 import { Construct } from "constructs";
 
-export interface PlatformStackProps extends StackProps {}
+export interface PlatformStackProps extends StackProps {
+  /**
+   * Whether to create the Managed Flink app. Defaults to true.
+   *
+   * The Flink app reads its code JAR from the shared S3 bucket created in
+   * this same stack — on a fresh account that bucket (and JAR) don't exist
+   * yet, so the very first deploy must skip the Flink app or CloudFormation
+   * rolls back the entire stack (VPCs/EKS/MSK included) when it can't find
+   * the JAR. scripts/sandbox-all.sh sets this to false for that first pass,
+   * uploads the JAR once the bucket exists, then redeploys with it back on.
+   */
+  readonly deployFlinkApp?: boolean;
+}
 
 /**
  * Shared platform infrastructure — deployed once per account/region.
@@ -350,7 +362,7 @@ export class PlatformStack extends Stack {
     // ── Managed Flink (MSK → Iceberg → S3) ──────────────────────────────────
     // Reads raw.telemetry from MSK via IAM auth, writes Apache Iceberg table
     // to S3 via GlueCatalog so Athena sees live snapshots.
-
+    if (props?.deployFlinkApp !== false) {
     // Resolve IAM bootstrap broker string (port 9098) via custom resource.
     const mskBootstrapIamLookup = new AwsCustomResource(this, "MskBootstrapIamLookup", {
       onCreate: {
@@ -530,6 +542,7 @@ export class PlatformStack extends Stack {
       exportName: "workshop-platform-flink-app-name",
       value: flinkApp.ref,
     });
+    }
 
     // Fleet Indexing: enable REGISTRY_AND_SHADOW with named shadow indexing.
     // Required for Session 3 shadow-based fleet queries

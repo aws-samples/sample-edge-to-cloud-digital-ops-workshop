@@ -40,10 +40,25 @@ else
 fi
 
 if [[ -z "$PLATFORM_STACK" ]]; then
+  # The Managed Flink app reads its code JAR from the shared bucket this same
+  # stack creates. On a fresh account neither exists yet, so deploy without
+  # the Flink app first — scripts/sandbox-all.sh is what actually builds and
+  # uploads the JAR and redeploys with the Flink app enabled; this path just
+  # needs to not roll back everything else while waiting for that to happen.
+  ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+  DEPLOY_CONTEXT_ARGS=()
+  if ! aws s3api head-object \
+      --bucket "workshop-platform-${ACCOUNT_ID}" \
+      --key "flink-apps/flink-iceberg-sink-1.0.0.jar" >/dev/null 2>&1; then
+    echo ">>> Flink JAR not found yet — deploying platform stack without the Flink app."
+    echo ">>> Run scripts/sandbox-all.sh once to build/upload the JAR and enable it."
+    DEPLOY_CONTEXT_ARGS=(--context deployFlinkApp=false)
+  fi
   echo ">>> Deploying WorkshopPlatformStack..."
   npx cdk deploy \
     --app "$PLATFORM_APP" \
     --require-approval never \
+    "${DEPLOY_CONTEXT_ARGS[@]}" \
     "WorkshopPlatformStack"
   echo ">>> Platform stack deployed."
 fi
