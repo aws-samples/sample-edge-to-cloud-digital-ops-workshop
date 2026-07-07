@@ -202,7 +202,9 @@ jobs:
             Bash(openssl *),
             Bash(gh *),
             Bash(npx *),
-            Bash(tsc *)
+            Bash(tsc *),
+            Bash(mkdocs *),
+            Bash(python*)
             "
 
       - name: Remove agent-working label
