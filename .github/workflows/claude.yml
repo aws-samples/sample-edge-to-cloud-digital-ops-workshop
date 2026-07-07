@@ -180,23 +180,31 @@ jobs:
               '  (raw | try (fromjson|true) catch false) as $ok\n'
               '  | if $ok then pad0(ind) + key + ":" + ((raw|fromjson) | toyaml(ind+2)) else emit_scalar(key; raw; ind) end;\n'
               'sub("^[^ ]+ ";"") | fromjson as $e\n'
-              '| [ ($e.attributes["event.timestamp"] // ""),\n'
-              '( "- time:  \\"\\($e.attributes["event.timestamp"] // "" | .[11:23])\\""\n'
-              '  + "\\n  event: \\($e.body // "" | ltrimstr("claude_code."))"\n'
-              '  + ( ($e.attributes.prompt // $e.attributes.response) | if . then "\\n" + emit_scalar("message"; .; 2) else "" end )\n'
-              '  + ( if ($e.body // "" | test("claude_code.tool_")) then\n'
-              '        "\\n  tool:   \\($e.attributes.tool_name // "")"\n'
-              '        + (if $e.attributes.decision then "\\n  decision: \\($e.attributes.decision)" else "" end)\n'
-              '        + (if $e.attributes.success then "\\n  success: \\($e.attributes.success)" else "" end)\n'
-              '        + (if $e.attributes.tool_input then "\\n" + emit_json("input"; $e.attributes.tool_input; 2) else "" end)\n'
-              '      else "" end )\n'
-              '  + ( if ($e.body // "") == "claude_code.api_request" then\n'
-              '        "\\n  api:    {model: \\($e.attributes.model // ""), in: \\($e.attributes.input_tokens // 0), out: \\($e.attributes.output_tokens // 0), cost_usd: \\($e.attributes.cost_usd // 0)}"\n'
-              '      else "" end )\n'
-              '  + ( if ($e.body // "" | test("api_(request|response)_body")) then\n'
-              '        if $show_bodies == "1" then "\\n  model:  \\($e.attributes.model // "")\\n" + emit_json("api_body"; ($e.attributes.body // "\\"\\""); 2)\n'
-              '        else "\\n  model:  \\($e.attributes.model // "")  # full JSON hidden — SHOW_BODIES=1 (\\($e.attributes.body_length // "?") bytes)" end\n'
-              '      else "" end ) ) ] | @tsv'
+              '| ($e.body // "") as $b\n'
+              '| ($e.attributes.tool_name // "") as $tn\n'
+              '# Keep only conversation-relevant events. Drop the plumbing:\n'
+              '# api_request (token/cost only), mcp_server_connection, tool_decision,\n'
+              '# and ToolSearch tool_results — none of that reflects what the agent\n'
+              '# is doing. Bash/other tool_results keep their command/args. The full\n'
+              '# api_request_body/api_response_body events are hidden unless SHOW_BODIES=1.\n'
+              '| if ( $b=="claude_code.user_prompt"\n'
+              '       or $b=="claude_code.assistant_response"\n'
+              '       or ($b=="claude_code.tool_result" and $tn!="ToolSearch")\n'
+              '       or ($show_bodies=="1" and ($b|test("api_(request|response)_body"))) )\n'
+              '  then\n'
+              '  [ ($e.attributes["event.timestamp"] // ""),\n'
+              '  ( "- time:  \\"\\($e.attributes["event.timestamp"] // "" | .[11:23])\\""\n'
+              '    + "\\n  event: \\($b | ltrimstr("claude_code."))"\n'
+              '    + ( ($e.attributes.prompt // $e.attributes.response) | if . then "\\n" + emit_scalar("message"; .; 2) else "" end )\n'
+              '    + ( if $b=="claude_code.tool_result" then\n'
+              '          "\\n  tool:   \\($tn)"\n'
+              '          + (if $e.attributes.success then "\\n  success: \\($e.attributes.success)" else "" end)\n'
+              '          + (if $e.attributes.tool_input then "\\n" + emit_json("input"; $e.attributes.tool_input; 2) else "" end)\n'
+              '        else "" end )\n'
+              '    + ( if ($b|test("api_(request|response)_body")) then\n'
+              '          "\\n  model:  \\($e.attributes.model // "")\\n" + emit_json("api_body"; ($e.attributes.body // "\\"\\""); 2)\n'
+              '        else "" end ) ) ] | @tsv\n'
+              '  else empty end'
           )
           tail_cmd = (
               "jqf=$(mktemp); cat > \"$jqf\" <<'JQ'\n"
@@ -226,9 +234,10 @@ jobs:
           # the reader clicks to expand, then copies with one click. A blank line
           # after </summary> and around the fence is required for GitHub to render
           # the code block (and its copy button) inside the disclosure.
-          print("\n<details>\n<summary>▶ Or follow it live in your terminal as YAML "
-                "(polls every 3s; prompts, responses, tool args, token/cost). Prefix "
-                "<code>SHOW_BODIES=1</code> for full API JSON. Needs AWS creds + <code>jq</code>.</summary>\n")
+          print("\n<details>\n<summary>▶ Or follow the conversation live in your terminal as YAML "
+                "(polls every 3s; prompts, responses, and tool calls with their args). Prefix "
+                "<code>SHOW_BODIES=1</code> to also dump the full API request/response JSON. "
+                "Needs AWS creds + <code>jq</code>.</summary>\n")
           print("```bash\n%s\n```\n" % tail_cmd)
           print("</details>")
           print("\n_All three are scoped to this run's log stream. The console links require "
