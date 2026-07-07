@@ -186,7 +186,7 @@ jobs:
               "# Regex-scrape id->output (survives the 60KB inline truncation, which breaks fromjson).\n"
               "# NOTE: ids contain underscores, so the char class must include _.\n"
               "| ( [ $events[] | select(.body==\"claude_code.api_request_body\") | .attributes.body ] | join(\"\\n\") ) as $bodies\n"
-              "| ( reduce ( $bodies | scan(\"\\\"tool_use_id\\\":\\\"(toolu_[A-Za-z0-9_]+)\\\",\\\"type\\\":\\\"tool_result\\\",\\\"content\\\":\\\"([^\\\"]*)\\\"\") ) as $m\n"
+              "| ( reduce ( $bodies | scan(\"\\\"tool_use_id\\\":\\\"(toolu_[A-Za-z0-9_]+)\\\",\\\"type\\\":\\\"tool_result\\\",\\\"content\\\":\\\"((?:[^\\\"\\\\\\\\]|\\\\\\\\.)*)\\\"\") ) as $m\n"
               "      ({}; .[$m[0]] = ($m[1] | gsub(\"\\\\\\\\n\";\"\\n\") | gsub(\"\\\\\\\\t\";\"\\t\") | gsub(\"\\\\\\\\\\\"\";\"\\\"\")) ) ) as $outmap\n"
               "| $events[]\n"
               "| .body as $b | (.attributes.tool_name // \"\") as $tn | (.attributes.tool_use_id // \"\") as $tid\n"
