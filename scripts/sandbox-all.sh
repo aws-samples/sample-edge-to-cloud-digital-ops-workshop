@@ -155,7 +155,7 @@ if [[ -n "$MSK_SCRAM_BROKERS" && -n "$ADMIN_SECRET_NAME" ]]; then
   ADMIN_USER=$(echo "$ADMIN_SECRET" | python3 -c "import json,sys; print(json.load(sys.stdin)['username'])" 2>/dev/null)
   ADMIN_PASS=$(echo "$ADMIN_SECRET" | python3 -c "import json,sys; print(json.load(sys.stdin)['password'])" 2>/dev/null)
 
-  aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "${AWS_DEFAULT_REGION:-us-east-1}" 2>/dev/null
+  aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "${AWS_DEFAULT_REGION:-us-east-1}" 2>/dev/null || true
 
   # Write manifest to a temp file using python to safely embed shell command with special chars
   TOPIC_POD_MANIFEST_FILE=$(mktemp /tmp/kafka-topic-init.XXXXXX)
@@ -197,13 +197,13 @@ with open(outfile, "w") as f:
     yaml.dump(manifest, f, default_flow_style=False)
 PYEOF
 
-  kubectl delete pod kafka-topic-init --ignore-not-found 2>/dev/null
-  kubectl apply -f "$TOPIC_POD_MANIFEST_FILE" 2>/dev/null
+  kubectl delete pod kafka-topic-init --ignore-not-found 2>/dev/null || true
+  kubectl apply -f "$TOPIC_POD_MANIFEST_FILE" 2>/dev/null || true
   rm -f "$TOPIC_POD_MANIFEST_FILE"
   echo ">>> Waiting for raw.telemetry topic creation..."
   kubectl wait --for=condition=ready pod/kafka-topic-init --timeout=120s 2>/dev/null || true
-  TOPIC_RESULT=$(kubectl logs kafka-topic-init 2>/dev/null | grep -E "TOPIC_OK|TOPIC_FAILED" | tail -1)
-  kubectl delete pod kafka-topic-init --ignore-not-found 2>/dev/null
+  TOPIC_RESULT=$(kubectl logs kafka-topic-init 2>/dev/null | grep -E "TOPIC_OK|TOPIC_FAILED" | tail -1) || true
+  kubectl delete pod kafka-topic-init --ignore-not-found 2>/dev/null || true
   echo ">>> Kafka topic init: ${TOPIC_RESULT:-completed}"
 else
   echo ">>> WARNING: Could not resolve MSK brokers or admin secret — skipping topic creation."
