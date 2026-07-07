@@ -11,7 +11,9 @@ node_modules
 .DS_Store
 .amplify
 amplify_outputs.json
-CLAUDE.md
+# CLAUDE.md is committed (public guidance). Internal/machine-local notes live in
+# CLAUDE.private.md, which it imports and which stays local-only.
+CLAUDE.private.md
 cdk.out**
 *.js.map
 
