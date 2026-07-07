@@ -59,8 +59,9 @@ if [[ -n "$FLINK_APP_NAME" ]]; then
     echo ">>> Starting Flink application $FLINK_APP_NAME..."
     aws kinesisanalyticsv2 start-application \
       --application-name "$FLINK_APP_NAME" \
-      --run-configuration '{"ApplicationRestoreConfiguration":{"ApplicationRestoreType":"SKIP_RESTORE_FROM_SNAPSHOT"}}'
-    echo ">>> Flink application start initiated (status transitions to STARTING then RUNNING)."
+      --run-configuration '{"ApplicationRestoreConfiguration":{"ApplicationRestoreType":"SKIP_RESTORE_FROM_SNAPSHOT"}}' \
+      && echo ">>> Flink application start initiated (status transitions to STARTING then RUNNING)." \
+      || echo ">>> WARNING: kinesisanalyticsv2:StartApplication failed (e.g. missing IAM permission) — continuing without starting Flink."
   elif [[ "$FLINK_STATUS" == "RUNNING" || "$FLINK_STATUS" == "STARTING" ]]; then
     echo ">>> Flink application $FLINK_APP_NAME already $FLINK_STATUS — skipping start."
   else
