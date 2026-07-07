@@ -286,13 +286,15 @@ jobs:
           #                               / api_response_body log events (≤60KB).
           #   ⚠ This logs the ENTIRE conversation (prompts, tool I/O, responses)
           #   in plaintext to CloudWatch on every request — high volume + sensitive.
-          #   OTEL_LOG_TOOL_CONTENT (full tool bodies) is intentionally NOT set:
-          #   it only emits to trace spans (needs CLAUDE_CODE_ENHANCED_TELEMETRY_BETA),
-          #   not this logs pipeline.
+          #   OTEL_LOG_TOOL_CONTENT — full tool input+output bodies. Docs say it
+          #   needs the tracing beta and may emit to spans; we set the beta and
+          #   are TESTING whether the tool OUTPUT also lands in the logs pipeline.
           # Docs: https://code.claude.com/docs/en/monitoring-usage
           OTEL_LOG_USER_PROMPTS: "1"
           OTEL_LOG_ASSISTANT_RESPONSES: "1"
           OTEL_LOG_TOOL_DETAILS: "1"
+          OTEL_LOG_TOOL_CONTENT: "1"
+          CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: "1"
           OTEL_LOG_RAW_API_BODIES: "1"
         with:
           github_token: ${{ github.token }}
