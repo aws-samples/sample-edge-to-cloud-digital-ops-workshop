@@ -164,47 +164,52 @@ jobs:
           # emits JSON as YAML with block scalars, so it reads like a transcript.
           # First @tsv column is the timestamp (dedupe key); second is the block.
           JQ_PROG = (
-              'def pad0(n): " " * n;\n'
-              'def toyaml(ind):\n'
-              '  if type == "object" then\n'
-              '    if (.|length)==0 then " {}"\n'
-              '    else "\\n" + ( to_entries | map( pad0(ind) + (.key|tostring) + ":" + (.value | toyaml(ind+2)) ) | join("\\n") ) end\n'
-              '  elif type == "array" then\n'
-              '    if (.|length)==0 then " []"\n'
-              '    else "\\n" + ( map( ( toyaml(ind+2) | ltrimstr("\\n") ) as $r | if (type=="object" or type=="array") then pad0(ind) + "- " + ($r[ind+2:]) else pad0(ind) + "-" + $r end ) | join("\\n") ) end\n'
-              '  elif type == "string" then\n'
-              '    if (. | contains("\\n")) then " |\\n" + ( split("\\n") | map(pad0(ind+2) + .) | join("\\n") ) else " " + (@json) end\n'
-              '  else " " + (tostring) end;\n'
-              'def emit_scalar(key; val; ind): pad0(ind) + key + ":" + (val | toyaml(ind));\n'
-              'def emit_json(key; raw; ind):\n'
-              '  (raw | try (fromjson|true) catch false) as $ok\n'
-              '  | if $ok then pad0(ind) + key + ":" + ((raw|fromjson) | toyaml(ind+2)) else emit_scalar(key; raw; ind) end;\n'
-              'sub("^[^ ]+ ";"") | fromjson as $e\n'
-              '| ($e.body // "") as $b\n'
-              '| ($e.attributes.tool_name // "") as $tn\n'
-              '# Keep only conversation-relevant events. Drop the plumbing:\n'
-              '# api_request (token/cost only), mcp_server_connection, tool_decision,\n'
-              '# and ToolSearch tool_results — none of that reflects what the agent\n'
-              '# is doing. Bash/other tool_results keep their command/args. The full\n'
-              '# api_request_body/api_response_body events are hidden unless SHOW_BODIES=1.\n'
-              '| if ( $b=="claude_code.user_prompt"\n'
-              '       or $b=="claude_code.assistant_response"\n'
-              '       or ($b=="claude_code.tool_result" and $tn!="ToolSearch")\n'
-              '       or ($show_bodies=="1" and ($b|test("api_(request|response)_body"))) )\n'
-              '  then\n'
-              '  [ ($e.attributes["event.timestamp"] // ""),\n'
-              '  ( "- time:  \\"\\($e.attributes["event.timestamp"] // "" | .[11:23])\\""\n'
-              '    + "\\n  event: \\($b | ltrimstr("claude_code."))"\n'
-              '    + ( ($e.attributes.prompt // $e.attributes.response) | if . then "\\n" + emit_scalar("message"; .; 2) else "" end )\n'
-              '    + ( if $b=="claude_code.tool_result" then\n'
-              '          "\\n  tool:   \\($tn)"\n'
-              '          + (if $e.attributes.success then "\\n  success: \\($e.attributes.success)" else "" end)\n'
-              '          + (if $e.attributes.tool_input then "\\n" + emit_json("input"; $e.attributes.tool_input; 2) else "" end)\n'
-              '        else "" end )\n'
-              '    + ( if ($b|test("api_(request|response)_body")) then\n'
-              '          "\\n  model:  \\($e.attributes.model // "")\\n" + emit_json("api_body"; ($e.attributes.body // "\\"\\""); 2)\n'
-              '        else "" end ) ) ] | @tsv\n'
-              '  else empty end'
+              "def pad0(n): \" \" * n;\n"
+              "def toyaml(ind):\n"
+              "  if type == \"object\" then\n"
+              "    if (.|length)==0 then \" {}\"\n"
+              "    else \"\\n\" + ( to_entries | map( pad0(ind) + (.key|tostring) + \":\" + (.value | toyaml(ind+2)) ) | join(\"\\n\") ) end\n"
+              "  elif type == \"array\" then\n"
+              "    if (.|length)==0 then \" []\"\n"
+              "    else \"\\n\" + ( map( ( toyaml(ind+2) | ltrimstr(\"\\n\") ) as $r | if (type==\"object\" or type==\"array\") then pad0(ind) + \"- \" + ($r[ind+2:]) else pad0(ind) + \"-\" + $r end ) | join(\"\\n\") ) end\n"
+              "  elif type == \"string\" then\n"
+              "    if (. | contains(\"\\n\")) then \" |\\n\" + ( split(\"\\n\") | map(pad0(ind+2) + .) | join(\"\\n\") ) else \" \" + (@json) end\n"
+              "  else \" \" + (tostring) end;\n"
+              "def emit_scalar(key; val; ind): pad0(ind) + key + \":\" + (val | toyaml(ind));\n"
+              "def emit_json(key; raw; ind):\n"
+              "  (raw | try (fromjson|true) catch false) as $ok\n"
+              "  | if $ok then pad0(ind) + key + \":\" + ((raw|fromjson) | toyaml(ind+2)) else emit_scalar(key; raw; ind) end;\n"
+              "# Slurp all lines: strip the \"<ts> \" prefix, parse each event.\n"
+              "[ split(\"\\n\")[] | select(length>0) | sub(\"^[^ ]+ \";\"\") | (try fromjson catch empty) ] as $events\n"
+              "# Tool OUTPUT isn't on the tool_result event (only a byte count). It lives in the\n"
+              "# api_request_body events (the result fed back to the model), keyed by tool_use_id.\n"
+              "# Regex-scrape id->output (survives the 60KB inline truncation, which breaks fromjson).\n"
+              "# NOTE: ids contain underscores, so the char class must include _.\n"
+              "| ( [ $events[] | select(.body==\"claude_code.api_request_body\") | .attributes.body ] | join(\"\\n\") ) as $bodies\n"
+              "| ( reduce ( $bodies | scan(\"\\\"tool_use_id\\\":\\\"(toolu_[A-Za-z0-9_]+)\\\",\\\"type\\\":\\\"tool_result\\\",\\\"content\\\":\\\"([^\\\"]*)\\\"\") ) as $m\n"
+              "      ({}; .[$m[0]] = ($m[1] | gsub(\"\\\\\\\\n\";\"\\n\") | gsub(\"\\\\\\\\t\";\"\\t\") | gsub(\"\\\\\\\\\\\"\";\"\\\"\")) ) ) as $outmap\n"
+              "| $events[]\n"
+              "| .body as $b | (.attributes.tool_name // \"\") as $tn | (.attributes.tool_use_id // \"\") as $tid\n"
+              "# Keep conversation-relevant events only; api bodies only under SHOW_BODIES=1.\n"
+              "| if ( $b==\"claude_code.user_prompt\"\n"
+              "       or $b==\"claude_code.assistant_response\"\n"
+              "       or ($b==\"claude_code.tool_result\" and $tn!=\"ToolSearch\")\n"
+              "       or ($show_bodies==\"1\" and ($b|test(\"api_(request|response)_body\"))) )\n"
+              "  then\n"
+              "  [ (.attributes[\"event.timestamp\"] // \"\"),\n"
+              "  ( \"- time:  \\\"\\(.attributes[\"event.timestamp\"] // \"\" | .[11:23])\\\"\"\n"
+              "    + \"\\n  event: \\($b | ltrimstr(\"claude_code.\"))\"\n"
+              "    + ( (.attributes.prompt // .attributes.response) | if . then \"\\n\" + emit_scalar(\"message\"; .; 2) else \"\" end )\n"
+              "    + ( if $b==\"claude_code.tool_result\" then\n"
+              "          \"\\n  tool:   \\($tn)\"\n"
+              "          + (if .attributes.tool_use_id then \"\\n  id:     \\(.attributes.tool_use_id)\" else \"\" end)\n"
+              "          + (if .attributes.tool_input then \"\\n\" + emit_json(\"input\"; .attributes.tool_input; 2) else \"\" end)\n"
+              "          + ( ($outmap[$tid]) | if . then \"\\n\" + emit_scalar(\"output\"; .; 2) else \"\" end )\n"
+              "        else \"\" end )\n"
+              "    + ( if ($b|test(\"api_(request|response)_body\")) then\n"
+              "          \"\\n  model:  \\(.attributes.model // \"\")\\n\" + emit_json(\"api_body\"; (.attributes.body // \"\\\"\\\"\"); 2)\n"
+              "        else \"\" end ) ) ] | @tsv\n"
+              "  else empty end"
           )
           tail_cmd = (
               "jqf=$(mktemp); cat > \"$jqf\" <<'JQ'\n"
@@ -214,7 +219,7 @@ jobs:
               "while true; do\n"
               "  aws logs tail %s --region %s --log-stream-names \"%s\" \\\n"
               "    --since 1h --format short 2>/dev/null \\\n"
-              "  | jq -Rr --arg show_bodies \"${SHOW_BODIES:-}\" -f \"$jqf\" \\\n"
+              "  | jq -Rr -s --arg show_bodies \"${SHOW_BODIES:-}\" -f \"$jqf\" \\\n"
               "  | while IFS=$'\\t' read -r ts block; do\n"
               "      grep -qF \"$ts\" \"$seen\" && continue\n"
               "      echo \"$ts\" >> \"$seen\"\n"
@@ -286,15 +291,16 @@ jobs:
           #                               / api_response_body log events (≤60KB).
           #   ⚠ This logs the ENTIRE conversation (prompts, tool I/O, responses)
           #   in plaintext to CloudWatch on every request — high volume + sensitive.
-          #   OTEL_LOG_TOOL_CONTENT — full tool input+output bodies. Docs say it
-          #   needs the tracing beta and may emit to spans; we set the beta and
-          #   are TESTING whether the tool OUTPUT also lands in the logs pipeline.
+          #   OTEL_LOG_TOOL_CONTENT is intentionally NOT set: tested empirically
+          #   (run 28887588635) — it + CLAUDE_CODE_ENHANCED_TELEMETRY_BETA add
+          #   nothing to the LOGS pipeline (tool output goes to trace spans / X-Ray,
+          #   which the OTLP logs endpoint doesn't receive). The tool OUTPUT is only
+          #   recoverable from the api_request_body events (as tool_result content,
+          #   keyed by tool_use_id) — which is what the terminal transcript joins on.
           # Docs: https://code.claude.com/docs/en/monitoring-usage
           OTEL_LOG_USER_PROMPTS: "1"
           OTEL_LOG_ASSISTANT_RESPONSES: "1"
           OTEL_LOG_TOOL_DETAILS: "1"
-          OTEL_LOG_TOOL_CONTENT: "1"
-          CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: "1"
           OTEL_LOG_RAW_API_BODIES: "1"
         with:
           github_token: ${{ github.token }}
