@@ -140,12 +140,38 @@ jobs:
                     "~editorString~'%s~source~(~'%s))") % (enc(query), enc(group))
           insights_url = base + "logsV2:logs-insights?queryDetail=" + detail
 
+          # ── 3. Terminal one-liner: aws logs tail --follow | jq transcript ────
+          # `--format short` emits one "<ts> <compact-json>" line per event. jq's
+          # -R reads each line as a string; sub() drops the leading timestamp so
+          # fromjson gets pure JSON, then we build pipe-separated columns:
+          # time | event | message | tool. `--since 1h` seeds the session-so-far
+          # immediately (each run has its own stream, so you see where the agent
+          # is on launch), then `--follow` tails live. Raw string keeps jq's
+          # bare double-quotes and \( ) interpolation intact.
+          jqf = (
+              r'''sub("^[^ ]+ ";"") | fromjson | ['''
+              r'''(.attributes["event.timestamp"] // "")[11:23], '''
+              r'''(.body // "" | ltrimstr("claude_code.")), '''
+              r'''(.attributes.prompt // .attributes.response // .attributes.tool_name // ""), '''
+              r'''(if (.body // "" | test("tool_")) then "tool=\(.attributes.tool_name // "") \(.attributes.decision // "")\(.attributes.success // "")" else "" end)'''
+              r'''] | join("  |  ")'''
+          )
+          tail_cmd = (
+              "aws logs tail %s --region %s --log-stream-names \"%s\" \\\n"
+              "  --since 1h --follow --format short \\\n"
+              "  | jq -Rr --unbuffered '%s'"
+          ) % (group, region, stream, jqf)
+
           print("## 📊 CloudWatch logs for this run\n")
           print("- **[Live Tail](%s)** — auto-streaming raw log events as Claude works "
                 "(filtered to this session)." % live_url)
           print("- **[Logs Insights transcript](%s)** — timestamp-first, readable view with "
                 "`message` and `tool_call` columns; press **Run query** to refresh." % insights_url)
-          print("\n_Both are scoped to this run's log stream. Requires console sign-in to the AWS account._")
+          print("\nOr **follow it live in your terminal** (seeds the session so far, then tails). "
+                "Needs AWS creds for this account + `jq`:\n")
+          print("```bash\n%s\n```" % tail_cmd)
+          print("\n_All three are scoped to this run's log stream. The console links require "
+                "sign-in to the AWS account._")
           PY
           gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file /tmp/cw-comment.md
 
@@ -204,7 +230,8 @@ jobs:
             Bash(npx *),
             Bash(tsc *),
             Bash(mkdocs *),
-            Bash(python*)
+            Bash(python*),
+            Bash(pip*)
             "
 
       - name: Remove agent-working label
