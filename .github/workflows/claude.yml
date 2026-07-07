@@ -155,14 +155,31 @@ jobs:
           # fresh events print. `--format short` gives "<ts> <compact-json>" per
           # line; jq's sub() strips the leading ts so fromjson gets pure JSON.
           # Raw string keeps jq's bare double-quotes and \( ) interpolation.
+          # The jq builds one YAML object per event. First array element is the
+          # event.timestamp (dedupe key for the outer loop); second is the YAML
+          # block. Columns: time, event, message (prompt/response text), tool +
+          # tool_input (arguments) on tool events, a compact api {model,tokens,cost}
+          # summary on api_request, and for the big api_request_body/api_response_body
+          # events either the full JSON (when SHOW_BODIES=1) or a one-line note with
+          # the byte size (default — those bodies are the whole conversation, huge).
           jqf = (
               r'''sub("^[^ ]+ ";"") | fromjson '''
               r'''| [ (.attributes["event.timestamp"] // ""), '''
               r'''( "- time: \"\(.attributes["event.timestamp"] // "" | .[11:23])\"\n'''
-              r'''  event: \(.body // "" | ltrimstr("claude_code."))\n'''
-              r'''  message: \((.attributes.prompt // .attributes.response // .attributes.tool_name // "") | @json)" '''
-              r'''+ (if (.body // "" | test("tool_")) '''
-              r'''then "\n  tool: {name: \(.attributes.tool_name // ""), decision: \(.attributes.decision // "-"), success: \(.attributes.success // "-"), id: \(.attributes.tool_use_id // "")}" '''
+              r'''  event: \(.body // "" | ltrimstr("claude_code."))" '''
+              r'''+ ((.attributes.prompt // .attributes.response) | if . then "\n  message: \(. | @json)" else "" end) '''
+              r'''+ (if (.body // "" | test("claude_code.tool_")) then '''
+              r'''"\n  tool: \(.attributes.tool_name // "")" '''
+              r'''+ (if .attributes.decision then "\n  decision: \(.attributes.decision)" else "" end) '''
+              r'''+ (if .attributes.success then "\n  success: \(.attributes.success)" else "" end) '''
+              r'''+ (if .attributes.tool_input then "\n  tool_input: \(.attributes.tool_input | @json)" else "" end) '''
+              r'''else "" end) '''
+              r'''+ (if (.body // "") == "claude_code.api_request" then '''
+              r'''"\n  api: {model: \(.attributes.model // ""), in: \(.attributes.input_tokens // 0), out: \(.attributes.output_tokens // 0), cost_usd: \(.attributes.cost_usd // 0)}" '''
+              r'''else "" end) '''
+              r'''+ (if (.body // "" | test("api_(request|response)_body")) then '''
+              r'''if $show_bodies == "1" then "\n  model: \(.attributes.model // "")\n  api_body: \(.attributes.body // "" | @json)" '''
+              r'''else "\n  model: \(.attributes.model // "")  # full JSON hidden — rerun with SHOW_BODIES=1 (\(.attributes.body_length // "?") bytes)" end '''
               r'''else "" end) ) ] | @tsv'''
           )
           tail_cmd = (
@@ -170,7 +187,7 @@ jobs:
               "while true; do\n"
               "  aws logs tail %s --region %s --log-stream-names \"%s\" \\\n"
               "    --since 1h --format short 2>/dev/null \\\n"
-              "  | jq -Rr '%s' \\\n"
+              "  | jq -Rr --arg show_bodies \"${SHOW_BODIES:-}\" '%s' \\\n"
               "  | while IFS=$'\\t' read -r ts block; do\n"
               "      grep -qF \"$ts\" \"$seen\" && continue\n"
               "      echo \"$ts\" >> \"$seen\"\n"
@@ -186,7 +203,10 @@ jobs:
           print("- **[Logs Insights transcript](%s)** — timestamp-first, readable view with "
                 "`message` and `tool_call` columns; press **Run query** to refresh." % insights_url)
           print("\nOr **watch it in your terminal as YAML** — polls every 3s and prints new "
-                "events only (Ctrl-C to stop). Needs AWS creds for this account + `jq`:\n")
+                "events only (Ctrl-C to stop). Shows prompts, responses, tool args (`tool_input`) "
+                "and a compact per-request token/cost line. Prefix with `SHOW_BODIES=1` to expand "
+                "the full API request/response JSON (the whole conversation — large). Needs AWS "
+                "creds for this account + `jq`:\n")
           print("```bash\n%s\n```" % tail_cmd)
           print("\n_All three are scoped to this run's log stream. The console links require "
                 "sign-in to the AWS account._")
