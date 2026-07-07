@@ -68,6 +68,21 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-duration-seconds: 21600
 
+      - name: Create OTLP log stream for this run
+        # The CloudWatch Logs OTLP endpoint writes to a specific log group/stream
+        # named via the x-aws-log-* headers below. The stream must exist first,
+        # so create a per-run stream using the OIDC role (which has
+        # logs:CreateLogStream on /github-actions/*). The group + bearer-token
+        # auth are provisioned by deploy-to-repo.sh.
+        env:
+          OTLP_LOG_GROUP: /github-actions/claude-code-otlp
+          OTLP_LOG_STREAM: ${{ github.repository }}/${{ github.run_id }}
+        run: |
+          aws logs create-log-stream \
+            --region "$AWS_REGION" \
+            --log-group-name "$OTLP_LOG_GROUP" \
+            --log-stream-name "$OTLP_LOG_STREAM" 2>/dev/null || true
+
       - uses: anthropics/claude-code-action@v1
         timeout-minutes: 300
         env:
@@ -87,6 +102,19 @@ jobs:
           OTEL_EXPORTER_OTLP_METRICS_HEADERS: "Authorization=Bearer ${{ secrets.CW_METRICS_API_KEY }}"
           # Flush metrics quickly so a short session still reports before exit.
           OTEL_METRIC_EXPORT_INTERVAL: "10000"
+          # ── Live telemetry → CloudWatch (log events) ───────────────────────
+          # Ships user_prompt / tool_decision / api_error events to the Logs
+          # OTLP endpoint. Needs its own bearer token (logs scope) plus the
+          # x-aws-log-group / x-aws-log-stream headers that route the events to
+          # the bearer-auth-enabled group and the per-run stream created above.
+          # Docs: https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/CWL_HTTP_Endpoints_BearerTokenAuth.html
+          OTEL_LOGS_EXPORTER: otlp
+          OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: https://logs.${{ env.AWS_REGION }}.amazonaws.com/v1/logs
+          OTEL_EXPORTER_OTLP_LOGS_HEADERS: "Authorization=Bearer ${{ secrets.CW_LOGS_API_KEY }},x-aws-log-group=/github-actions/claude-code-otlp,x-aws-log-stream=${{ github.repository }}/${{ github.run_id }}"
+          OTEL_LOGS_EXPORT_INTERVAL: "5000"
+          # Log the prompt/tool decisions (no raw tool I/O) so the events carry
+          # useful audit content. Prompt/response bodies stay off by default.
+          OTEL_LOG_USER_PROMPTS: "1"
         with:
           github_token: ${{ github.token }}
           use_bedrock: "true"
