@@ -202,7 +202,7 @@ jobs:
               "# Streaming state machine: om = accumulated id->output; held = tool_results awaiting output.\n"
               "foreach inputs as $line (\n"
               "  {om:{}, held:[], out:[]};\n"
-              "  ( $line | try fromjson catch null ) as $e\n"
+              "  ( $line | sub(\"^[^{]*\";\"\") | try fromjson catch null ) as $e\n"
               "  | if $e == null then .out=[]\n"
               "    else ($e.body // \"\") as $b | ($e.attributes.tool_name // \"\") as $tn | ($e.attributes.tool_use_id // \"\") as $tid\n"
               "    | if $b==\"claude_code.api_request_body\"\n"
@@ -227,15 +227,23 @@ jobs:
               ")"
           )
           arn = "arn:aws:logs:%s:%s:log-group:%s" % (region, account, group)
+          # First replay the last hour with `aws logs tail --since 1h` (it exits
+          # cleanly, so no piped-stdout buffering problem — that only bites the
+          # never-exiting --follow), then hand off to start-live-tail for the live
+          # stream. Both go into ONE jq so the streaming state machine sees history
+          # then live as a single continuous stream. History lines have a "<ts> "
+          # prefix, live lines are raw JSON — the jq's sub("^[^{]*";"") tolerates both.
           tail_cmd = (
               "jqf=$(mktemp); cat > \"$jqf\" <<'JQ'\n"
               "%s\n"
               "JQ\n"
-              "aws logs start-live-tail --region %s \\\n"
-              "  --log-group-identifiers \"%s\" \\\n"
-              "  --log-stream-names \"%s\" --mode print-only \\\n"
+              "{ aws logs tail %s --region %s --log-stream-names \"%s\" \\\n"
+              "    --since 1h --format short 2>/dev/null;\n"
+              "  aws logs start-live-tail --region %s \\\n"
+              "    --log-group-identifiers \"%s\" \\\n"
+              "    --log-stream-names \"%s\" --mode print-only; } \\\n"
               "  | jq -Rr --unbuffered --arg show_bodies \"${SHOW_BODIES:-}\" -f \"$jqf\""
-          ) % (JQ_PROG, region, arn, stream)
+          ) % (JQ_PROG, group, region, stream, region, arn, stream)
 
           print("## 📊 CloudWatch logs for this run\n")
           print("- **[Live Tail](%s)** — auto-streaming raw log events as Claude works "
@@ -247,10 +255,10 @@ jobs:
           # the reader clicks to expand, then copies with one click. A blank line
           # after </summary> and around the fence is required for GitHub to render
           # the code block (and its copy button) inside the disclosure.
-          print("\n<details>\n<summary>▶ Or follow the conversation live in your terminal as YAML "
-                "(streams prompts, responses, and tool calls with their args + output as they "
-                "happen — start it while the run is going). Prefix <code>SHOW_BODIES=1</code> to "
-                "also dump the full API request/response JSON. Needs AWS creds + <code>jq</code>.</summary>\n")
+          print("\n<details>\n<summary>▶ Or follow the conversation in your terminal as YAML "
+                "(replays the last hour, then streams live — prompts, responses, and tool calls "
+                "with their args + output). Prefix <code>SHOW_BODIES=1</code> to also dump the full "
+                "API request/response JSON. Needs AWS creds + <code>jq</code>.</summary>\n")
           print("```bash\n%s\n```\n" % tail_cmd)
           print("</details>")
           print("\n_All three are scoped to this run's log stream. The console links require "
