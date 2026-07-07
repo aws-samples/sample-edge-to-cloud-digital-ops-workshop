@@ -83,6 +83,28 @@ jobs:
             --log-group-name "$OTLP_LOG_GROUP" \
             --log-stream-name "$OTLP_LOG_STREAM" 2>/dev/null || true
 
+      - name: Post CloudWatch log link
+        # Drop a comment on the issue/PR with a CloudWatch Live Tail deep-link for
+        # the OTLP log group. Posting before Claude runs means the link streams
+        # this run's events live as they arrive. The console hash-encodes the log
+        # group ARN (each special byte becomes '*' + 2 hex digits, e.g. ':'->'*3a',
+        # '/'->'*2f', '*'->'*2a') inside the ~(~'...) array literal.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number || github.event.pull_request.number }}
+          OTLP_LOG_GROUP: /github-actions/claude-code-otlp
+        run: |
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          ARN="arn:aws:logs:${AWS_REGION}:${ACCOUNT_ID}:log-group:${OTLP_LOG_GROUP}:*"
+          # Console hash-encoding: alnum and -._ pass through; everything else -> *<hex>.
+          ENC_ARN="$(python3 -c "import sys; print(''.join(c if c.isalnum() or c in '-._' else '*%02x'%ord(c) for c in sys.argv[1]))" "$ARN")"
+          URL="https://${AWS_REGION}.console.aws.amazon.com/cloudwatch/home?region=${AWS_REGION}#logsV2:live-tail?logGroupArns=~(~'${ENC_ARN})"
+          {
+            printf '📊 **Live CloudWatch logs for this run:** [open Live Tail in the AWS console](%s)\n\n' "$URL"
+            printf '_Streams Claude Code'"'"'s OTLP log events (prompts, tool decisions, API calls) in real time. In Live Tail, filter to log stream `%s` to isolate this run. Requires console sign-in to the AWS account._\n' "${GITHUB_REPOSITORY}/${GITHUB_RUN_ID}"
+          } > /tmp/cw-comment.md
+          gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file /tmp/cw-comment.md
+
       - uses: anthropics/claude-code-action@v1
         timeout-minutes: 300
         env:
@@ -138,12 +160,6 @@ jobs:
             Bash(npx *),
             Bash(tsc *)
             "
-
-      - name: Upload execution log to CloudWatch
-        if: always()
-        uses: ./.github/actions/upload-execution-log
-        with:
-          aws-region: ${{ env.AWS_REGION }}
 
       - name: Remove agent-working label
         if: always()
