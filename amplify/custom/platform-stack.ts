@@ -1,4 +1,4 @@
-import { Stack, StackProps, CfnOutput, CfnDeletionPolicy, RemovalPolicy } from "aws-cdk-lib";
+import { Stack, StackProps, CfnOutput, CfnDeletionPolicy, RemovalPolicy, Fn, CfnJson } from "aws-cdk-lib";
 import {
   Vpc,
   SubnetType,
@@ -16,6 +16,9 @@ import {
   ManagedPolicy,
   PolicyStatement,
   Effect,
+  FederatedPrincipal,
+  OpenIdConnectProvider,
+  Conditions,
 } from "aws-cdk-lib/aws-iam";
 import {
   CfnCluster as EksCfnCluster,
@@ -176,6 +179,52 @@ export class PlatformStack extends Stack {
       exportName: "workshop-eks-cluster-name",
       value: eksCluster.ref,
       description: "Run: aws eks update-kubeconfig --name workshop-eks to configure kubectl",
+    });
+
+    // ── IRSA for cloud RisingWave (S3 state store) ──────────────────────────
+    // One OIDC provider + one IAM role, shared across all participant namespaces.
+    // Each participant's risingwave-cloud ServiceAccount (created manually in
+    // Session 4, Block 1) assumes this role via IRSA to read/write its own
+    // workshop-<slot>-<account>-risingwave-state bucket.
+    const eksOidcProvider = new OpenIdConnectProvider(this, "EksOidcProvider", {
+      url: eksCluster.attrOpenIdConnectIssuerUrl,
+    });
+    const oidcProviderHost = Fn.select(1, Fn.split("//", eksCluster.attrOpenIdConnectIssuerUrl));
+    // Each condition operator's inner map has a key built from a deploy-time
+    // token (the OIDC host), so each map must be resolved via CfnJson rather
+    // than a plain object literal.
+    const audCondition = new CfnJson(this, "RisingwaveS3AudCondition", {
+      value: { [`${oidcProviderHost}:aud`]: "sts.amazonaws.com" },
+    });
+    const subCondition = new CfnJson(this, "RisingwaveS3SubCondition", {
+      value: { [`${oidcProviderHost}:sub`]: "system:serviceaccount:*:risingwave-cloud" },
+    });
+
+    const risingwaveS3Role = new Role(this, "RisingwaveS3Role", {
+      roleName: "workshop-risingwave-s3",
+      assumedBy: new FederatedPrincipal(
+        eksOidcProvider.openIdConnectProviderArn,
+        {
+          StringEquals: audCondition,
+          StringLike: subCondition,
+        } as unknown as Conditions,
+        "sts:AssumeRoleWithWebIdentity"
+      ),
+    });
+    risingwaveS3Role.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:ListBucket"],
+      resources: [`arn:aws:s3:::workshop-*-${this.account}-risingwave-state`],
+    }));
+    risingwaveS3Role.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      resources: [`arn:aws:s3:::workshop-*-${this.account}-risingwave-state/*`],
+    }));
+
+    new CfnOutput(this, "RisingwaveS3RoleArn", {
+      exportName: "workshop-platform-risingwave-s3-role-arn",
+      value: risingwaveS3Role.roleArn,
     });
 
     // ── Shared S3 bucket ─────────────────────────────────────────────────────
