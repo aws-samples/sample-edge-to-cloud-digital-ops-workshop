@@ -84,25 +84,53 @@ jobs:
             --log-stream-name "$OTLP_LOG_STREAM" 2>/dev/null || true
 
       - name: Post CloudWatch log link
-        # Drop a comment on the issue/PR with a CloudWatch Live Tail deep-link for
-        # the OTLP log group. Posting before Claude runs means the link streams
-        # this run's events live as they arrive. The console hash-encodes the log
-        # group ARN (each special byte becomes '*' + 2 hex digits, e.g. ':'->'*3a',
-        # '/'->'*2f', '*'->'*2a') inside the ~(~'...) array literal.
+        # Comment on the issue/PR with a CloudWatch Logs Insights deep-link that
+        # renders this run as a readable transcript: @timestamp first, then a
+        # unified "message" column (prompt / response / tool name / event body),
+        # then context columns (event, decision, model, cost, duration). The
+        # query is filtered to THIS run's log stream so only the invoked session
+        # shows — not other concurrent agent sessions. Logs Insights results are
+        # rendered client-side, so refreshing the query effectively tails the run.
+        # The link encodes the query in the console's rison fragment: unreserved
+        # chars pass through, everything else becomes '*' + 2 lowercase hex digits.
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ github.event.issue.number || github.event.pull_request.number }}
           OTLP_LOG_GROUP: /github-actions/claude-code-otlp
+          OTLP_LOG_STREAM: ${{ github.repository }}/${{ github.run_id }}
         run: |
-          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-          ARN="arn:aws:logs:${AWS_REGION}:${ACCOUNT_ID}:log-group:${OTLP_LOG_GROUP}:*"
-          # Console hash-encoding: alnum and -._ pass through; everything else -> *<hex>.
-          ENC_ARN="$(python3 -c "import sys; print(''.join(c if c.isalnum() or c in '-._' else '*%02x'%ord(c) for c in sys.argv[1]))" "$ARN")"
-          URL="https://${AWS_REGION}.console.aws.amazon.com/cloudwatch/home?region=${AWS_REGION}#logsV2:live-tail?logGroupArns=~(~'${ENC_ARN})"
-          {
-            printf '📊 **Live CloudWatch logs for this run:** [open Live Tail in the AWS console](%s)\n\n' "$URL"
-            printf '_Streams Claude Code'"'"'s OTLP log events (prompts, tool decisions, API calls) in real time. In Live Tail, filter to log stream `%s` to isolate this run. Requires console sign-in to the AWS account._\n' "${GITHUB_REPOSITORY}/${GITHUB_RUN_ID}"
-          } > /tmp/cw-comment.md
+          python3 <<'PY' > /tmp/cw-comment.md
+          import os
+          region = os.environ["AWS_REGION"]
+          group  = os.environ["OTLP_LOG_GROUP"]
+          stream = os.environ["OTLP_LOG_STREAM"]
+
+          # Transcript query: timestamp | message | context columns, this session only.
+          query = (
+              "fields @timestamp, "
+              "coalesce(attributes.prompt, attributes.response, attributes.tool_name, body) as message, "
+              "body as event, attributes.decision, attributes.model, attributes.cost_usd, attributes.duration_ms\n"
+              '| filter @logStream = "%s"\n'
+              "| sort @timestamp asc\n"
+              "| limit 1000"
+          ) % stream
+
+          # Console rison string codec: keep [A-Za-z0-9-._], else *<2-hex-lower>.
+          def enc(s):
+              return "".join(c if (c.isalnum() or c in "-._") else "*%02x" % ord(c) for c in s)
+
+          detail = ("~(end~0~start~-604800~timeType~'RELATIVE~unit~'seconds"
+                    "~editorString~'%s~source~(~'%s))") % (enc(query), enc(group))
+          url = ("https://%s.console.aws.amazon.com/cloudwatch/home?region=%s"
+                 "#logsV2:logs-insights?queryDetail=%s") % (region, region, detail)
+
+          print("📊 **Live CloudWatch transcript for this run:** "
+                "[open in the AWS console](%s)\n" % url)
+          print("_Opens CloudWatch Logs Insights with a timestamp-first transcript of this "
+                "run's Claude Code session (prompts, responses, tool decisions). Filtered to "
+                "this run only. Press **Run query** to refresh / tail. Requires console "
+                "sign-in to the AWS account._")
+          PY
           gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file /tmp/cw-comment.md
 
       - uses: anthropics/claude-code-action@v1
