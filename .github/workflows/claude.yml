@@ -221,12 +221,16 @@ jobs:
                 "(filtered to this session)." % live_url)
           print("- **[Logs Insights transcript](%s)** — timestamp-first, readable view with "
                 "`message` and `tool_call` columns; press **Run query** to refresh." % insights_url)
-          print("\nOr **watch it in your terminal as YAML** — polls every 3s and prints new "
-                "events only (Ctrl-C to stop). Shows prompts, responses, tool args (`tool_input`) "
-                "and a compact per-request token/cost line. Prefix with `SHOW_BODIES=1` to expand "
-                "the full API request/response JSON (the whole conversation — large). Needs AWS "
-                "creds for this account + `jq`:\n")
-          print("```bash\n%s\n```" % tail_cmd)
+          # Terminal command is long, so tuck it in a collapsible <details> block.
+          # GitHub keeps the fenced code block's copy button inside <details>, so
+          # the reader clicks to expand, then copies with one click. A blank line
+          # after </summary> and around the fence is required for GitHub to render
+          # the code block (and its copy button) inside the disclosure.
+          print("\n<details>\n<summary>▶ Or follow it live in your terminal as YAML "
+                "(polls every 3s; prompts, responses, tool args, token/cost). Prefix "
+                "<code>SHOW_BODIES=1</code> for full API JSON. Needs AWS creds + <code>jq</code>.</summary>\n")
+          print("```bash\n%s\n```\n" % tail_cmd)
+          print("</details>")
           print("\n_All three are scoped to this run's log stream. The console links require "
                 "sign-in to the AWS account._")
           PY
