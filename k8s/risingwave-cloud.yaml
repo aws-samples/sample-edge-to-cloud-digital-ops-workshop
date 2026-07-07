@@ -8,7 +8,7 @@
 #   3. Secret named "msk-credentials" exists in your participant namespace with:
 #        MSK_USERNAME, MSK_PASSWORD, MSK_BOOTSTRAP_SERVERS
 #   4. Service account "risingwave-cloud" exists in your participant namespace with
-#      IRSA annotation: eks.amazonaws.com/role-arn=arn:aws:iam::${ACCOUNT_ID}:role/workshop-risingwave-s3
+#      IRSA annotation: eks.amazonaws.com/role-arn=arn:aws:iam::${ACCOUNT_ID}:role/workshop-risingwave-s3-v2
 #   5. S3 bucket workshop-${DEPLOYMENT_ID}-${ACCOUNT_ID}-risingwave-state exists
 #
 # Apply (substitute your deployment ID and account ID):

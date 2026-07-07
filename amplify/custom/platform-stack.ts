@@ -232,7 +232,7 @@ export class PlatformStack extends Stack {
     });
 
     const risingwaveS3Role = new Role(this, "RisingwaveS3Role", {
-      roleName: "workshop-risingwave-s3",
+      roleName: "workshop-risingwave-s3-v2",
       assumedBy: new FederatedPrincipal(
         eksOidcProvider.openIdConnectProviderArn,
         {
