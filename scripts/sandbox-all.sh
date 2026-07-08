@@ -16,26 +16,33 @@ if [[ ${#DEPLOYMENT_IDS[@]} -eq 0 ]]; then
 fi
 
 PLATFORM_APP="npx tsx amplify/custom/platform-app.ts"
+PLATFORM_STACK_NAME="WorkshopPlatformStack"
+FLINK_JAR_KEY="flink-apps/flink-iceberg-sink-1.0.0.jar"
 
 # ── Deploy platform stack (always) ───────────────────────────────────────────
 # cdk deploy is idempotent: if nothing changed it finishes in seconds.
-# Detect whichever stack name exists in this account (V2 takes priority).
-PLATFORM_STACK_NAME="WorkshopPlatformStack"
-for CANDIDATE in WorkshopPlatformStackV2 WorkshopPlatformStack; do
-  STATUS=$(aws cloudformation describe-stacks \
-    --stack-name "$CANDIDATE" \
-    --query "Stacks[0].StackStatus" \
-    --output text 2>/dev/null || echo "DOES_NOT_EXIST")
-  if [[ "$STATUS" == "CREATE_COMPLETE" || "$STATUS" == "UPDATE_COMPLETE" ]]; then
-    PLATFORM_STACK_NAME="$CANDIDATE"
-    break
-  fi
-done
+#
+# The Managed Flink app reads its code JAR from the shared bucket this same
+# stack creates. On a fresh account neither the bucket nor the JAR exist yet,
+# so a normal deploy fails on the Flink resource and CloudFormation rolls
+# back everything else that was just created (VPCs/EKS/MSK included). Detect
+# that case up front and deploy without the Flink app first; it gets added
+# back in a second deploy below once the JAR has been uploaded.
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+PLATFORM_BUCKET="workshop-platform-${ACCOUNT_ID}"
+NEEDS_FLINK_REDEPLOY=0
+DEPLOY_CONTEXT_ARGS=()
+if ! aws s3api head-object --bucket "$PLATFORM_BUCKET" --key "$FLINK_JAR_KEY" >/dev/null 2>&1; then
+  echo ">>> Flink JAR not found at s3://${PLATFORM_BUCKET}/${FLINK_JAR_KEY} — deploying platform stack without the Flink app first."
+  DEPLOY_CONTEXT_ARGS=(--context deployFlinkApp=false)
+  NEEDS_FLINK_REDEPLOY=1
+fi
 
 echo ">>> Deploying $PLATFORM_STACK_NAME..."
-PLATFORM_STACK_NAME="$PLATFORM_STACK_NAME" npx cdk deploy \
+npx cdk deploy \
   --app "$PLATFORM_APP" \
   --require-approval never \
+  "${DEPLOY_CONTEXT_ARGS[@]}" \
   "$PLATFORM_STACK_NAME"
 echo ">>> Platform stack deployed."
 
@@ -52,8 +59,9 @@ if [[ -n "$FLINK_APP_NAME" ]]; then
     echo ">>> Starting Flink application $FLINK_APP_NAME..."
     aws kinesisanalyticsv2 start-application \
       --application-name "$FLINK_APP_NAME" \
-      --run-configuration '{"ApplicationRestoreConfiguration":{"ApplicationRestoreType":"SKIP_RESTORE_FROM_SNAPSHOT"}}'
-    echo ">>> Flink application start initiated (status transitions to STARTING then RUNNING)."
+      --run-configuration '{"ApplicationRestoreConfiguration":{"ApplicationRestoreType":"SKIP_RESTORE_FROM_SNAPSHOT"}}' \
+      && echo ">>> Flink application start initiated (status transitions to STARTING then RUNNING)." \
+      || echo ">>> WARNING: kinesisanalyticsv2:StartApplication failed (e.g. missing IAM permission) — continuing without starting Flink."
   elif [[ "$FLINK_STATUS" == "RUNNING" || "$FLINK_STATUS" == "STARTING" ]]; then
     echo ">>> Flink application $FLINK_APP_NAME already $FLINK_STATUS — skipping start."
   else
@@ -143,11 +151,11 @@ ADMIN_SECRET_NAME=$(aws secretsmanager list-secrets \
 
 if [[ -n "$MSK_SCRAM_BROKERS" && -n "$ADMIN_SECRET_NAME" ]]; then
   ADMIN_SECRET=$(aws secretsmanager get-secret-value \
-    --secret-id "$ADMIN_SECRET_NAME" --query "SecretString" --output text 2>/dev/null)
-  ADMIN_USER=$(echo "$ADMIN_SECRET" | python3 -c "import json,sys; print(json.load(sys.stdin)['username'])" 2>/dev/null)
-  ADMIN_PASS=$(echo "$ADMIN_SECRET" | python3 -c "import json,sys; print(json.load(sys.stdin)['password'])" 2>/dev/null)
+    --secret-id "$ADMIN_SECRET_NAME" --query "SecretString" --output text 2>/dev/null || echo "")
+  ADMIN_USER=$(echo "$ADMIN_SECRET" | python3 -c "import json,sys; print(json.load(sys.stdin)['username'])" 2>/dev/null || echo "")
+  ADMIN_PASS=$(echo "$ADMIN_SECRET" | python3 -c "import json,sys; print(json.load(sys.stdin)['password'])" 2>/dev/null || echo "")
 
-  aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "${AWS_DEFAULT_REGION:-us-east-1}" 2>/dev/null
+  aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "${AWS_DEFAULT_REGION:-us-east-1}" 2>/dev/null || true
 
   # Write manifest to a temp file using python to safely embed shell command with special chars
   TOPIC_POD_MANIFEST_FILE=$(mktemp /tmp/kafka-topic-init.XXXXXX)
@@ -189,13 +197,13 @@ with open(outfile, "w") as f:
     yaml.dump(manifest, f, default_flow_style=False)
 PYEOF
 
-  kubectl delete pod kafka-topic-init --ignore-not-found 2>/dev/null
-  kubectl apply -f "$TOPIC_POD_MANIFEST_FILE" 2>/dev/null
+  kubectl delete pod kafka-topic-init --ignore-not-found 2>/dev/null || true
+  kubectl apply -f "$TOPIC_POD_MANIFEST_FILE" 2>/dev/null || true
   rm -f "$TOPIC_POD_MANIFEST_FILE"
   echo ">>> Waiting for raw.telemetry topic creation..."
   kubectl wait --for=condition=ready pod/kafka-topic-init --timeout=120s 2>/dev/null || true
-  TOPIC_RESULT=$(kubectl logs kafka-topic-init 2>/dev/null | grep -E "TOPIC_OK|TOPIC_FAILED" | tail -1)
-  kubectl delete pod kafka-topic-init --ignore-not-found 2>/dev/null
+  TOPIC_RESULT=$(kubectl logs kafka-topic-init 2>/dev/null | grep -E "TOPIC_OK|TOPIC_FAILED" | tail -1) || true
+  kubectl delete pod kafka-topic-init --ignore-not-found 2>/dev/null || true
   echo ">>> Kafka topic init: ${TOPIC_RESULT:-completed}"
 else
   echo ">>> WARNING: Could not resolve MSK brokers or admin secret — skipping topic creation."
@@ -248,7 +256,6 @@ echo ">>> Shared uploads complete."
 # ── Build and upload Flink JAR to S3 ─────────────────────────────────────────
 # Managed Flink reads the JAR from S3 at app start. Build if the key doesn't
 # exist yet — rebuild is skipped on subsequent runs to avoid the 5-min Maven build.
-FLINK_JAR_KEY="flink-apps/flink-iceberg-sink-1.0.0.jar"
 FLINK_JAR_EXISTS=$(aws s3 ls "s3://${S3_BUCKET}/${FLINK_JAR_KEY}" 2>/dev/null | wc -l | tr -d ' ')
 if [[ "$FLINK_JAR_EXISTS" -eq 0 ]]; then
   echo ">>> Building Flink JAR..."
@@ -258,6 +265,16 @@ if [[ "$FLINK_JAR_EXISTS" -eq 0 ]]; then
   echo ">>> Flink JAR uploaded to s3://${S3_BUCKET}/${FLINK_JAR_KEY}"
 else
   echo ">>> Flink JAR already in s3://${S3_BUCKET}/${FLINK_JAR_KEY} — skipping build."
+fi
+
+# ── Redeploy platform stack with the Flink app now that the JAR exists ──────
+if [[ "$NEEDS_FLINK_REDEPLOY" -eq 1 ]]; then
+  echo ">>> Redeploying $PLATFORM_STACK_NAME with the Flink app enabled..."
+  npx cdk deploy \
+    --app "$PLATFORM_APP" \
+    --require-approval never \
+    "$PLATFORM_STACK_NAME"
+  echo ">>> Platform stack redeployed with Flink app."
 fi
 
 # ── Deploy one Amplify sandbox per participant (sequential) ──────────────────

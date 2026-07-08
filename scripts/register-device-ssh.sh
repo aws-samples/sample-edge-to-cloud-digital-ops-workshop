@@ -120,7 +120,7 @@ git clone --depth 1 --branch ${DEVICE_CLIENT_VERSION} \
   https://github.com/awslabs/aws-iot-device-client "\$SRC"
 cd "\$SRC"
 cmake -B build -DCMAKE_BUILD_TYPE=Release \
-  -DEXCLUDE_JOBS=ON -DEXCLUDE_NAMED_SHADOW=ON \
+  -DEXCLUDE_JOBS=OFF -DEXCLUDE_NAMED_SHADOW=OFF \
   -DEXCLUDE_TUNNELING=ON -DEXCLUDE_DEVICE_DEFENDER=ON \
   -DEXCLUDE_FLEET_PROVISIONING=OFF
 cmake --build build --target aws-iot-device-client -j"\$(nproc)"

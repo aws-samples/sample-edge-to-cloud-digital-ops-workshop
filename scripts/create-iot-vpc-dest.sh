@@ -69,19 +69,13 @@ if [[ "$IN_PROGRESS_ARN" != "None" && -n "$IN_PROGRESS_ARN" ]]; then
   exit 1
 fi
 
-# ── Resolve which platform stack is live ─────────────────────────────────────
-PLATFORM_STACK=""
-for CANDIDATE in WorkshopPlatformStackV2 WorkshopPlatformStack; do
-  STATUS=$(aws cloudformation describe-stacks \
-    --stack-name "$CANDIDATE" \
-    --query "Stacks[0].StackStatus" \
-    --output text 2>/dev/null || echo "DOES_NOT_EXIST")
-  if [[ "$STATUS" == "CREATE_COMPLETE" || "$STATUS" == "UPDATE_COMPLETE" ]]; then
-    PLATFORM_STACK="$CANDIDATE"
-    break
-  fi
-done
-if [[ -z "$PLATFORM_STACK" ]]; then
+# ── Confirm the platform stack is live ───────────────────────────────────────
+PLATFORM_STACK="WorkshopPlatformStack"
+STATUS=$(aws cloudformation describe-stacks \
+  --stack-name "$PLATFORM_STACK" \
+  --query "Stacks[0].StackStatus" \
+  --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+if [[ "$STATUS" != "CREATE_COMPLETE" && "$STATUS" != "UPDATE_COMPLETE" ]]; then
   echo "ERROR: No healthy platform stack found. Is WorkshopPlatformStack deployed?" >&2
   exit 1
 fi

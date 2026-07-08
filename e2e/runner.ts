@@ -27,7 +27,6 @@
  *   E2E_K3S_TIMEOUT_MS          ms to wait for K3s job (default: 1_800_000)
  *   E2E_HELM_TIMEOUT_MS         ms to wait for Helm rollout (default: 600_000)
  *   E2E_HMI_TIMEOUT_MS          ms to wait for HMI SSE events (default: 60_000)
- *   E2E_EKS_DELETE_TIMEOUT_MS   ms to wait for EKS deletion (default: 1_200_000)
  */
 
 import { execSync, execFileSync, spawn } from "node:child_process";
@@ -52,9 +51,6 @@ import {
 import {
   EKSClient,
   DescribeClusterCommand,
-  DescribeNodegroupCommand,
-  DeleteNodegroupCommand,
-  DeleteClusterCommand,
 } from "@aws-sdk/client-eks";
 import {
   IoTClient,
@@ -150,7 +146,6 @@ function phaseEnabled(phasePrefix: string): boolean {
 const K3S_TIMEOUT_MS = Number(process.env.E2E_K3S_TIMEOUT_MS ?? 1_800_000);
 const HELM_TIMEOUT_MS = Number(process.env.E2E_HELM_TIMEOUT_MS ?? 600_000);
 const HMI_TIMEOUT_MS = Number(process.env.E2E_HMI_TIMEOUT_MS ?? 60_000);
-const EKS_DELETE_TIMEOUT_MS = Number(process.env.E2E_EKS_DELETE_TIMEOUT_MS ?? 1_200_000);
 
 const REPO_ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
@@ -1925,60 +1920,8 @@ try {
   if (SKIP_PLATFORM_TEARDOWN) {
     log("Skipping platform teardown (--skip-platform-teardown)");
   } else {
-    // EKS resources are RETAIN — delete explicitly before cdk destroy
-    log("Deleting EKS nodegroup workshop-nodes (this takes ~5 min)...");
-    try {
-      await eks.send(
-        new DeleteNodegroupCommand({ clusterName: "workshop-eks", nodegroupName: "workshop-nodes" })
-      );
-    } catch (err: unknown) {
-      if (err instanceof Error && err.name !== "ResourceNotFoundException") throw err;
-      log("  (nodegroup not found — already deleted)");
-    }
-
-    await check("EKS nodegroup workshop-nodes deleted", async () => {
-      const t0 = Date.now();
-      const deadline = Date.now() + EKS_DELETE_TIMEOUT_MS;
-      while (Date.now() < deadline) {
-        try {
-          const resp = await eks.send(
-            new DescribeNodegroupCommand({ clusterName: "workshop-eks", nodegroupName: "workshop-nodes" })
-          );
-          log(`  Nodegroup status: ${resp.nodegroup?.status}...`);
-          await sleep(30_000);
-        } catch (err: unknown) {
-          if (err instanceof Error && err.name === "ResourceNotFoundException")
-            return { deleted: true, waitMs: Date.now() - t0 };
-          throw err;
-        }
-      }
-      throw new Error("EKS nodegroup deletion timed out");
-    }, { data: (r) => ({ waitMs: r.waitMs }) });
-
-    log("Deleting EKS cluster workshop-eks (this takes ~10 min)...");
-    try {
-      await eks.send(new DeleteClusterCommand({ name: "workshop-eks" }));
-    } catch (err: unknown) {
-      if (err instanceof Error && err.name !== "ResourceNotFoundException") throw err;
-      log("  (cluster not found — already deleted)");
-    }
-
-    await check("EKS cluster workshop-eks deleted", async () => {
-      const t0 = Date.now();
-      const deadline = Date.now() + EKS_DELETE_TIMEOUT_MS;
-      while (Date.now() < deadline) {
-        try {
-          const resp = await eks.send(new DescribeClusterCommand({ name: "workshop-eks" }));
-          log(`  Cluster status: ${resp.cluster?.status}...`);
-          await sleep(30_000);
-        } catch (err: unknown) {
-          if (err instanceof Error && err.name === "ResourceNotFoundException")
-            return { deleted: true, waitMs: Date.now() - t0 };
-          throw err;
-        }
-      }
-      throw new Error("EKS cluster deletion timed out");
-    }, { data: (r) => ({ waitMs: r.waitMs }) });
+    // EKS nodegroup/cluster and MSK cluster now delete automatically as part
+    // of `cdk destroy` (no RETAIN policy) — no manual pre-deletion needed.
 
     // Delete all participant Amplify sandbox stacks first — the platform stack
     // exports workshop-platform-msk-arn which participant stacks import.

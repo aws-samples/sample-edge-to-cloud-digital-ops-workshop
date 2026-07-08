@@ -9,6 +9,8 @@
     "sandbox:all": "bash scripts/sandbox-all.sh",
     "sandbox:delete": "npx ampx sandbox delete --identifier ${WORKSHOP_DEPLOYMENT_ID:-ws-slot00} --yes",
     "sandbox:delete-all": "bash scripts/sandbox-delete-all.sh",
+    "destroy:orphan-stack": "bash scripts/destroy-orphan-stack.sh",
+    "detach:device-policy": "bash scripts/detach-device-policy.sh",
     "pipeline-deploy": "npx ampx pipeline-deploy",
     "test": "node scripts/smoke-test.mjs",
     "e2e": "pnpm --filter edge-digital-ops-e2e test",

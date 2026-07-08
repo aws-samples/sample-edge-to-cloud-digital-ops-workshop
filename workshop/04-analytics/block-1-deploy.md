@@ -111,7 +111,7 @@ kubectl wait --for=condition=Established \
 
 **5. Create the RisingWave S3 state bucket and service account**
 
-Each participant slot gets its own S3 bucket for RisingWave's state store, and a Kubernetes ServiceAccount annotated for IRSA so RisingWave pods can read/write it without static credentials. The `workshop-risingwave-s3` IAM role (trusting any `risingwave-cloud` service account cluster-wide) is created once by `WorkshopPlatformStack`:
+Each participant slot gets its own S3 bucket for RisingWave's state store, and a Kubernetes ServiceAccount annotated for IRSA so RisingWave pods can read/write it without static credentials. The `workshop-risingwave-s3-v2` IAM role (trusting any `risingwave-cloud` service account cluster-wide) is created once by `WorkshopPlatformStack`:
 
 ```bash
 aws s3api head-bucket --bucket workshop-ws-slot00-000000000000-risingwave-state 2>/dev/null || \
@@ -120,7 +120,7 @@ aws s3api head-bucket --bucket workshop-ws-slot00-000000000000-risingwave-state 
 kubectl create serviceaccount risingwave-cloud \
   --namespace ws-slot00 --dry-run=client -o yaml | \
   kubectl annotate -f - --local -o yaml \
-    eks.amazonaws.com/role-arn=arn:aws:iam::000000000000:role/workshop-risingwave-s3 | \
+    eks.amazonaws.com/role-arn=arn:aws:iam::000000000000:role/workshop-risingwave-s3-v2 | \
   kubectl apply -f -
 ```
 <!-- e2e:assert {"contains": "serviceaccount/risingwave-cloud"} -->

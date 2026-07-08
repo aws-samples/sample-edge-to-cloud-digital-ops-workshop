@@ -14,7 +14,9 @@ DEPLOYMENT_IDS=("$@")
 PLATFORM_STACK="WorkshopPlatformStack"
 PLATFORM_APP="npx tsx amplify/custom/platform-app.ts"
 
-# ── Delete MSK clusters explicitly (RETAIN policy means CFN won't touch them) ─
+# ── Delete any per-slot MSK clusters left over from older deployments ────────
+# The shared platform MSK cluster is destroyed automatically by the
+# `cdk destroy` below; this only cleans up legacy per-slot clusters if present.
 echo ">>> Deleting MSK clusters for all deployment IDs..."
 MSK_PIDS=()
 for ID in "${DEPLOYMENT_IDS[@]}"; do
