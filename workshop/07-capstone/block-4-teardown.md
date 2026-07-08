@@ -9,7 +9,19 @@
 ```bash
 ./scripts/teardown.sh --deployment-id ws-slot00
 ```
-<!-- e2e:skip --><!-- destructively deletes the entire slot's resources; only exercised explicitly by e2e/runner.ts's teardown phase, never on a routine doc-runner pass -->
+<!-- not annotated with e2e:assert: this destroys the entire slot's resources.
+     e2e/runner.ts's own teardown phase (--session teardown) exercises this exact
+     command for real; the doc-runner instead verifies the script's dry-run path
+     below so a routine pass never destroys the shared ws-slot00 account. -->
+
+`--dry-run` prints every command the script would run without executing any of
+them — use it to preview the teardown plan on a shared slot before running it
+for real:
+
+```bash
+./scripts/teardown.sh --deployment-id ws-slot00 --dry-run
+```
+<!-- e2e:assert {"contains": "DRY-RUN"} -->
 
 The script destroys resources in order to respect dependencies:
 

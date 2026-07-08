@@ -13,6 +13,8 @@
 #   - kafka-topics.sh on PATH  (brew install kafka  OR  apt-get install kafka  OR
 #     use --kafka-home to point to an existing Kafka install)
 #   - AWS credentials for the workshop account (MSK Secrets Manager + kafka API access)
+#   - If kafka-topics.sh isn't found, falls back to Python + kafka-python (pip installed
+#     on demand) — no Java/Kafka distribution required for this path.
 #
 # Usage:
 #   scripts/create-msk-topics.sh --deployment-id ws-slot00
@@ -81,10 +83,10 @@ find_kafka_topics() {
 }
 
 KAFKA_TOPICS_BIN=$(find_kafka_topics)
+USE_PYTHON_FALLBACK=false
 if [[ -z "$KAFKA_TOPICS_BIN" ]]; then
-  echo "ERROR: kafka-topics.sh not found on PATH." >&2
-  echo "  Install Kafka (brew install kafka) or pass --kafka-home <dir>." >&2
-  exit 1
+  echo "kafka-topics.sh not found on PATH — falling back to Python (kafka-python)." >&2
+  USE_PYTHON_FALLBACK=true
 fi
 
 # ── Fetch MSK credentials and broker endpoint ─────────────────────────────────
@@ -149,6 +151,58 @@ echo ""
 echo "▶ Creating ${#TOPICS[@]} topics (partitions=${PARTITIONS}, replication=${REPLICATION}) …"
 echo ""
 
+if $DRY_RUN; then
+  for TOPIC in "${TOPICS[@]}"; do
+    if $USE_PYTHON_FALLBACK; then
+      echo "  DRY-RUN: python3 (kafka-python) create_topics ${TOPIC} partitions=${PARTITIONS} replication=${REPLICATION}"
+    else
+      echo "  DRY-RUN: ${KAFKA_TOPICS_BIN} --bootstrap-server ${MSK_BOOTSTRAP} --command-config ${PROPS_FILE} --create --topic ${TOPIC} --partitions ${PARTITIONS} --replication-factor ${REPLICATION} --if-not-exists"
+    fi
+  done
+  exit 0
+fi
+
+if $USE_PYTHON_FALLBACK; then
+  python3 -m pip install --quiet --user kafka-python
+  TOPICS_JSON=$(printf '%s\n' "${TOPICS[@]}" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))")
+  python3 - "$MSK_BOOTSTRAP" "$MSK_USER" "$MSK_PASS" "$PARTITIONS" "$REPLICATION" "$TOPICS_JSON" <<'PYEOF'
+import sys, json
+from kafka.admin import KafkaAdminClient, NewTopic
+from kafka.errors import TopicAlreadyExistsError
+
+bootstrap, user, password, partitions, replication, topics_json = sys.argv[1:7]
+topics = json.loads(topics_json)
+
+admin = KafkaAdminClient(
+    bootstrap_servers=bootstrap.split(","),
+    security_protocol="SASL_SSL",
+    sasl_mechanism="SCRAM-SHA-512",
+    sasl_plain_username=user,
+    sasl_plain_password=password,
+)
+
+created, already, failed = 0, 0, 0
+for topic in topics:
+    new_topic = NewTopic(name=topic, num_partitions=int(partitions), replication_factor=int(replication))
+    try:
+        admin.create_topics([new_topic])
+        print(f"  ✓ (created) {topic}")
+        created += 1
+    except TopicAlreadyExistsError:
+        print(f"  ✓ (exists) {topic}")
+        already += 1
+    except Exception as e:
+        print(f"  ✗ FAILED  {topic} — {e}", file=sys.stderr)
+        failed += 1
+
+admin.close()
+print()
+print(f"Done — created: {created}, already existed: {already}, failed: {failed}")
+sys.exit(1 if failed else 0)
+PYEOF
+  exit $?
+fi
+
 CREATED=0
 ALREADY=0
 FAILED=0
@@ -164,11 +218,6 @@ for TOPIC in "${TOPICS[@]}"; do
     --replication-factor "$REPLICATION"
     --if-not-exists
   )
-
-  if $DRY_RUN; then
-    echo "  DRY-RUN: ${CMD[*]}"
-    continue
-  fi
 
   OUTPUT=$("${CMD[@]}" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
 
@@ -187,7 +236,5 @@ for TOPIC in "${TOPICS[@]}"; do
 done
 
 echo ""
-if ! $DRY_RUN; then
-  echo "Done — created: ${CREATED}, already existed: ${ALREADY}, failed: ${FAILED}"
-  [[ $FAILED -gt 0 ]] && exit 1 || exit 0
-fi
+echo "Done — created: ${CREATED}, already existed: ${ALREADY}, failed: ${FAILED}"
+[[ $FAILED -gt 0 ]] && exit 1 || exit 0

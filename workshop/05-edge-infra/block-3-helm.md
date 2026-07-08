@@ -57,7 +57,7 @@ helm upgrade --install edge-stack ./helm/edge-stack \
   -f helm/edge-stack-values.yaml \
   --set deploymentId=ws-slot00
 ```
-<!-- e2e:skip --><!-- multi-minute Helm install of the full edge umbrella chart (Redpanda, RisingWave, CNPG, MinIO, HMI) onto a K3s cluster that must exist first; too slow/heavy for a routine doc-runner pass -->
+<!-- e2e:assert {"contains": "edge-stack"} -->
 
 This deploys in a single Helm umbrella chart:
 

@@ -9,9 +9,11 @@
     1. **Build and push the HMI image** to the K3s nodes (see `hmi/Dockerfile`):
        ```bash
        cd hmi && docker build -t workshop-hmi:latest .
-       # Import into K3s on each node (or push to a registry)
+       docker images workshop-hmi:latest
        ```
-       <!-- e2e:skip --><!-- multi-minute Docker build + per-node image import; too slow/heavy to run on every doc-runner pass -->
+       <!-- e2e:assert {"contains": "workshop-hmi"} -->
+
+       Then import into K3s on each node, or push to a registry.
     2. **Update `helm/edge-stack-values.yaml`** with the sensor simulator EC2 private IP
        and your MSK bootstrap servers (Block 2 covers how to find these).
 

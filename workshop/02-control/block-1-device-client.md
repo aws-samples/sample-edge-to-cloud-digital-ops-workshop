@@ -54,13 +54,60 @@ Review how AWS IoT Device Client works as a `systemd` service alongside the EC2 
    systemctl status aws-iot-device-client
    sudo journalctl -u aws-iot-device-client -n 50
    ```
-   <!-- e2e:skip --><!-- runs inside an interactive SSM Session Manager shell on a specific EC2 instance; not scriptable from a single doc-runner bash session -->
+
+   Or, from your own machine, run the same commands via `aws ssm send-command` instead of an interactive session:
+
+   ```bash
+   EDGE_INSTANCE=$(aws ec2 describe-instances \
+     --filters "Name=tag:Name,Values=workshop-ws-slot00-edge-0" \
+               "Name=instance-state-name,Values=running" \
+     --query "Reservations[0].Instances[0].InstanceId" --output text)
+
+   CMD_ID=$(aws ssm send-command \
+     --instance-ids "$EDGE_INSTANCE" \
+     --document-name "AWS-RunShellScript" \
+     --parameters 'commands=["systemctl status aws-iot-device-client", "journalctl -u aws-iot-device-client -n 50"]' \
+     --query "Command.CommandId" --output text)
+
+   for _i in $(seq 1 12); do
+     STATUS=$(aws ssm get-command-invocation \
+       --command-id "$CMD_ID" --instance-id "$EDGE_INSTANCE" \
+       --query "Status" --output text)
+     [ "$STATUS" != "InProgress" ] && [ "$STATUS" != "Pending" ] && break
+     sleep 5
+   done
+   aws ssm get-command-invocation \
+     --command-id "$CMD_ID" --instance-id "$EDGE_INSTANCE" \
+     --query "StandardOutputContent" --output text
+   ```
+   <!-- e2e:assert {"contains": "aws-iot-device-client"} -->
 3. Inspect the job handler directory:
    ```bash
    ls /etc/aws-iot-device-client/jobs/
    cat /etc/aws-iot-device-client/jobs/run-script.sh
    ```
-   <!-- e2e:skip --><!-- runs inside an interactive SSM Session Manager shell on a specific EC2 instance; not scriptable from a single doc-runner bash session -->
+
+   Via `aws ssm send-command`:
+
+   ```bash
+   CMD_ID=$(aws ssm send-command \
+     --instance-ids "$EDGE_INSTANCE" \
+     --document-name "AWS-RunShellScript" \
+     --parameters 'commands=["ls /etc/aws-iot-device-client/jobs/", "cat /etc/aws-iot-device-client/jobs/run-script.sh"]' \
+     --query "Command.CommandId" --output text)
+
+   for _i in $(seq 1 12); do
+     STATUS=$(aws ssm get-command-invocation \
+       --command-id "$CMD_ID" --instance-id "$EDGE_INSTANCE" \
+       --query "Status" --output text)
+     [ "$STATUS" != "InProgress" ] && [ "$STATUS" != "Pending" ] && break
+     sleep 5
+   done
+   aws ssm get-command-invocation \
+     --command-id "$CMD_ID" --instance-id "$EDGE_INSTANCE" \
+     --query "StandardOutputContent" --output text
+   ```
+   <!-- e2e:assert {"contains": "run-script.sh"} -->
 4. Walk through the `run-script.sh` handler — it reads `$2` (the S3 URI passed as a positional argument), downloads the script, and runs it
 
 ---
@@ -78,13 +125,12 @@ run-script.sh <runAsUser> <arg1> <arg2> ...
 
 There is **no `JOB_DOCUMENT` environment variable**. All parameters the handler needs must be passed explicitly in the job document's `input.args` array.
 
-```bash
+```text
 #!/bin/bash
 # $2 = S3 URI of the script to download and run
 # Exit 0  → IoT Jobs marks this device as SUCCEEDED
 # Exit 1+ → IoT Jobs marks this device as FAILED
 ```
-<!-- e2e:skip --><!-- illustrative snippet, not a runnable command -->
 
 
 ---
@@ -123,7 +169,15 @@ default install line targets **Raspberry Pi OS / Debian / Ubuntu (arm64)**:
     ```bash
     --8<-- "scripts/register-device-ssh.sh:build-device-client"
     ```
-    <!-- e2e:skip --><!-- MkDocs snippet include, not a runnable command -->
+
+    The embedded snippet runs over SSH on a physical/lab device, so it isn't
+    directly runnable from the doc-runner — but a syntax check on the whole
+    script catches a broken tagged region:
+
+    ```bash
+    bash -n scripts/register-device-ssh.sh && echo "syntax OK"
+    ```
+    <!-- e2e:assert {"contains": "syntax OK"} -->
 
 To register a device on a **different OS stack**, change only the package-install line in that
 block:
@@ -148,7 +202,9 @@ device, and writes the Device Client config with a `fleet-provisioning` block:
     ```bash
     --8<-- "scripts/register-device-ssh.sh:provision"
     ```
-    <!-- e2e:skip --><!-- MkDocs snippet include, not a runnable command -->
+
+    Same script as above — already syntax-checked in full by the `bash -n` block
+    in the previous section.
 
 The script then polls the IoT registry until your new Thing appears.
 

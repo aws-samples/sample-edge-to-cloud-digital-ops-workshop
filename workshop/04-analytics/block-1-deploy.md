@@ -77,13 +77,16 @@ kubectl create secret generic msk-credentials \
 
 !!! warning "MSK auto-create topics is disabled"
     Create the sensor topics before running the DDL.
-    Run this once from any machine with AWS credentials and `kafka-topics.sh` on PATH
-    (e.g. `brew install kafka`):
+    Run this once from any machine with AWS credentials:
 
     ```bash
     scripts/create-msk-topics.sh --deployment-id ws-slot00
     ```
-    <!-- e2e:skip --><!-- requires kafka-topics.sh on PATH, not present in the doc-runner environment -->
+    <!-- e2e:assert {"contains": "Done"} -->
+
+    The script prefers `kafka-topics.sh` if it's on PATH (e.g. `brew install kafka`),
+    and otherwise falls back to a bundled Python implementation (installs
+    `kafka-python` on demand) — no Java or Kafka distribution required either way.
 
     The script fetches SCRAM credentials from Secrets Manager, resolves the MSK bootstrap
     endpoint, and creates:

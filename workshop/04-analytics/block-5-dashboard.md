@@ -81,14 +81,13 @@ The node label is shortened from `ws-slot00-edge-0` to `edge-0` for readability.
 
 The dashboard falls back to mock data when the following environment variables are absent. Set them in your Next.js environment (`.env.local` for local dev, or the EKS deployment's ConfigMap/Secret):
 
-```bash
+```text
 # RisingWave — PostgreSQL wire protocol on port 4567
 RISINGWAVE_ENDPOINT=postgres://root@<risingwave-frontend-svc>:4567/dev
 
 # TimescaleDB — standard Postgres on port 5432
 TIMESCALEDB_ENDPOINT=postgres://workshop:<password>@<timescaledb-rw-svc>:5432/edge
 ```
-<!-- e2e:skip --><!-- illustrative env var template, not a runnable command -->
 
 Both values are available after completing Block 1.
 

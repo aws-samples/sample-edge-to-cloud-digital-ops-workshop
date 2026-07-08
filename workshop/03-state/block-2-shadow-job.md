@@ -73,12 +73,17 @@ aws s3 cp job-scripts/add-shadows.sh \
     Monitor per-device status at [IoT Core → Manage → Jobs](https://us-east-1.console.aws.amazon.com/iot/home#/jobhub), or poll with the CLI:
 
     ```bash
-    aws iot list-job-executions-for-job \
-      --job-id "$JOB_ID" \
-      --query 'executionSummaries[].{thing:thingArn,status:jobExecutionSummary.status}' \
-      --output table
+    for _i in $(seq 1 30); do
+      RESULT=$(aws iot list-job-executions-for-job \
+        --job-id "$JOB_ID" \
+        --query 'executionSummaries[].{thing:thingArn,status:jobExecutionSummary.status}' \
+        --output table)
+      echo "$RESULT" | grep -q "SUCCEEDED" && break
+      sleep 10
+    done
+    echo "$RESULT"
     ```
-    <!-- e2e:skip --><!-- manual poll for console users; the CLI-equivalent block above already asserts jobSucceeds -->
+    <!-- e2e:assert {"contains": "SUCCEEDED"} -->
 
 3. The job script installs two `systemd` timer units that fire every 30 seconds:
    - `report-app-deployment.timer` — reports compose version and deploy status
