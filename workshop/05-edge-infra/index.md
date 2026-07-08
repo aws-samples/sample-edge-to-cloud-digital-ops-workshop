@@ -11,6 +11,7 @@
        cd hmi && docker build -t workshop-hmi:latest .
        # Import into K3s on each node (or push to a registry)
        ```
+       <!-- e2e:skip --><!-- multi-minute Docker build + per-node image import; too slow/heavy to run on every doc-runner pass -->
     2. **Update `helm/edge-stack-values.yaml`** with the sensor simulator EC2 private IP
        and your MSK bootstrap servers (Block 2 covers how to find these).
 

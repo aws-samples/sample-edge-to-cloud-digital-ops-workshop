@@ -17,6 +17,7 @@
       --query 'packageSummaries[?contains(packageName, `ws-slot00`)]' \
       --output table
     ```
+    <!-- e2e:assert {"contains": "ws-slot00"} -->
 
 **2. Run a Fleet Indexing query to confirm all devices report `2.0.0`:**
 
@@ -27,6 +28,7 @@
     aws iot search-index --index-name AWS_Things \
       --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.device-config.reported.config_version:2.0.0'
     ```
+    <!-- e2e:skip --><!-- asserts a specific config_version that drifts as later sessions run jobs against the same shared slot -->
 
 **3. Simulate configuration drift:**
 
@@ -47,6 +49,7 @@
       /tmp/shadow-update-response.json
     cat /tmp/shadow-update-response.json
     ```
+    <!-- e2e:skip --><!-- intentionally introduces config drift on a live device shadow in a shared slot; safe only in an isolated/dedicated test slot -->
 
 **4. Run a drift detection query** — find devices where desired ≠ reported:
 
@@ -57,6 +60,7 @@
     aws iot search-index --index-name AWS_Things \
       --query-string 'attributes.deploymentId:ws-slot00 AND NOT (shadow.name.device-config.desired.config_version:shadow.name.device-config.reported.config_version)'
     ```
+    <!-- e2e:skip --><!-- depends on the drift introduced by the preceding skipped shadow-update step -->
 
 You should see the device you edited appear in the results.
 

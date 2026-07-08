@@ -127,8 +127,15 @@ function applySubstitutions(script: string, subs: RunnerSubstitutions): string {
 
 // ── Assert ────────────────────────────────────────────────────────────────────
 
+// Splits "things[0].thingName" into ["things", "0", "thingName"] so array
+// indices (jsonPath results routinely nest results as things[N].field) resolve
+// the same way plain object keys do.
 function resolveDotPath(obj: unknown, path: string): unknown {
-  return path.split(".").reduce((acc, key) => {
+  const keys = path
+    .replace(/\[(\d+)\]/g, ".$1")
+    .split(".")
+    .filter((k) => k.length > 0);
+  return keys.reduce((acc, key) => {
     if (acc && typeof acc === "object") return (acc as Record<string, unknown>)[key];
     return undefined;
   }, obj);

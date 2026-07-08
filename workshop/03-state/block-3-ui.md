@@ -11,6 +11,7 @@ Create a Cognito user for the workshop:
 ```bash
 ./scripts/create-workshop-user.sh --deployment-id ws-slot00
 ```
+<!-- e2e:assert {"contains": "Workshop login credentials"} -->
 
 Load the Amplify-hosted URL and sign in with the credentials output by the script.
 

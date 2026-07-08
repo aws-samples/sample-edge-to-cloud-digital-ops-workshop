@@ -88,6 +88,7 @@ RISINGWAVE_ENDPOINT=postgres://root@<risingwave-frontend-svc>:4567/dev
 # TimescaleDB — standard Postgres on port 5432
 TIMESCALEDB_ENDPOINT=postgres://workshop:<password>@<timescaledb-rw-svc>:5432/edge
 ```
+<!-- e2e:skip --><!-- illustrative env var template, not a runnable command -->
 
 Both values are available after completing Block 1.
 

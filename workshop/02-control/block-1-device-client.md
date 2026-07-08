@@ -54,11 +54,13 @@ Review how AWS IoT Device Client works as a `systemd` service alongside the EC2 
    systemctl status aws-iot-device-client
    sudo journalctl -u aws-iot-device-client -n 50
    ```
+   <!-- e2e:skip --><!-- runs inside an interactive SSM Session Manager shell on a specific EC2 instance; not scriptable from a single doc-runner bash session -->
 3. Inspect the job handler directory:
    ```bash
    ls /etc/aws-iot-device-client/jobs/
    cat /etc/aws-iot-device-client/jobs/run-script.sh
    ```
+   <!-- e2e:skip --><!-- runs inside an interactive SSM Session Manager shell on a specific EC2 instance; not scriptable from a single doc-runner bash session -->
 4. Walk through the `run-script.sh` handler — it reads `$2` (the S3 URI passed as a positional argument), downloads the script, and runs it
 
 ---
@@ -82,6 +84,8 @@ There is **no `JOB_DOCUMENT` environment variable**. All parameters the handler 
 # Exit 0  → IoT Jobs marks this device as SUCCEEDED
 # Exit 1+ → IoT Jobs marks this device as FAILED
 ```
+<!-- e2e:skip --><!-- illustrative snippet, not a runnable command -->
+
 
 ---
 
@@ -105,6 +109,7 @@ provisioning topics.
   --deployment-id ws-slot00 \
   --thing-name my-pi-01
 ```
+<!-- e2e:skip --><!-- requires a physical/lab device reachable over SSH; not available in CI -->
 
 ### Building the Device Client for your device
 
@@ -118,6 +123,7 @@ default install line targets **Raspberry Pi OS / Debian / Ubuntu (arm64)**:
     ```bash
     --8<-- "scripts/register-device-ssh.sh:build-device-client"
     ```
+    <!-- e2e:skip --><!-- MkDocs snippet include, not a runnable command -->
 
 To register a device on a **different OS stack**, change only the package-install line in that
 block:
@@ -142,6 +148,7 @@ device, and writes the Device Client config with a `fleet-provisioning` block:
     ```bash
     --8<-- "scripts/register-device-ssh.sh:provision"
     ```
+    <!-- e2e:skip --><!-- MkDocs snippet include, not a runnable command -->
 
 The script then polls the IoT registry until your new Thing appears.
 

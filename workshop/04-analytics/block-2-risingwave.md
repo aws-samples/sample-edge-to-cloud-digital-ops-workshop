@@ -15,6 +15,7 @@ kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567
 # In another terminal — connect with psql
 psql -h localhost -p 4567 -U root -d dev
 ```
+<!-- e2e:skip --><!-- long-lived interactive port-forward + psql session across two terminals; not scriptable as a single bash block -->
 
 ---
 
@@ -42,6 +43,7 @@ sed -e "s|__MSK_BOOTSTRAP__|$MSK_BOOTSTRAP|g" \
     -e "s|__MSK_PASS__|$MSK_PASS|g" \
     risingwave/ddl-cloud.sql | psql -h localhost -p 4567 -U root -d dev
 ```
+<!-- e2e:skip --><!-- depends on the background port-forward from the previous (skipped) step being open on localhost:4567 -->
 
 ??? example "View source — ddl-cloud.sql"
     [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/risingwave/ddl-cloud.sql){ .md-button target=_blank }

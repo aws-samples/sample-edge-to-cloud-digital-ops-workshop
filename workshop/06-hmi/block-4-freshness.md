@@ -14,6 +14,7 @@ kubectl port-forward -n edge svc/hmi 3000:3000
 
 # (Cloud Amplify front end loads from its hosted URL — no port-forward needed)
 ```
+<!-- e2e:skip --><!-- long-lived foreground port-forward; not scriptable as a single bash block -->
 
 ---
 
