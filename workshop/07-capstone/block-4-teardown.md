@@ -9,6 +9,7 @@
 ```bash
 ./scripts/teardown.sh --deployment-id ws-slot00
 ```
+<!-- e2e:skip --><!-- destructively deletes the entire slot's resources; only exercised explicitly by e2e/runner.ts's teardown phase, never on a routine doc-runner pass -->
 
 The script destroys resources in order to respect dependencies:
 

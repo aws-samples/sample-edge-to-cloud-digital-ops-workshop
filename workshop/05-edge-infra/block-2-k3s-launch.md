@@ -14,6 +14,7 @@ Launch both steps simultaneously — they run independently and must both comple
 aws s3 cp job-scripts/deploy-k3s.sh \
   s3://workshop-platform-000000000000/ws-slot00/job-scripts/deploy-k3s.sh
 ```
+<!-- e2e:assert {"contains": "upload:"} -->
 
 2. Create an IoT Job targeting Thing Group:
 
@@ -78,6 +79,7 @@ aws ec2 describe-instances \
   --query "Reservations[0].Instances[0].PrivateIpAddress" \
   --output text
 ```
+<!-- e2e:assert {"notContains": "None"} -->
 
 Update `helm/edge-stack-values.yaml` with this IP as the `mqtt.host` value before running Block 3.
 

@@ -9,6 +9,7 @@
 ```bash
 kubectl port-forward -n edge svc/hmi 3000:3000
 ```
+<!-- e2e:skip --><!-- long-lived foreground port-forward; not scriptable as a single bash block -->
 
 Open in a browser:
 

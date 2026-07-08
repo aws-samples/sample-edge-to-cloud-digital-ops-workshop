@@ -78,6 +78,7 @@ aws s3 cp job-scripts/add-shadows.sh \
       --query 'executionSummaries[].{thing:thingArn,status:jobExecutionSummary.status}' \
       --output table
     ```
+    <!-- e2e:skip --><!-- manual poll for console users; the CLI-equivalent block above already asserts jobSucceeds -->
 
 3. The job script installs two `systemd` timer units that fire every 30 seconds:
    - `report-app-deployment.timer` — reports compose version and deploy status

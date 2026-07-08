@@ -10,6 +10,7 @@
 kubectl port-forward -n ws-slot00 svc/timescaledb-rw 5432:5432 &
 psql -h localhost -p 5432 -U workshop -d telemetry
 ```
+<!-- e2e:skip --><!-- opens an interactive psql session against a backgrounded port-forward; not scriptable as a single bash block -->
 
 ---
 

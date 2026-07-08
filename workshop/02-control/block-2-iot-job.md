@@ -26,6 +26,7 @@ CPU=$(top -bn1 | grep "Cpu(s)" | awk '{printf "%d", $2+0}')
 MEM=$(free | awk '/Mem:/ {printf "%d", $3/$2*100}')
 DISK=$(df / | awk 'NR==2 {printf "%d", $5+0}')
 ```
+<!-- e2e:skip --><!-- illustrative diff snippet, not a runnable command -->
 
 ```bash
 # After
@@ -33,6 +34,7 @@ CPU=$(top -bn1 | grep "Cpu(s)" | awk '{printf "%.3f", $2+0}')
 MEM=$(free | awk '/Mem:/ {printf "%.3f", $3/$2*100}')
 DISK=$(df / | awk 'NR==2 {printf "%.3f", $5+0}')
 ```
+<!-- e2e:skip --><!-- illustrative diff snippet, not a runnable command -->
 
 The `%d` format truncates — `42.7%` becomes `42`. The `%.3f` format preserves three decimal places — `42.7%` becomes `42.700`. This matters for analytics: integer CPU values cluster at round numbers and make it hard to detect gradual drift.
 
@@ -44,6 +46,7 @@ Also note the `exit 0` at the end of the script — this is the contract with th
     ```bash
     --8<-- "job-scripts/telemetry-v3.sh:job-handler"
     ```
+    <!-- e2e:skip --><!-- MkDocs snippet include, not a runnable command -->
 
 **2. Upload the script and job document to S3:**
 
@@ -124,6 +127,7 @@ aws iot list-job-executions-for-job \
   --query 'executionSummaries[].{thing:thingArn,status:jobExecutionSummary.status}' \
   --output table
 ```
+<!-- e2e:skip --><!-- manual poll for console users; the CLI-equivalent block above already asserts jobSucceeds -->
 
 **6. Return to the MQTT test client** and observe:
 

@@ -51,6 +51,7 @@ aws kafka get-bootstrap-brokers \
   --region us-east-1 \
   --query BootstrapBrokerStringSaslScram --output text
 ```
+<!-- e2e:assert {"contains": ":9096"} -->
 
 Create a Kubernetes Secret with these values (used by Redpanda Connect and RisingWave):
 
@@ -82,6 +83,7 @@ kubectl create secret generic msk-credentials \
     ```bash
     scripts/create-msk-topics.sh --deployment-id ws-slot00
     ```
+    <!-- e2e:skip --><!-- requires kafka-topics.sh on PATH, not present in the doc-runner environment -->
 
     The script fetches SCRAM credentials from Secrets Manager, resolves the MSK bootstrap
     endpoint, and creates:
@@ -220,6 +222,7 @@ kubectl get pods -n ws-slot00
 kubectl get pods -n cnpg-system
 kubectl get pods -n risingwave-system
 ```
+<!-- e2e:assert {"contains": "NAME"} -->
 
 All pods should reach `Running` within ~5 minutes of each deploy step.
 
