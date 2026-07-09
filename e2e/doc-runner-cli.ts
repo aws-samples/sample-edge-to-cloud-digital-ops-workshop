@@ -12,8 +12,9 @@
  * A directory argument is expanded to every .md file found under it (recursively).
  * Multiple file/directory arguments may be mixed in a single invocation.
  *
- * By default, any block that could tear down the shared platform stack (VPCs,
- * EKS, MSK) is refused — pass --delete-platform-stack to opt in.
+ * By default, any block annotated <!-- e2e:platform-teardown --> (i.e. one that
+ * tears down the shared platform stack: VPCs, EKS, MSK) is refused — pass
+ * --delete-platform-stack to opt in.
  *
  * Environment variables:
  *   WORKSHOP_TEST_SLOT          deployment ID (default: ws-e2e-test)
