@@ -9,6 +9,18 @@
 ```bash
 ./scripts/teardown.sh --deployment-id ws-slot00
 ```
+<!-- not annotated with e2e:assert: this destroys the entire slot's resources.
+     The doc-runner instead verifies the script's dry-run path below so a
+     routine pass never destroys the shared ws-slot00 account. -->
+
+`--dry-run` prints every command the script would run without executing any of
+them — use it to preview the teardown plan on a shared slot before running it
+for real:
+
+```bash
+./scripts/teardown.sh --deployment-id ws-slot00 --dry-run
+```
+<!-- e2e:assert {"contains": "DRY-RUN"} -->
 
 The script destroys resources in order to respect dependencies:
 

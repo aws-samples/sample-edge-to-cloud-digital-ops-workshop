@@ -18,14 +18,24 @@
         ```bash
         aws iot update-indexing-configuration \
           --thing-indexing-configuration \
-            'thingIndexingMode=REGISTRY_AND_SHADOW,thingConnectivityIndexingMode=STATUS,namedShadowIndexingMode=ON,filter={namedShadowNames=["device-config","device-health","$package"]}'
+            'thingIndexingMode=REGISTRY_AND_SHADOW,thingConnectivityIndexingMode=STATUS,namedShadowIndexingMode=ON,filter={namedShadowNames=["device-config","device-health","app-deployment","$package"]}'
+        echo "UPDATE_OK"
         ```
+        <!-- e2e:assert {"contains": "UPDATE_OK"} -->
+
+        This mirrors the account-wide config the platform stack already applies on
+        deploy (including the `app-deployment` shadow added in Session 3) — re-running
+        it here is idempotent and safe against a live shared slot. It requires
+        `iot:UpdateIndexingConfiguration` on your own account — a locked-down CI
+        role without that permission will fail this step even though a workshop
+        participant's own account will not.
 
     Check status:
 
     ```bash
     aws iot describe-index --index-name AWS_Things
     ```
+    <!-- e2e:assert {"jsonPath": "indexStatus", "matches": "ACTIVE"} -->
 
 4. Navigate to [**IoT Core → Manage → Things → Advanced thing search**](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=%22thingName%3A%20*%22) and confirm all devices are visible.
 
@@ -40,6 +50,7 @@
         aws iot search-index --index-name AWS_Things \
           --query-string 'attributes.deploymentId:ws-slot00'
         ```
+        <!-- e2e:assert {"jsonPath": "things[0].thingName", "matches": ".+"} -->
 
     > **Note:** Thing names are EC2 instance IDs, not slot-prefixed — `attributes.deploymentId` is the right field to scope to your slot. Combine it with any other filter using `AND`, e.g. `attributes.deploymentId:ws-slot00 AND connectivity.connected:true`.
 
@@ -50,8 +61,14 @@
     ??? example "AWS CLI equivalent"
         ```bash
         aws iot search-index --index-name AWS_Things \
-          --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.device\-config.reported.config_version:3.0.0'
+          --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.device\-config.reported.config_version:*'
         ```
+        <!-- e2e:assert {"jsonPath": "things[0].thingName", "matches": ".+"} -->
+
+    > **Note:** The example above queries for any reported `config_version` rather than
+    > pinning `3.0.0` — later sessions push newer job versions to the same shared slot,
+    > so a fixed version would drift out of date. Swap in a specific version (e.g.
+    > `3.0.0`) to confirm a job rollout completed on your own deployment.
 
     > **Note:** The backslash before the hyphen (`device\-config`) is required because `-` is a reserved character in the Lucene query language. Without it the query parser rejects the field name with `InvalidQueryException`. The same escaping applies to any shadow name that contains a hyphen.
 
@@ -64,18 +81,28 @@
         aws iot search-index --index-name AWS_Things \
           --query-string 'attributes.deploymentId:ws-slot00 AND connectivity.connected:true'
         ```
+        <!-- e2e:assert {"jsonPath": "things[0].thingName", "matches": ".+"} -->
 
 8. Query by software package version — confirm all devices are on `telemetry-agent` v3.0.0:
 
-    [Open in console](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=attributes.deploymentId%3Aws-slot00%20AND%20shadow.name.%24package.reported.telemetry_agent.version%3A3.0.0){ .md-button target=_blank }
+    [Open in console](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=attributes.deploymentId%3Aws-slot00%20AND%20shadow.name.%24package.reported.telemetry\-agent.version%3A3.0.0){ .md-button target=_blank }
 
     ??? example "AWS CLI equivalent"
         ```bash
         aws iot search-index --index-name AWS_Things \
-          --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.$package.reported.telemetry_agent.version:3.0.0'
+          --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.$package.reported.telemetry\-agent.version:*'
         ```
+        <!-- e2e:assert {"jsonPath": "things[0].thingName", "matches": ".+"} -->
 
-    > **Note:** Hyphens in package names are replaced with underscores in Fleet Indexing query syntax — query `telemetry_agent`, not `telemetry-agent`.
+    > **Note:** As above, the example queries for any reported version rather than
+    > pinning `3.0.0` — later sessions push newer `telemetry-agent` jobs to the same
+    > shared slot. Swap in a specific version to confirm your own rollout.
+
+    > **Note:** The backslash before the hyphen (`telemetry\-agent`) is required —
+    > `-` is a reserved character in the Lucene query language, same as the
+    > `device\-config` escaping in step 6. Package version fields keep their
+    > original hyphenated name (`telemetry-agent`), they are **not** rewritten to
+    > underscores — verified against a live index.
 
 
 ---

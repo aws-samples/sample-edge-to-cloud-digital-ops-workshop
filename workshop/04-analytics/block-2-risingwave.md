@@ -9,12 +9,15 @@
 RisingWave's PostgreSQL wire protocol listens on **port 4567** (not 4566, which is the HTTP dashboard).
 
 ```bash
-# In one terminal — keep this running
-kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567
-
-# In another terminal — connect with psql
-psql -h localhost -p 4567 -U root -d dev
+kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567 > /tmp/rw-cloud-pf.log 2>&1 &
+RW_PF_PID=$!
+sleep 5
+psql -h localhost -p 4567 -U root -d dev -c "SELECT 1;"
+kill "$RW_PF_PID" 2>/dev/null || true
 ```
+<!-- e2e:assert {"contains": "1 row"} -->
+
+Or keep the port-forward running in a separate terminal and connect interactively with `psql -h localhost -p 4567 -U root -d dev`.
 
 ---
 
@@ -36,12 +39,18 @@ MSK_PASS=$(aws secretsmanager get-secret-value \
   --secret-id AmazonMSK_workshop-ws-slot00 \
   --query SecretString --output text | python3 -c 'import sys,json; print(json.load(sys.stdin)["password"])')
 
-# Apply the DDL with values substituted
+# Apply the DDL with values substituted — the source and MVs use
+# CREATE ... IF NOT EXISTS, so this is safe to re-run.
+kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567 > /tmp/rw-cloud-pf2.log 2>&1 &
+RW_PF_PID=$!
+sleep 5
 sed -e "s|__MSK_BOOTSTRAP__|$MSK_BOOTSTRAP|g" \
     -e "s|__MSK_USER__|$MSK_USER|g" \
     -e "s|__MSK_PASS__|$MSK_PASS|g" \
     risingwave/ddl-cloud.sql | psql -h localhost -p 4567 -U root -d dev
+kill "$RW_PF_PID" 2>/dev/null || true
 ```
+<!-- e2e:assert {"contains": "CREATE MATERIALIZED VIEW"} -->
 
 ??? example "View source — ddl-cloud.sql"
     [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/risingwave/ddl-cloud.sql){ .md-button target=_blank }

@@ -38,12 +38,11 @@ scripts/teardown.sh ws-slot00                    # per-slot cleanup (preserves s
 pnpm test                                        # scripts/smoke-test.mjs (needs WORKSHOP_TEST_SLOT)
 WORKSHOP_TEST_SLOT=ws-slot00 node scripts/smoke-test.mjs
 
-# End-to-end suite (deploys, exercises every session via AWS SDK, tears down)
-pnpm run e2e                                      # full run
-pnpm run e2e:no-deploy                            # against already-running stacks
-pnpm run e2e:walkthrough                          # doc-runner walkthrough, no deploy/teardown
-cd e2e && pnpm test -- --session observe          # run one phase only
-cd e2e && pnpm test -- --deployment-id ws-slot01  # target a specific slot
+# End-to-end suite (doc-runner: executes every e2e:assert-annotated bash block in workshop/*.md against a live slot)
+pnpm run e2e                                       # every workshop doc, against WORKSHOP_TEST_SLOT (default ws-e2e-test)
+pnpm run e2e:delete-platform-stack                  # same, but also allows blocks annotated e2e:platform-teardown
+cd e2e && pnpm test:doc-runner -- workshop/02-control/block-2-iot-job.md   # run one doc file
+cd e2e && pnpm test:doc-runner -- workshop --deployment-id ws-slot01      # target a specific slot
 
 # Admin helpers
 scripts/create-workshop-user.sh ws-slot00 participant@example.com
@@ -76,7 +75,7 @@ The **data-freshness comparison panel** (frontend) is the centrepiece: same pump
 
 **Edge stack (EKS + Helm, `helm/edge-stack/`):** TimescaleDB (CloudNativePG), Redpanda + Connect, RisingWave, MinIO, and the HMI. TimescaleDB is the system of record at the edge; MSK/Redpanda buffer is expendable and backfilled from edge on reconnect. `job-scripts/` are IoT Job handler scripts pushed to devices (telemetry versions, K3s bootstrap, shadow timers).
 
-**Testing:** `e2e/runner.ts` is a `tsx` script (not a test framework) — phases map to workshop sessions (`platform|observe|control|state|analytics|edge|hmi|teardown`). `e2e/doc-runner.ts` extracts bash blocks from `workshop/*.md` annotated with `<!-- e2e:assert {...} -->` comments and executes them, so the published docs are themselves verified. Substitutions (`ws-slot00`, `000000000000`) are applied before running.
+**Testing:** `e2e/doc-runner.ts` extracts bash blocks from `workshop/*.md` annotated with `<!-- e2e:assert {...} -->` comments and executes them against a live deployment slot, so the published docs are themselves verified — there is no separate deploy/exercise/teardown suite. `e2e/doc-runner-cli.ts` is the CLI entry point (`e2e/package.json`'s `test`/`test:doc-runner` scripts), accepting one or more file/directory args. Substitutions (`ws-slot00`, `000000000000`) are applied before running. A block additionally annotated `<!-- e2e:platform-teardown -->` is refused unless `--delete-platform-stack` / `E2E_DELETE_PLATFORM_STACK=true` is passed — never a default side effect of a routine pass. The guard is annotation-based (not command-text matching), so it can't be bypassed by rewording a command and must be applied explicitly by whoever writes a platform-destructive doc block.
 
 ## Long Runnting Tasks
 

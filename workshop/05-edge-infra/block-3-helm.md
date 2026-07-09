@@ -19,6 +19,7 @@ aws ssm get-parameter \
 export KUBECONFIG=~/.kube/edge-config
 kubectl get nodes
 ```
+<!-- e2e:assert {"contains": "Ready"} -->
 
 All 3 nodes should show `Ready`.
 
@@ -43,6 +44,7 @@ kubectl create secret generic msk-credentials \
   --from-literal=MSK_USERNAME="$MSK_USER" \
   --from-literal=MSK_PASSWORD="$MSK_PASS"
 ```
+<!-- e2e:assert {"contains": "secret/msk-credentials"} -->
 
 ---
 
@@ -55,6 +57,7 @@ helm upgrade --install edge-stack ./helm/edge-stack \
   -f helm/edge-stack-values.yaml \
   --set deploymentId=ws-slot00
 ```
+<!-- e2e:assert {"contains": "edge-stack"} -->
 
 This deploys in a single Helm umbrella chart:
 
@@ -73,6 +76,7 @@ This deploys in a single Helm umbrella chart:
 ```bash
 kubectl get pods -n edge
 ```
+<!-- e2e:assert {"contains": "NAME"} -->
 
 All pods should reach `Running` within ~5 minutes.
 

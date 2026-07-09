@@ -14,6 +14,11 @@
  *   jsonPath      — dot-path to extract from stdout JSON (e.g. "jobId")
  *   matches       — regex the jsonPath value must match
  *   jobSucceeds   — after the block, poll until all IoT job executions SUCCEED
+ *
+ * A block that tears down the shared platform stack (VPCs/EKS/MSK) must also
+ * carry a <!-- e2e:platform-teardown --> comment alongside its e2e:assert one —
+ * runDocBlocks refuses to run it unless the caller opts in (see
+ * RunDocBlocksOptions.allowPlatformTeardown).
  */
 
 import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
@@ -51,6 +56,7 @@ export interface BlockResult {
 interface RawBlock {
   script: string;
   assert: AssertSpec | null;
+  platformTeardown: boolean;
 }
 
 // ── Parse ─────────────────────────────────────────────────────────────────────
@@ -58,6 +64,7 @@ interface RawBlock {
 const BASH_FENCE_RE = /^```bash\s*\n([\s\S]*?)^```/gm;
 const ASSERT_COMMENT_RE = /<!--\s*e2e:assert\s+(\{[\s\S]*?\})\s*-->/;
 const SKIP_COMMENT_RE = /<!--\s*e2e:skip\s*-->/;
+const PLATFORM_TEARDOWN_COMMENT_RE = /<!--\s*e2e:platform-teardown\s*-->/;
 
 function parseBlocks(md: string): RawBlock[] {
   const blocks: RawBlock[] = [];
@@ -102,7 +109,12 @@ function parseBlocks(md: string): RawBlock[] {
         }
       }
 
-      blocks.push({ script, assert });
+      // A block that would tear down the shared platform stack must say so
+      // explicitly via <!-- e2e:platform-teardown --> — the guard below relies
+      // on this annotation rather than pattern-matching the script text.
+      const platformTeardown = PLATFORM_TEARDOWN_COMMENT_RE.test(assertSearch);
+
+      blocks.push({ script, assert, platformTeardown });
       continue;
     }
 
@@ -127,8 +139,15 @@ function applySubstitutions(script: string, subs: RunnerSubstitutions): string {
 
 // ── Assert ────────────────────────────────────────────────────────────────────
 
+// Splits "things[0].thingName" into ["things", "0", "thingName"] so array
+// indices (jsonPath results routinely nest results as things[N].field) resolve
+// the same way plain object keys do.
 function resolveDotPath(obj: unknown, path: string): unknown {
-  return path.split(".").reduce((acc, key) => {
+  const keys = path
+    .replace(/\[(\d+)\]/g, ".$1")
+    .split(".")
+    .filter((k) => k.length > 0);
+  return keys.reduce((acc, key) => {
     if (acc && typeof acc === "object") return (acc as Record<string, unknown>)[key];
     return undefined;
   }, obj);
@@ -295,19 +314,46 @@ function pollJobUntilDone(
   throw new Error(`IoT Job ${jobId} timed out after ${timeoutMs}ms`);
 }
 
+// ── Platform-stack safety guard ──────────────────────────────────────────────
+
+// The shared platform stack (VPCs, EKS, MSK) is depended on by every participant
+// slot. A doc block that could tear it down must never run as a side effect of
+// a routine doc-runner pass — only when the caller explicitly opts in. Rather
+// than pattern-matching the script text for destructive-looking commands
+// (brittle — breaks on rewording, aliasing, or wrapping in a variable), the
+// doc author marks the block explicitly with <!-- e2e:platform-teardown -->
+// alongside its e2e:assert comment; see parseBlocks above.
+
+export interface RunDocBlocksOptions {
+  /** Opt-in to running blocks that would tear down the shared platform stack. Default: false. */
+  allowPlatformTeardown?: boolean;
+}
+
 // ── Run a single .md file's blocks ───────────────────────────────────────────
 
 export async function runDocBlocks(
   mdPath: string,
   subs: RunnerSubstitutions,
   cwd: string,
-  onResult: (r: BlockResult) => void
+  onResult: (r: BlockResult) => void,
+  opts?: RunDocBlocksOptions
 ): Promise<void> {
   const md = readFileSync(mdPath, "utf8");
   const blocks = parseBlocks(md);
   const annotated = blocks.filter((b) => b.assert !== null);
 
   if (annotated.length === 0) return;
+
+  if (!opts?.allowPlatformTeardown) {
+    const blocked = annotated.find((b) => b.platformTeardown);
+    if (blocked) {
+      throw new Error(
+        `${mdPath}: refusing to run a block annotated <!-- e2e:platform-teardown --> ` +
+        `(it tears down the shared platform stack). ` +
+        `Pass { allowPlatformTeardown: true } (doc-runner-cli: --delete-platform-stack) to opt in.`
+      );
+    }
+  }
 
   // Build a single bash script with sentinel markers between blocks
   // We run the whole session as one script so variables persist.

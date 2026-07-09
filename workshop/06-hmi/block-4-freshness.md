@@ -10,10 +10,15 @@ Port-forward simultaneously and open each dashboard in a browser tab:
 
 ```bash
 # Edge HMI (already running from Block 1)
-kubectl port-forward -n edge svc/hmi 3000:3000
+kubectl port-forward -n edge svc/hmi 3000:3000 > /tmp/hmi-pf2.log 2>&1 &
+HMI_PF_PID=$!
+sleep 5
+curl -sf http://localhost:3000 | head -c 200
+kill "$HMI_PF_PID" 2>/dev/null || true
 
 # (Cloud Amplify front end loads from its hosted URL — no port-forward needed)
 ```
+<!-- e2e:assert {"contains": "<"} -->
 
 ---
 

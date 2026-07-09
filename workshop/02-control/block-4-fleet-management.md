@@ -17,6 +17,7 @@
       --query 'packageSummaries[?contains(packageName, `ws-slot00`)]' \
       --output table
     ```
+    <!-- e2e:assert {"contains": "ws-slot00"} -->
 
 **2. Run a Fleet Indexing query to confirm all devices report `2.0.0`:**
 
@@ -25,20 +26,37 @@
 ??? example "AWS CLI equivalent"
     ```bash
     aws iot search-index --index-name AWS_Things \
-      --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.device-config.reported.config_version:2.0.0'
+      --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.device-config.reported.config_version:*'
     ```
+    <!-- e2e:assert {"jsonPath": "things[0].thingName", "matches": ".+"} -->
+
+    > **Note:** The example above queries for any reported `config_version` rather
+    > than pinning `2.0.0` — later sessions push newer job versions to the same
+    > shared slot, so a fixed version would drift out of date. Swap in a specific
+    > version to confirm a job rollout completed on your own deployment.
 
 **3. Simulate configuration drift:**
 
 - Navigate to **IoT Core → Manage → Things → (any device) → Shadows → device-config → Edit**
 - Set `desired.config_version` back to `1.0.0` in the JSON editor
 
+```bash
+THING_NAME=$(aws iot list-things-in-thing-group \
+  --thing-group-name ws-slot00-devices \
+  --query 'things[0]' --output text)
+
+# Save the device's current reported version so the drift can be reverted below.
+REPORTED_VERSION=$(aws iot-data get-thing-shadow \
+  --thing-name "$THING_NAME" \
+  --shadow-name device-config \
+  --cli-binary-format raw-in-base64-out \
+  /tmp/shadow-before.json > /dev/null && \
+  python3 -c "import json; print(json.load(open('/tmp/shadow-before.json'))['state']['reported']['config_version'])")
+```
+<!-- e2e:assert {"notContains": "Traceback"} -->
+
 ??? example "AWS CLI equivalent"
     ```bash
-    THING_NAME=$(aws iot list-things-in-thing-group \
-      --thing-group-name ws-slot00-devices \
-      --query 'things[0]' --output text)
-
     aws iot-data update-thing-shadow \
       --thing-name "$THING_NAME" \
       --shadow-name device-config \
@@ -47,6 +65,7 @@
       /tmp/shadow-update-response.json
     cat /tmp/shadow-update-response.json
     ```
+    <!-- e2e:assert {"contains": "version"} -->
 
 **4. Run a drift detection query** — find devices where desired ≠ reported:
 
@@ -54,11 +73,31 @@
 
 ??? example "AWS CLI equivalent"
     ```bash
-    aws iot search-index --index-name AWS_Things \
-      --query-string 'attributes.deploymentId:ws-slot00 AND NOT (shadow.name.device-config.desired.config_version:shadow.name.device-config.reported.config_version)'
+    for _i in $(seq 1 12); do
+      RESULT=$(aws iot search-index --index-name AWS_Things \
+        --query-string 'attributes.deploymentId:ws-slot00 AND NOT (shadow.name.device-config.desired.config_version:shadow.name.device-config.reported.config_version)' \
+        --output json)
+      echo "$RESULT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d['things']))" | grep -qv '^0$' && break
+      sleep 15
+    done
+    echo "$RESULT"
     ```
+    <!-- e2e:assert {"jsonPath": "things[0].thingName", "matches": ".+"} -->
 
 You should see the device you edited appear in the results.
+
+**5. Revert the drift** — set `desired.config_version` back to the device's actual reported version so the shared slot is left converged for the next session:
+
+```bash
+aws iot-data update-thing-shadow \
+  --thing-name "$THING_NAME" \
+  --shadow-name device-config \
+  --cli-binary-format raw-in-base64-out \
+  --payload "{\"state\":{\"desired\":{\"config_version\":\"$REPORTED_VERSION\"}}}" \
+  /tmp/shadow-revert-response.json
+cat /tmp/shadow-revert-response.json
+```
+<!-- e2e:assert {"contains": "version"} -->
 
 ---
 
