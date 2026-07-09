@@ -302,19 +302,44 @@ function pollJobUntilDone(
   throw new Error(`IoT Job ${jobId} timed out after ${timeoutMs}ms`);
 }
 
+// ── Platform-stack safety guard ──────────────────────────────────────────────
+
+// The shared platform stack (VPCs, EKS, MSK) is depended on by every participant
+// slot. A doc block that could tear it down must never run as a side effect of
+// a routine doc-runner pass — only when the caller explicitly opts in.
+const PLATFORM_DESTRUCTIVE_RE =
+  /cdk destroy[^\n]*WorkshopPlatformStack|aws cloudformation delete-stack[^\n]*WorkshopPlatformStack|sandbox:delete-all|sandbox-delete-all\.sh/;
+
+export interface RunDocBlocksOptions {
+  /** Opt-in to running blocks that would tear down the shared platform stack. Default: false. */
+  allowPlatformTeardown?: boolean;
+}
+
 // ── Run a single .md file's blocks ───────────────────────────────────────────
 
 export async function runDocBlocks(
   mdPath: string,
   subs: RunnerSubstitutions,
   cwd: string,
-  onResult: (r: BlockResult) => void
+  onResult: (r: BlockResult) => void,
+  opts?: RunDocBlocksOptions
 ): Promise<void> {
   const md = readFileSync(mdPath, "utf8");
   const blocks = parseBlocks(md);
   const annotated = blocks.filter((b) => b.assert !== null);
 
   if (annotated.length === 0) return;
+
+  if (!opts?.allowPlatformTeardown) {
+    const blocked = annotated.find((b) => PLATFORM_DESTRUCTIVE_RE.test(b.script));
+    if (blocked) {
+      throw new Error(
+        `${mdPath}: refusing to run a block that could tear down the shared platform stack ` +
+        `(matched: ${PLATFORM_DESTRUCTIVE_RE.exec(blocked.script)?.[0]}). ` +
+        `Pass { allowPlatformTeardown: true } (doc-runner-cli: --delete-platform-stack) to opt in.`
+      );
+    }
+  }
 
   // Build a single bash script with sentinel markers between blocks
   // We run the whole session as one script so variables persist.

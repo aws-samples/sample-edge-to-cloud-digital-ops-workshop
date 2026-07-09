@@ -14,9 +14,7 @@
     "pipeline-deploy": "npx ampx pipeline-deploy",
     "test": "node scripts/smoke-test.mjs",
     "e2e": "pnpm --filter edge-digital-ops-e2e test",
-    "e2e:no-deploy": "pnpm --filter edge-digital-ops-e2e test -- --skip-deploy",
-    "e2e:no-teardown": "pnpm --filter edge-digital-ops-e2e test -- --skip-teardown",
-    "e2e:walkthrough": "WORKSHOP_TEST_SLOT=${WORKSHOP_TEST_SLOT:-ws-slot00} pnpm --filter edge-digital-ops-e2e test -- --skip-deploy --skip-teardown --session workshop-walkthrough"
+    "e2e:delete-platform-stack": "pnpm --filter edge-digital-ops-e2e test:delete-platform-stack"
   },
   "devDependencies": {
     "@aws-amplify/backend": "^1.23.0",

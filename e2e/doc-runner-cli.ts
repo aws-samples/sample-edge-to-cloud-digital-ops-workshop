@@ -12,9 +12,13 @@
  * A directory argument is expanded to every .md file found under it (recursively).
  * Multiple file/directory arguments may be mixed in a single invocation.
  *
- * Environment variables (same names as runner.ts):
- *   WORKSHOP_TEST_SLOT   deployment ID (default: ws-e2e-test)
- *   AWS_REGION           AWS region (default: us-east-1)
+ * By default, any block that could tear down the shared platform stack (VPCs,
+ * EKS, MSK) is refused — pass --delete-platform-stack to opt in.
+ *
+ * Environment variables:
+ *   WORKSHOP_TEST_SLOT          deployment ID (default: ws-e2e-test)
+ *   AWS_REGION                  AWS region (default: us-east-1)
+ *   E2E_DELETE_PLATFORM_STACK   "true" to also allow platform-teardown blocks (default: false)
  */
 
 import { join, relative } from "node:path";
@@ -26,7 +30,9 @@ import { runDocBlocks, type BlockResult } from "./doc-runner.js";
 const REPO_ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
 const args = process.argv.slice(2);
-const pathArgs = args.filter((a, i) => !a.startsWith("--") && args[i - 1] !== "--deployment-id");
+const pathArgs = args.filter(
+  (a, i) => !a.startsWith("--") && args[i - 1] !== "--deployment-id"
+);
 if (pathArgs.length === 0) {
   console.error("Usage: doc-runner-cli.ts <path-to-workshop-md-file-or-dir> [<path> ...] [--deployment-id <id>]");
   process.exit(1);
@@ -66,6 +72,10 @@ const deploymentIdIdx = args.indexOf("--deployment-id");
 const DEPLOYMENT_ID =
   deploymentIdIdx !== -1 ? args[deploymentIdIdx + 1] : process.env.WORKSHOP_TEST_SLOT ?? "ws-e2e-test";
 const REGION = process.env.AWS_REGION ?? "us-east-1";
+// Platform teardown (deleting the shared VPCs/EKS/MSK) must be explicitly opted
+// into — never run as a side effect of a routine doc-runner pass.
+const ALLOW_PLATFORM_TEARDOWN =
+  process.env.E2E_DELETE_PLATFORM_STACK === "true" || args.includes("--delete-platform-stack");
 
 const ssm = new SSMClient({ region: REGION });
 const sts = new STSClient({ region: REGION });
@@ -98,12 +108,13 @@ if (missing.length > 0) {
 }
 const [, SHARED_BUCKET, GRAPHQL_ENDPOINT] = ssmValues as string[];
 
-console.log(`  Doc files      : ${mdPaths.length}`);
-console.log(`  Deployment ID  : ${DEPLOYMENT_ID}`);
-console.log(`  Region         : ${REGION}`);
-console.log(`  Account ID     : ${ACCOUNT_ID}`);
-console.log(`  Shared bucket  : ${SHARED_BUCKET}`);
-console.log(`  GraphQL URL    : ${GRAPHQL_ENDPOINT}`);
+console.log(`  Doc files              : ${mdPaths.length}`);
+console.log(`  Deployment ID          : ${DEPLOYMENT_ID}`);
+console.log(`  Region                 : ${REGION}`);
+console.log(`  Account ID             : ${ACCOUNT_ID}`);
+console.log(`  Shared bucket          : ${SHARED_BUCKET}`);
+console.log(`  GraphQL URL            : ${GRAPHQL_ENDPOINT}`);
+console.log(`  Allow platform teardown: ${ALLOW_PLATFORM_TEARDOWN}`);
 console.log("");
 
 interface FileSummary {
@@ -117,20 +128,35 @@ for (const mdPath of mdPaths) {
   const results: BlockResult[] = [];
   console.log(`── ${relative(REPO_ROOT, mdPath)} `.padEnd(70, "─"));
 
-  await runDocBlocks(
-    mdPath,
-    { DEPLOYMENT_ID, ACCOUNT_ID, SHARED_BUCKET, REGION, GRAPHQL_ENDPOINT },
-    REPO_ROOT,
-    (r) => {
-      results.push(r);
-      if (r.passed) {
-        console.log(`  ✓  block ${r.blockIndex + 1}  [${r.durationMs}ms]`);
-      } else {
-        console.error(`  ✗  block ${r.blockIndex + 1}  [${r.durationMs}ms]`);
-        console.error(`       ${r.error}`);
-      }
-    }
-  );
+  try {
+    await runDocBlocks(
+      mdPath,
+      { DEPLOYMENT_ID, ACCOUNT_ID, SHARED_BUCKET, REGION, GRAPHQL_ENDPOINT },
+      REPO_ROOT,
+      (r) => {
+        results.push(r);
+        if (r.passed) {
+          console.log(`  ✓  block ${r.blockIndex + 1}  [${r.durationMs}ms]`);
+        } else {
+          console.error(`  ✗  block ${r.blockIndex + 1}  [${r.durationMs}ms]`);
+          console.error(`       ${r.error}`);
+        }
+      },
+      { allowPlatformTeardown: ALLOW_PLATFORM_TEARDOWN }
+    );
+  } catch (err) {
+    console.error(`  ✗  ${err instanceof Error ? err.message : String(err)}`);
+    results.push({
+      file: mdPath,
+      blockIndex: -1,
+      script: "",
+      stdout: "",
+      stderr: "",
+      passed: false,
+      error: err instanceof Error ? err.message : String(err),
+      durationMs: 0,
+    });
+  }
 
   if (results.length === 0) {
     console.log("  No annotated (e2e:assert) blocks found in this file.");
