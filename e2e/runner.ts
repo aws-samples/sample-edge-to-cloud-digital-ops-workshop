@@ -8,22 +8,28 @@
  * all resources are deleted.
  *
  * Usage:
- *   pnpm test                              # full run
+ *   pnpm test                              # full run — participant stack only; shared platform stack is left up
  *   pnpm test -- --skip-deploy             # assume stacks already up
  *   pnpm test -- --skip-teardown           # leave everything running after tests
- *   pnpm test -- --skip-platform-teardown
+ *   pnpm test -- --delete-platform-stack   # opt-in: also tear down the shared platform stack (VPCs/EKS/MSK)
  *   pnpm test -- --deployment-id ws-slot01
  *   pnpm test -- --session observe         # run only Phase 2 (Session 1: Observe)
  *
  * --session values map to phases:
  *   platform | observe | control | state | analytics | edge | hmi | teardown | platform-teardown | workshop-walkthrough
  *
+ * Phase 9 (platform teardown) deletes the shared platform stack — the VPCs, EKS
+ * cluster, and MSK cluster that every participant slot depends on. It is
+ * off by default so a routine e2e run never takes down shared infrastructure
+ * out from under other slots; pass --delete-platform-stack (or set
+ * E2E_DELETE_PLATFORM_STACK=true) to opt in.
+ *
  * Environment variables:
  *   WORKSHOP_TEST_SLOT          deployment ID (default: ws-e2e-test)
  *   AWS_REGION                  AWS region (default: us-east-1)
  *   E2E_SKIP_DEPLOY             "true" to skip all CDK/sandbox deploy
  *   E2E_SKIP_TEARDOWN           "true" to skip participant teardown
- *   E2E_SKIP_PLATFORM_TEARDOWN  "true" to keep shared VPCs/EKS after test
+ *   E2E_DELETE_PLATFORM_STACK   "true" to also tear down the shared platform stack (default: false)
  *   E2E_K3S_TIMEOUT_MS          ms to wait for K3s job (default: 1_800_000)
  *   E2E_HELM_TIMEOUT_MS         ms to wait for Helm rollout (default: 600_000)
  *   E2E_HMI_TIMEOUT_MS          ms to wait for HMI SSE events (default: 60_000)
@@ -107,10 +113,11 @@ const DEPLOYMENT_ID = process.env.WORKSHOP_TEST_SLOT ?? "ws-e2e-test";
 const REGION = process.env.AWS_REGION ?? "us-east-1";
 const SKIP_DEPLOY = process.env.E2E_SKIP_DEPLOY === "true" || process.argv.includes("--skip-deploy");
 const SKIP_TEARDOWN = process.env.E2E_SKIP_TEARDOWN === "true" || process.argv.includes("--skip-teardown");
-const SKIP_PLATFORM_TEARDOWN =
-  SKIP_TEARDOWN ||
-  process.env.E2E_SKIP_PLATFORM_TEARDOWN === "true" ||
-  process.argv.includes("--skip-platform-teardown");
+// Platform teardown (Phase 9) deletes shared infrastructure other slots depend on —
+// it must be explicitly opted into, never run as a side effect of a routine e2e pass.
+const DELETE_PLATFORM_STACK =
+  !SKIP_TEARDOWN &&
+  (process.env.E2E_DELETE_PLATFORM_STACK === "true" || process.argv.includes("--delete-platform-stack"));
 
 // --session <name>: run only the named session phase (implies --skip-deploy and
 // --skip-teardown unless the session name is "teardown" or "platform-teardown").
@@ -557,7 +564,7 @@ try {
   console.log(`  S3 bucket               : ${BUCKET_NAME}`);
   console.log(`  Skip deploy             : ${SKIP_DEPLOY}`);
   console.log(`  Skip teardown           : ${SKIP_TEARDOWN}`);
-  console.log(`  Skip platform teardown  : ${SKIP_PLATFORM_TEARDOWN}`);
+  console.log(`  Delete platform stack   : ${DELETE_PLATFORM_STACK}`);
 
   // ── Pre-flight: resolve cross-phase state when running a single session ────
   // Cross-phase variables (thingGroupArn, mskArn, edgeInstance0, etc.) are
@@ -1917,8 +1924,8 @@ try {
   if (phaseEnabled("Phase 9")) {
   beginPhase("Phase 9 — Platform teardown");
 
-  if (SKIP_PLATFORM_TEARDOWN) {
-    log("Skipping platform teardown (--skip-platform-teardown)");
+  if (!DELETE_PLATFORM_STACK) {
+    log("Skipping platform teardown (pass --delete-platform-stack to opt in)");
   } else {
     // EKS nodegroup/cluster and MSK cluster now delete automatically as part
     // of `cdk destroy` (no RETAIN policy) — no manual pre-deletion needed.

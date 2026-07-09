@@ -7,7 +7,7 @@
     "test": "tsx runner.ts",
     "test:no-deploy": "tsx runner.ts --skip-deploy",
     "test:no-teardown": "tsx runner.ts --skip-teardown",
-    "test:no-platform-teardown": "tsx runner.ts --skip-platform-teardown",
+    "test:delete-platform-stack": "tsx runner.ts --delete-platform-stack",
     "test:doc-runner": "tsx doc-runner-cli.ts"
   },
   "dependencies": {
