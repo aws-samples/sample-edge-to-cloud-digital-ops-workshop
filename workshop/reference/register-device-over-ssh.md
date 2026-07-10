@@ -77,19 +77,41 @@ connection to a fresh device).
         ProxyCommand sh -c "aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters 'portNumber=%p' --region us-east-1"
     ```
 
-    **3. Point `--ssh` at the instance ID** (SSH resolves it through the tunnel):
+    **3. Install your public key on the instance.** SSM tunnels the *connection*, but SSH still
+    authenticates with a key at the far end — so your public key must be in the login user's
+    `authorized_keys`, or you'll get `Permission denied (publickey)`. Push it once over SSM Run
+    Command (no port 22, no keypair juggling). This also prints the correct login user (uid 1000):
+
+    ```bash
+    PUBKEY=$(cat ~/.ssh/id_ed25519.pub)   # your public key
+    aws ssm send-command \
+      --instance-ids i-0123456789abcdef0 \
+      --region us-east-1 \
+      --document-name AWS-RunShellScript \
+      --parameters commands="[\"U=\$(getent passwd 1000 | cut -d: -f1); H=\$(getent passwd \$U | cut -d: -f6); install -d -m 700 -o \$U -g \$U \$H/.ssh; grep -qxF '$PUBKEY' \$H/.ssh/authorized_keys 2>/dev/null || echo '$PUBKEY' >> \$H/.ssh/authorized_keys; chmod 600 \$H/.ssh/authorized_keys; chown \$U:\$U \$H/.ssh/authorized_keys; echo LOGIN_USER=\$U\"]" \
+      --query 'Command.CommandId' --output text
+    ```
+
+    Read the result with `aws ssm get-command-invocation --command-id <id> --instance-id
+    i-0123456789abcdef0 --region us-east-1 --query StandardOutputContent --output text` — the
+    `LOGIN_USER=...` line tells you the user for the next step.
+
+    **4. Point `--ssh` at the instance ID** (SSH resolves it through the tunnel), using the login
+    user from step 3:
 
     ```bash
     ./scripts/register-device-ssh.sh \
-      --ssh ec2-user@i-0123456789abcdef0 \
+      --ssh admin@i-0123456789abcdef0 \
+      -i ~/.ssh/id_ed25519 \
       --deployment-id ws-slot00 \
       --thing-name my-ec2-device
     ```
 
     The script's `ssh`/`scp` calls both traverse the tunnel, so the build and cert-install steps
     run on the instance exactly as they would over a normal SSH connection. Use the login user for
-    the AMI (`ec2-user` on Amazon Linux, `ubuntu` on Ubuntu). To open a plain interactive shell
-    without SSH, `aws ssm start-session --target i-0123456789abcdef0 --region us-east-1`.
+    the AMI: **`admin`** on Debian, `ec2-user` on Amazon Linux, `ubuntu` on Ubuntu (step 3 prints
+    the actual one). To open a plain interactive shell without SSH, `aws ssm start-session --target
+    i-0123456789abcdef0 --region us-east-1`.
 
 ---
 
