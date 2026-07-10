@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "tsx doc-runner-cli.ts workshop",
-    "test:delete-platform-stack": "tsx doc-runner-cli.ts workshop --delete-platform-stack",
+    "test": "pnpm run test:unit && tsx doc-runner-cli.ts workshop",
+    "test:unit": "tsx --test doc-runner.test.ts",
+    "test:delete-platform-stack": "pnpm run test:unit && tsx doc-runner-cli.ts workshop --delete-platform-stack",
     "test:doc-runner": "tsx doc-runner-cli.ts"
   },
   "dependencies": {
