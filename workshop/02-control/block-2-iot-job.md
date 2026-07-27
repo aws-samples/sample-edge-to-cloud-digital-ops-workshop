@@ -25,14 +25,18 @@ The three measurement lines inside the `while true` loop change from integer to 
 CPU=$(top -bn1 | grep "Cpu(s)" | awk '{printf "%d", $2+0}')
 MEM=$(free | awk '/Mem:/ {printf "%d", $3/$2*100}')
 DISK=$(df / | awk 'NR==2 {printf "%d", $5+0}')
+echo "$CPU $MEM $DISK"
 ```
+<!-- e2e:assert {"notContains": "."} -->
 
 ```bash
 # After
 CPU=$(top -bn1 | grep "Cpu(s)" | awk '{printf "%.3f", $2+0}')
 MEM=$(free | awk '/Mem:/ {printf "%.3f", $3/$2*100}')
 DISK=$(df / | awk 'NR==2 {printf "%.3f", $5+0}')
+echo "$CPU $MEM $DISK"
 ```
+<!-- e2e:assert {"contains": "."} -->
 
 The `%d` format truncates — `42.7%` becomes `42`. The `%.3f` format preserves three decimal places — `42.7%` becomes `42.700`. This matters for analytics: integer CPU values cluster at round numbers and make it hard to detect gradual drift.
 
@@ -44,6 +48,15 @@ Also note the `exit 0` at the end of the script — this is the contract with th
     ```bash
     --8<-- "job-scripts/telemetry-v3.sh:job-handler"
     ```
+
+    The embedded snippet is the actual job handler — a syntax check on the source
+    file catches a broken tagged region even though the handler itself only runs
+    inside an IoT Job on a device:
+
+    ```bash
+    bash -n job-scripts/telemetry-v3.sh && echo "syntax OK"
+    ```
+    <!-- e2e:assert {"contains": "syntax OK"} -->
 
 **2. Upload the script and job document to S3:**
 
@@ -119,11 +132,17 @@ aws s3 cp /tmp/telemetry-v4-job-doc.json \
 Monitor from the console at [IoT Core → Manage → Jobs](https://us-east-1.console.aws.amazon.com/iot/home#/jobhub), or poll with the CLI:
 
 ```bash
-aws iot list-job-executions-for-job \
-  --job-id "$JOB_ID" \
-  --query 'executionSummaries[].{thing:thingArn,status:jobExecutionSummary.status}' \
-  --output table
+for _i in $(seq 1 30); do
+  RESULT=$(aws iot list-job-executions-for-job \
+    --job-id "$JOB_ID" \
+    --query 'executionSummaries[].{thing:thingArn,status:jobExecutionSummary.status}' \
+    --output table)
+  echo "$RESULT" | grep -q "SUCCEEDED" && break
+  sleep 10
+done
+echo "$RESULT"
 ```
+<!-- e2e:assert {"contains": "SUCCEEDED"} -->
 
 **6. Return to the MQTT test client** and observe:
 

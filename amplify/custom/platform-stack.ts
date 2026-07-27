@@ -43,7 +43,19 @@ import { CfnApplication as CfnFlinkApplication } from "aws-cdk-lib/aws-kinesisan
 import { CfnWorkGroup } from "aws-cdk-lib/aws-athena";
 import { Construct } from "constructs";
 
-export interface PlatformStackProps extends StackProps {}
+export interface PlatformStackProps extends StackProps {
+  /**
+   * Whether to create the Managed Flink app. Defaults to true.
+   *
+   * The Flink app reads its code JAR from the shared S3 bucket created in
+   * this same stack — on a fresh account that bucket (and JAR) don't exist
+   * yet, so the very first deploy must skip the Flink app or CloudFormation
+   * rolls back the entire stack (VPCs/EKS/MSK included) when it can't find
+   * the JAR. scripts/sandbox-all.sh sets this to false for that first pass,
+   * uploads the JAR once the bucket exists, then redeploys with it back on.
+   */
+  readonly deployFlinkApp?: boolean;
+}
 
 /**
  * Shared platform infrastructure — deployed once per account/region.
@@ -52,7 +64,9 @@ export interface PlatformStackProps extends StackProps {}
  * workshop-cloud 10.1.0.0/16  — shared EKS cluster, per-slot MSK clusters
  *
  * EKS cluster is shared across all participants. Each participant slot gets its
- * own namespace (e.g. ws-slot00) with RBAC scoped to that namespace.
+ * own namespace (e.g. ws-slot00) with RBAC scoped to that namespace. The MSK
+ * cluster is likewise shared; each slot gets its own SCRAM credentials
+ * (created in ParticipantStack).
  */
 export class PlatformStack extends Stack {
   public readonly edgeVpc: Vpc;
@@ -175,8 +189,6 @@ export class PlatformStack extends Stack {
         bootstrapClusterCreatorAdminPermissions: true,
       },
     });
-    // Retain on stack delete — manual cleanup prevents accidental data loss.
-    eksCluster.cfnOptions.deletionPolicy = CfnDeletionPolicy.RETAIN;
 
     const eksNodegroup = new CfnNodegroup(this, "EksNodegroup", {
       clusterName: eksCluster.ref,
@@ -193,7 +205,6 @@ export class PlatformStack extends Stack {
       diskSize: 20,
     });
     eksNodegroup.addDependency(eksCluster);
-    eksNodegroup.cfnOptions.deletionPolicy = CfnDeletionPolicy.RETAIN;
 
     new CfnOutput(this, "EksClusterName", {
       exportName: "workshop-eks-cluster-name",
@@ -221,7 +232,7 @@ export class PlatformStack extends Stack {
     });
 
     const risingwaveS3Role = new Role(this, "RisingwaveS3Role", {
-      roleName: "workshop-risingwave-s3",
+      roleName: "workshop-risingwave-s3-v2",
       assumedBy: new FederatedPrincipal(
         eksOidcProvider.openIdConnectProviderArn,
         {
@@ -274,7 +285,7 @@ export class PlatformStack extends Stack {
     const mskScramKey = new KmsKey(this, "MskScramKey", {
       description: "CMK for workshop MSK SCRAM secrets",
       enableKeyRotation: true,
-      removalPolicy: RemovalPolicy.RETAIN,
+      removalPolicy: RemovalPolicy.DESTROY,
     });
 
     new CfnOutput(this, "MskScramKeyArn", {
@@ -327,8 +338,6 @@ export class PlatformStack extends Stack {
         },
       },
     });
-    // MSK takes 15+ min to create and can't be deleted while CREATING.
-    mskCluster.cfnOptions.deletionPolicy = CfnDeletionPolicy.RETAIN;
 
     new CfnOutput(this, "MskClusterArn", {
       exportName: "workshop-platform-msk-arn",
@@ -423,7 +432,7 @@ export class PlatformStack extends Stack {
     // ── Managed Flink (MSK → Iceberg → S3) ──────────────────────────────────
     // Reads raw.telemetry from MSK via IAM auth, writes Apache Iceberg table
     // to S3 via GlueCatalog so Athena sees live snapshots.
-
+    if (props?.deployFlinkApp !== false) {
     // Resolve IAM bootstrap broker string (port 9098) via custom resource.
     const mskBootstrapIamLookup = new AwsCustomResource(this, "MskBootstrapIamLookup", {
       onCreate: {
@@ -603,6 +612,7 @@ export class PlatformStack extends Stack {
       exportName: "workshop-platform-flink-app-name",
       value: flinkApp.ref,
     });
+    }
 
     // ── Athena workgroup ─────────────────────────────────────────────────────
     // Shared across all participant slots. scripts/athena-query.sh defaults to

@@ -7,14 +7,15 @@
 ## Port-Forward
 
 ```bash
-kubectl port-forward -n edge svc/hmi 3000:3000
+kubectl port-forward -n edge svc/hmi 3000:3000 > /tmp/hmi-pf.log 2>&1 &
+HMI_PF_PID=$!
+sleep 5
+curl -sf http://localhost:3000 | head -c 200
+kill "$HMI_PF_PID" 2>/dev/null || true
 ```
+<!-- e2e:assert {"contains": "<"} -->
 
-Open in a browser:
-
-```
-http://localhost:3000
-```
+Or keep the port-forward running in a separate terminal and open `http://localhost:3000` in a browser.
 
 ---
 

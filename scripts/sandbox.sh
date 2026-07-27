@@ -23,31 +23,42 @@ PLATFORM_APP="npx tsx amplify/custom/platform-app.ts"
 echo ">>> Deployment ID: $DEPLOYMENT_ID"
 
 # ── Check whether the platform stack is fully deployed ──────────────────────
-# Accept either the original or V2 stack name; check by CloudFormation status
-# rather than VPC presence — a rollback can leave VPCs behind while other
-# resources (S3 bucket, MSK, etc.) are missing.
+# Check by CloudFormation status rather than VPC presence — a rollback can
+# leave VPCs behind while other resources (S3 bucket, MSK, etc.) are missing.
 PLATFORM_STACK=""
 if [[ "$FORCE" == "false" ]]; then
-  for CANDIDATE in WorkshopPlatformStackV2 WorkshopPlatformStack; do
-    STATUS=$(aws cloudformation describe-stacks \
-      --stack-name "$CANDIDATE" \
-      --query "Stacks[0].StackStatus" \
-      --output text 2>/dev/null || echo "DOES_NOT_EXIST")
-    if [[ "$STATUS" == "CREATE_COMPLETE" || "$STATUS" == "UPDATE_COMPLETE" ]]; then
-      PLATFORM_STACK="$CANDIDATE"
-      echo ">>> Platform stack is healthy ($CANDIDATE / $STATUS). Skipping platform deploy."
-      break
-    fi
-  done
+  STATUS=$(aws cloudformation describe-stacks \
+    --stack-name "WorkshopPlatformStack" \
+    --query "Stacks[0].StackStatus" \
+    --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+  if [[ "$STATUS" == "CREATE_COMPLETE" || "$STATUS" == "UPDATE_COMPLETE" ]]; then
+    PLATFORM_STACK="WorkshopPlatformStack"
+    echo ">>> Platform stack is healthy ($STATUS). Skipping platform deploy."
+  fi
 else
   echo ">>> --force passed. Skipping health check and re-deploying platform stack."
 fi
 
 if [[ -z "$PLATFORM_STACK" ]]; then
+  # The Managed Flink app reads its code JAR from the shared bucket this same
+  # stack creates. On a fresh account neither exists yet, so deploy without
+  # the Flink app first — scripts/sandbox-all.sh is what actually builds and
+  # uploads the JAR and redeploys with the Flink app enabled; this path just
+  # needs to not roll back everything else while waiting for that to happen.
+  ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+  DEPLOY_CONTEXT_ARGS=()
+  if ! aws s3api head-object \
+      --bucket "workshop-platform-${ACCOUNT_ID}" \
+      --key "flink-apps/flink-iceberg-sink-1.0.0.jar" >/dev/null 2>&1; then
+    echo ">>> Flink JAR not found yet — deploying platform stack without the Flink app."
+    echo ">>> Run scripts/sandbox-all.sh once to build/upload the JAR and enable it."
+    DEPLOY_CONTEXT_ARGS=(--context deployFlinkApp=false)
+  fi
   echo ">>> Deploying WorkshopPlatformStack..."
   npx cdk deploy \
     --app "$PLATFORM_APP" \
     --require-approval never \
+    "${DEPLOY_CONTEXT_ARGS[@]}" \
     "WorkshopPlatformStack"
   echo ">>> Platform stack deployed."
 fi
@@ -101,7 +112,7 @@ if [[ ! -f "$LOCAL_BINARY_CACHE" ]]; then
         libcurl-devel git make zip unzip tar && \
       cd /root/aws-iot-device-client && \
       cmake -B build -DCMAKE_BUILD_TYPE=Release \
-        -DEXCLUDE_JOBS=ON -DEXCLUDE_NAMED_SHADOW=ON \
+        -DEXCLUDE_JOBS=OFF -DEXCLUDE_NAMED_SHADOW=OFF \
         -DEXCLUDE_TUNNELING=ON -DEXCLUDE_DEVICE_DEFENDER=ON \
         -DEXCLUDE_FLEET_PROVISIONING=OFF \
         -DOPENSSL_CRYPTO_LIBRARY=/usr/lib64/libcrypto.so \

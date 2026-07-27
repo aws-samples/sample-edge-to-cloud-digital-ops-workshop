@@ -19,6 +19,7 @@
           --database-name workshop_telemetry \
           --query 'TableList[].Name' --output table
         ```
+        <!-- e2e:assert {"contains": "telemetry"} -->
 
 3. Run the data freshness query in the Athena query editor:
 
@@ -44,15 +45,23 @@
           --query QueryExecutionId --output text)
 
         # Wait for completion
-        aws athena get-query-execution \
-          --query-execution-id "$QUERY_ID" \
-          --query 'QueryExecution.Status.State'
+        for _i in $(seq 1 20); do
+          STATE=$(aws athena get-query-execution \
+            --query-execution-id "$QUERY_ID" \
+            --query 'QueryExecution.Status.State' --output text)
+          if [ "$STATE" = "SUCCEEDED" ] || [ "$STATE" = "FAILED" ] || [ "$STATE" = "CANCELLED" ]; then
+            break
+          fi
+          sleep 3
+        done
+        echo "$STATE"
 
         # Fetch results
         aws athena get-query-results \
           --query-execution-id "$QUERY_ID" \
           --query 'ResultSet.Rows[*].Data[*].VarCharValue' --output table
         ```
+        <!-- e2e:assert {"contains": "SUCCEEDED"} -->
 
 4. Observe that freshness is typically **30–90 seconds** — because data flows IoT Rule → MSK → Hudi table in S3. MSK batches messages and the Hudi sink commits Parquet files on a timed interval rather than writing one object per MQTT message.
 

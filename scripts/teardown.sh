@@ -20,7 +20,7 @@ if [ -z "$DEPLOYMENT_ID" ]; then
   exit 1
 fi
 
-REGION=$(aws configure get region)
+REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region)}}"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
 run() {

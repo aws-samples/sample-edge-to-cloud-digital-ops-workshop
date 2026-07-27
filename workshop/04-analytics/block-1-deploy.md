@@ -51,6 +51,7 @@ aws kafka get-bootstrap-brokers \
   --region us-east-1 \
   --query BootstrapBrokerStringSaslScram --output text
 ```
+<!-- e2e:assert {"contains": ":9096"} -->
 
 Create a Kubernetes Secret with these values (used by Redpanda Connect and RisingWave):
 
@@ -76,12 +77,16 @@ kubectl create secret generic msk-credentials \
 
 !!! warning "MSK auto-create topics is disabled"
     Create the sensor topics before running the DDL.
-    Run this once from any machine with AWS credentials and `kafka-topics.sh` on PATH
-    (e.g. `brew install kafka`):
+    Run this once from any machine with AWS credentials:
 
     ```bash
     scripts/create-msk-topics.sh --deployment-id ws-slot00
     ```
+    <!-- e2e:assert {"contains": "Done"} -->
+
+    The script prefers `kafka-topics.sh` if it's on PATH (e.g. `brew install kafka`),
+    and otherwise falls back to a bundled Python implementation (installs
+    `kafka-python` on demand) — no Java or Kafka distribution required either way.
 
     The script fetches SCRAM credentials from Secrets Manager, resolves the MSK bootstrap
     endpoint, and creates:
@@ -111,7 +116,7 @@ kubectl wait --for=condition=Established \
 
 **5. Create the RisingWave S3 state bucket and service account**
 
-Each participant slot gets its own S3 bucket for RisingWave's state store, and a Kubernetes ServiceAccount annotated for IRSA so RisingWave pods can read/write it without static credentials. The `workshop-risingwave-s3` IAM role (trusting any `risingwave-cloud` service account cluster-wide) is created once by `WorkshopPlatformStack`:
+Each participant slot gets its own S3 bucket for RisingWave's state store, and a Kubernetes ServiceAccount annotated for IRSA so RisingWave pods can read/write it without static credentials. The `workshop-risingwave-s3-v2` IAM role (trusting any `risingwave-cloud` service account cluster-wide) is created once by `WorkshopPlatformStack`:
 
 ```bash
 aws s3api head-bucket --bucket workshop-ws-slot00-000000000000-risingwave-state 2>/dev/null || \
@@ -120,7 +125,7 @@ aws s3api head-bucket --bucket workshop-ws-slot00-000000000000-risingwave-state 
 kubectl create serviceaccount risingwave-cloud \
   --namespace ws-slot00 --dry-run=client -o yaml | \
   kubectl annotate -f - --local -o yaml \
-    eks.amazonaws.com/role-arn=arn:aws:iam::000000000000:role/workshop-risingwave-s3 | \
+    eks.amazonaws.com/role-arn=arn:aws:iam::000000000000:role/workshop-risingwave-s3-v2 | \
   kubectl apply -f -
 ```
 <!-- e2e:assert {"contains": "serviceaccount/risingwave-cloud"} -->
@@ -220,6 +225,7 @@ kubectl get pods -n ws-slot00
 kubectl get pods -n cnpg-system
 kubectl get pods -n risingwave-system
 ```
+<!-- e2e:assert {"contains": "NAME"} -->
 
 All pods should reach `Running` within ~5 minutes of each deploy step.
 

@@ -38,12 +38,11 @@ scripts/teardown.sh ws-slot00                    # per-slot cleanup (preserves s
 pnpm test                                        # scripts/smoke-test.mjs (needs WORKSHOP_TEST_SLOT)
 WORKSHOP_TEST_SLOT=ws-slot00 node scripts/smoke-test.mjs
 
-# End-to-end suite (deploys, exercises every session via AWS SDK, tears down)
-pnpm run e2e                                      # full run
-pnpm run e2e:no-deploy                            # against already-running stacks
-pnpm run e2e:walkthrough                          # doc-runner walkthrough, no deploy/teardown
-cd e2e && pnpm test -- --session observe          # run one phase only
-cd e2e && pnpm test -- --deployment-id ws-slot01  # target a specific slot
+# End-to-end suite (doc-runner: executes every e2e:assert-annotated bash block in workshop/*.md against a live slot)
+pnpm run e2e                                       # every workshop doc, against WORKSHOP_TEST_SLOT (default ws-e2e-test)
+pnpm run e2e:delete-platform-stack                  # same, but also allows blocks annotated e2e:platform-teardown
+cd e2e && pnpm test:doc-runner -- workshop/02-control/block-2-iot-job.md   # run one doc file
+cd e2e && pnpm test:doc-runner -- workshop --deployment-id ws-slot01      # target a specific slot
 
 # Admin helpers
 scripts/create-workshop-user.sh ws-slot00 participant@example.com
@@ -76,7 +75,7 @@ The **data-freshness comparison panel** (frontend) is the centrepiece: same pump
 
 **Edge stack (EKS + Helm, `helm/edge-stack/`):** TimescaleDB (CloudNativePG), Redpanda + Connect, RisingWave, MinIO, and the HMI. TimescaleDB is the system of record at the edge; MSK/Redpanda buffer is expendable and backfilled from edge on reconnect. `job-scripts/` are IoT Job handler scripts pushed to devices (telemetry versions, K3s bootstrap, shadow timers).
 
-**Testing:** `e2e/runner.ts` is a `tsx` script (not a test framework) — phases map to workshop sessions (`platform|observe|control|state|analytics|edge|hmi|teardown`). `e2e/doc-runner.ts` extracts bash blocks from `workshop/*.md` annotated with `<!-- e2e:assert {...} -->` comments and executes them, so the published docs are themselves verified. Substitutions (`ws-slot00`, `000000000000`) are applied before running.
+**Testing:** `e2e/doc-runner.ts` extracts bash blocks from `workshop/*.md` annotated with `<!-- e2e:assert {...} -->` comments and executes them against a live deployment slot, so the published docs are themselves verified — there is no separate deploy/exercise/teardown suite. `e2e/doc-runner-cli.ts` is the CLI entry point (`e2e/package.json`'s `test`/`test:doc-runner` scripts), accepting one or more file/directory args. Substitutions (`ws-slot00`, `000000000000`) are applied before running. A block additionally annotated `<!-- e2e:platform-teardown -->` is refused unless `--delete-platform-stack` / `E2E_DELETE_PLATFORM_STACK=true` is passed — never a default side effect of a routine pass. The guard is annotation-based (not command-text matching), so it can't be bypassed by rewording a command and must be applied explicitly by whoever writes a platform-destructive doc block.
 
 ## Long Runnting Tasks
 
@@ -171,6 +170,43 @@ Example of a correct drift-detection URL:
 ```
 https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=attributes.deploymentId%3Aws-slot00%20AND%20NOT%20(shadow.name.device-config.desired.config_version%3Ashadow.name.device-config.reported.config_version)
 ```
+
+## Monitoring Long-Running AWS Operations From Your Laptop
+
+Claude Code Action runs are ephemeral — nothing you background inside a run (e.g. `pnpm run sandbox:all` kicked off with `&`) keeps running or gets watched once that invocation ends, even though the underlying AWS operation (CloudFormation stack deploy, EKS/MSK provisioning, etc.) keeps going for 20–40+ minutes in the account. There's no built-in way for Claude to "wake up" when that finishes.
+
+The pattern: when Claude reports it kicked off a long-running operation, it will include a small bash monitor script in its PR/issue comment. Run that script **on your own machine** (it needs your AWS CLI credentials, not Claude's CI role) — it polls AWS for completion, then uses `gh` to post a comment containing `@claude` back onto the same PR/issue, which re-triggers the Claude Code Action workflow with the result baked into the comment body.
+
+Before kicking off the monitored operation, Claude applies the `awaiting-monitor` label (see below) to the issue/PR; the monitor script removes it as its final step, right before posting the `@claude` comment. This makes "is anything waiting on an external AWS operation" visible at a glance in the issue list, without having to read thread history.
+
+Shape of the script Claude should produce for this:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+STACK_NAME="WorkshopPlatformStack"          # or whatever resource is being watched
+REPO="aws-samples/sample-edge-to-cloud-digital-ops-workshop"
+PR_NUMBER=25                                 # or `gh issue` for an issue thread
+POLL_INTERVAL=60
+
+while true; do
+  STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+    --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "NOT_FOUND")
+  echo "$(date -u +%FT%TZ)  $STATUS"
+  [[ "$STATUS" == *IN_PROGRESS* ]] || break
+  sleep "$POLL_INTERVAL"
+done
+
+gh issue edit "$PR_NUMBER" --repo "$REPO" --remove-label "awaiting-monitor" || true
+gh pr comment "$PR_NUMBER" --repo "$REPO" --body "@claude deploy finished with status \`$STATUS\`. Please continue: <next step>."
+```
+
+Rules for this pattern:
+- Poll AWS state directly (`describe-stacks`, `describe-cluster`, etc.) — don't poll GitHub Actions run status, that only tells you Claude's own invocation ended, not whether the AWS operation succeeded.
+- The final `gh pr comment` / `gh issue comment` body must contain the literal `@claude` mention (that's what the workflow listens for) and should state the outcome plus the concrete next step, so the re-triggered run has enough context without re-reading the whole thread.
+- Never have Claude run this script itself in the background and call it done — Claude's own sandbox doesn't persist between invocations, so a script it starts won't survive to post the follow-up comment. It must be handed to the user to run.
+- Claude applies the `awaiting-monitor` label when it hands off the monitor script, and the monitor script removes it as part of its final `gh` call (`gh issue edit ... --remove-label`, which works on PRs too since PRs are issues under the hood) — right before the `@claude` comment that re-triggers Claude. `gh issue edit` (not `pr edit`) is used because a PR number and an issue number are the same underlying entity in this repo's numbering.
 
 ## Local / Internal Notes (not committed)
 

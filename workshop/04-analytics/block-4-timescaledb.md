@@ -7,9 +7,15 @@
 ## Connect to TimescaleDB
 
 ```bash
-kubectl port-forward -n ws-slot00 svc/timescaledb-rw 5432:5432 &
-psql -h localhost -p 5432 -U workshop -d telemetry
+kubectl port-forward -n ws-slot00 svc/timescaledb-rw 5432:5432 > /tmp/tsdb-cloud-pf.log 2>&1 &
+TSDB_PF_PID=$!
+sleep 5
+psql -h localhost -p 5432 -U workshop -d telemetry -c "SELECT 1;"
+kill "$TSDB_PF_PID" 2>/dev/null || true
 ```
+<!-- e2e:assert {"contains": "1 row"} -->
+
+Or keep the port-forward running in a separate terminal and connect interactively with `psql -h localhost -p 5432 -U workshop -d telemetry`.
 
 ---
 

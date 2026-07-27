@@ -31,14 +31,22 @@
           --query-string "SELECT thing_name, from_unixtime(MAX(ingest_ts)/1000) AS latest_edge_ts, current_timestamp AS query_ts, date_diff('second', from_unixtime(MAX(ingest_ts)/1000), current_timestamp) AS freshness_seconds, COUNT(*) AS row_count FROM workshop_telemetry.telemetry WHERE deployment_id='ws-slot00' GROUP BY thing_name ORDER BY freshness_seconds DESC" \
           --query QueryExecutionId --output text)
 
-        aws athena get-query-execution \
-          --query-execution-id "$QUERY_ID" \
-          --query 'QueryExecution.Status.State'
+        for _i in $(seq 1 20); do
+          STATE=$(aws athena get-query-execution \
+            --query-execution-id "$QUERY_ID" \
+            --query 'QueryExecution.Status.State' --output text)
+          if [ "$STATE" = "SUCCEEDED" ] || [ "$STATE" = "FAILED" ] || [ "$STATE" = "CANCELLED" ]; then
+            break
+          fi
+          sleep 3
+        done
+        echo "$STATE"
 
         aws athena get-query-results \
           --query-execution-id "$QUERY_ID" \
           --query 'ResultSet.Rows[*].Data[*].VarCharValue' --output table
         ```
+        <!-- e2e:assert {"contains": "SUCCEEDED"} -->
 
 3. Observe that rows added after the job succeeded have decimal-precision values; earlier rows have integers — the Parquet schema widens automatically to `DOUBLE`.
 

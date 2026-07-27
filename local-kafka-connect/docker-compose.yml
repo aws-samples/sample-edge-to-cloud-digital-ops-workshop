@@ -48,7 +48,7 @@ services:
       AWS_DEFAULT_REGION: us-east-1
       HADOOP_CONF_DIR: /etc/hadoop/conf
       BOOTSTRAP_SERVERS: redpanda:9092
-      HUDI_BASE_PATH: s3a://workshop-shared-v2-796988593450/hudi-telemetry
+      HUDI_BASE_PATH: s3a://workshop-platform-796988593450/hudi-telemetry
     volumes:
       - ../flink-hudi-local/target/flink-hudi-sink-local-1.0.0.jar:/opt/flink/usrlib/job.jar
       # Use the AWS-targeting Hadoop config (no LocalStack endpoint override).

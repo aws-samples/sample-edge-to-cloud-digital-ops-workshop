@@ -2,8 +2,10 @@
  * doc-runner.ts — Extract and run annotated bash blocks from workshop .md files.
  *
  * Each bash block immediately followed by <!-- e2e:assert {...} --> is collected.
- * All blocks from a single .md file run in one bash session (variables carry over).
- * Substitutions are applied before execution:
+ * Blocks from a single .md file each run as their own bash process, with
+ * exported vars threaded between them via a scratch env file so shared
+ * session state (e.g. `export FOO=bar` in one block, read by a later one)
+ * still carries over. Substitutions are applied before execution:
  *   ws-slot00        → DEPLOYMENT_ID
  *   000000000000     → ACCOUNT_ID
  *   workshop-platform-000000000000 → SHARED_BUCKET
@@ -14,6 +16,21 @@
  *   jsonPath      — dot-path to extract from stdout JSON (e.g. "jobId")
  *   matches       — regex the jsonPath value must match
  *   jobSucceeds   — after the block, poll until all IoT job executions SUCCEED
+ *
+ * A block that tears down the shared platform stack (VPCs/EKS/MSK) must also
+ * carry a <!-- e2e:platform-teardown --> comment alongside its e2e:assert one —
+ * runDocBlocks refuses to run it unless the caller opts in (see
+ * RunDocBlocksOptions.allowPlatformTeardown).
+ *
+ * Running each block as its own process (rather than concatenating all
+ * blocks into one `set -euo pipefail` script) means a failing block no longer
+ * `set -e`-aborts the rest of the session and masks every later block as
+ * failed too (see #72). A failing block's own exit status and stderr are
+ * reported against that block only, so later blocks get to run and report
+ * their own real pass/fail instead of an opaque, masked "expected ... but
+ * got: <empty>" diff. A block that genuinely depends on an earlier block's
+ * side effect (e.g. a var the earlier block never exported because it
+ * failed first) can still fail downstream — but for a real reason.
  */
 
 import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
@@ -51,6 +68,7 @@ export interface BlockResult {
 interface RawBlock {
   script: string;
   assert: AssertSpec | null;
+  platformTeardown: boolean;
 }
 
 // ── Parse ─────────────────────────────────────────────────────────────────────
@@ -58,6 +76,7 @@ interface RawBlock {
 const BASH_FENCE_RE = /^```bash\s*\n([\s\S]*?)^```/gm;
 const ASSERT_COMMENT_RE = /<!--\s*e2e:assert\s+(\{[\s\S]*?\})\s*-->/;
 const SKIP_COMMENT_RE = /<!--\s*e2e:skip\s*-->/;
+const PLATFORM_TEARDOWN_COMMENT_RE = /<!--\s*e2e:platform-teardown\s*-->/;
 
 function parseBlocks(md: string): RawBlock[] {
   const blocks: RawBlock[] = [];
@@ -102,7 +121,12 @@ function parseBlocks(md: string): RawBlock[] {
         }
       }
 
-      blocks.push({ script, assert });
+      // A block that would tear down the shared platform stack must say so
+      // explicitly via <!-- e2e:platform-teardown --> — the guard below relies
+      // on this annotation rather than pattern-matching the script text.
+      const platformTeardown = PLATFORM_TEARDOWN_COMMENT_RE.test(assertSearch);
+
+      blocks.push({ script, assert, platformTeardown });
       continue;
     }
 
@@ -127,8 +151,15 @@ function applySubstitutions(script: string, subs: RunnerSubstitutions): string {
 
 // ── Assert ────────────────────────────────────────────────────────────────────
 
+// Splits "things[0].thingName" into ["things", "0", "thingName"] so array
+// indices (jsonPath results routinely nest results as things[N].field) resolve
+// the same way plain object keys do.
 function resolveDotPath(obj: unknown, path: string): unknown {
-  return path.split(".").reduce((acc, key) => {
+  const keys = path
+    .replace(/\[(\d+)\]/g, ".$1")
+    .split(".")
+    .filter((k) => k.length > 0);
+  return keys.reduce((acc, key) => {
     if (acc && typeof acc === "object") return (acc as Record<string, unknown>)[key];
     return undefined;
   }, obj);
@@ -295,13 +326,29 @@ function pollJobUntilDone(
   throw new Error(`IoT Job ${jobId} timed out after ${timeoutMs}ms`);
 }
 
+// ── Platform-stack safety guard ──────────────────────────────────────────────
+
+// The shared platform stack (VPCs, EKS, MSK) is depended on by every participant
+// slot. A doc block that could tear it down must never run as a side effect of
+// a routine doc-runner pass — only when the caller explicitly opts in. Rather
+// than pattern-matching the script text for destructive-looking commands
+// (brittle — breaks on rewording, aliasing, or wrapping in a variable), the
+// doc author marks the block explicitly with <!-- e2e:platform-teardown -->
+// alongside its e2e:assert comment; see parseBlocks above.
+
+export interface RunDocBlocksOptions {
+  /** Opt-in to running blocks that would tear down the shared platform stack. Default: false. */
+  allowPlatformTeardown?: boolean;
+}
+
 // ── Run a single .md file's blocks ───────────────────────────────────────────
 
 export async function runDocBlocks(
   mdPath: string,
   subs: RunnerSubstitutions,
   cwd: string,
-  onResult: (r: BlockResult) => void
+  onResult: (r: BlockResult) => void,
+  opts?: RunDocBlocksOptions
 ): Promise<void> {
   const md = readFileSync(mdPath, "utf8");
   const blocks = parseBlocks(md);
@@ -309,52 +356,86 @@ export async function runDocBlocks(
 
   if (annotated.length === 0) return;
 
-  // Build a single bash script with sentinel markers between blocks
-  // We run the whole session as one script so variables persist.
-  const SENTINEL = "###E2E_BLOCK_SENTINEL###";
-  const sessionLines: string[] = ["set -euo pipefail", `export AWS_DEFAULT_REGION="${subs.REGION}"`];
-
-  for (let idx = 0; idx < annotated.length; idx++) {
-    const raw = annotated[idx].script;
-    const substituted = applySubstitutions(raw, subs);
-    sessionLines.push(`echo "${SENTINEL}${idx}"`);
-    sessionLines.push(substituted);
+  if (!opts?.allowPlatformTeardown) {
+    const blocked = annotated.find((b) => b.platformTeardown);
+    if (blocked) {
+      throw new Error(
+        `${mdPath}: refusing to run a block annotated <!-- e2e:platform-teardown --> ` +
+        `(it tears down the shared platform stack). ` +
+        `Pass { allowPlatformTeardown: true } (doc-runner-cli: --delete-platform-stack) to opt in.`
+      );
+    }
   }
 
-  const scriptPath = join(tmpdir(), `e2e-doc-run-${Date.now()}.sh`);
-  writeFileSync(scriptPath, sessionLines.join("\n") + "\n", { mode: 0o755 });
+  // Each block runs as its own bash process, rather than all blocks
+  // concatenated into one `set -euo pipefail` script — a failing block used
+  // to abort the whole session, so every later block in the file was reported
+  // as failed too (empty stdout, indistinguishable from a real assertion
+  // failure). See #72. Exported vars are threaded between blocks via a
+  // scratch env file so shared session state (e.g. `export FOO=bar` in block
+  // N used by block N+1) still carries over. Only vars newly exported or
+  // changed relative to one fixed pre-run baseline are persisted — dumping
+  // the whole process environment via `export -p` would otherwise leak
+  // ambient AWS credentials / tokens into a plaintext tmp file. The baseline
+  // is captured once, up front: diffing against each block's own starting
+  // env instead would "forget" vars accumulated by earlier blocks the moment
+  // a later block doesn't itself export anything new.
+  const runToken = `${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+  const envFile = join(tmpdir(), `e2e-doc-run-${runToken}-env.sh`);
+  const baselineFile = join(tmpdir(), `e2e-doc-run-${runToken}-baseline.sh`);
+  writeFileSync(envFile, "", { mode: 0o600 });
+  writeFileSync(
+    baselineFile,
+    execSync(`bash -c 'export -p | sort'`, { encoding: "utf8" }),
+    { mode: 0o600 }
+  );
 
-  let fullOut = "";
-  let fullErr = "";
-  const t0 = Date.now();
+  const results: Array<{ stdout: string; stderr: string; blockFailed: boolean; durationMs: number }> = [];
 
   try {
-    fullOut = execSync(`bash ${scriptPath}`, {
-      cwd,
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "pipe"],
-      maxBuffer: 10 * 1024 * 1024,
-    });
-  } catch (err: unknown) {
-    const e = err as { stdout?: string; stderr?: string; message?: string };
-    fullOut = e.stdout ?? "";
-    fullErr = e.stderr ?? e.message ?? String(err);
-  } finally {
-    try { unlinkSync(scriptPath); } catch { /* ignore */ }
-  }
+    for (let idx = 0; idx < annotated.length; idx++) {
+      const substituted = applySubstitutions(annotated[idx].script, subs);
+      const scriptLines = [
+        "set -euo pipefail",
+        `export AWS_DEFAULT_REGION="${subs.REGION}"`,
+        `source "${envFile}"`,
+        `trap 'comm -13 "${baselineFile}" <(export -p | sort) > "${envFile}"' EXIT`,
+        substituted,
+      ];
+      const scriptPath = join(tmpdir(), `e2e-doc-run-${runToken}-${idx}.sh`);
+      writeFileSync(scriptPath, scriptLines.join("\n") + "\n", { mode: 0o755 });
 
-  // Split stdout by sentinel markers
-  const parts = fullOut.split(new RegExp(`${SENTINEL}(\\d+)\\n`));
-  // parts[0] = content before first sentinel (preamble)
-  // parts[1] = "0", parts[2] = output of block 0
-  // parts[3] = "1", parts[4] = output of block 1, etc.
+      let stdout = "";
+      let stderr = "";
+      let blockFailed = false;
+      const blockT0 = Date.now();
+      try {
+        stdout = execSync(`bash ${scriptPath}`, {
+          cwd,
+          encoding: "utf8",
+          stdio: ["pipe", "pipe", "pipe"],
+          maxBuffer: 10 * 1024 * 1024,
+        });
+      } catch (err: unknown) {
+        const e = err as { stdout?: string; stderr?: string; message?: string };
+        stdout = e.stdout ?? "";
+        stderr = e.stderr ?? e.message ?? String(err);
+        blockFailed = true;
+      } finally {
+        try { unlinkSync(scriptPath); } catch { /* ignore */ }
+      }
+
+      results.push({ stdout, stderr, blockFailed, durationMs: Date.now() - blockT0 });
+    }
+  } finally {
+    try { unlinkSync(envFile); } catch { /* ignore */ }
+    try { unlinkSync(baselineFile); } catch { /* ignore */ }
+  }
 
   for (let idx = 0; idx < annotated.length; idx++) {
     const block = annotated[idx];
     const assert = block.assert!;
-    const partIdx = idx * 2 + 2;
-    const blockOut = parts[partIdx] ?? "";
-    const durationMs = idx === annotated.length - 1 ? Date.now() - t0 : 0;
+    const { stdout: blockOut, stderr: blockErr, blockFailed, durationMs } = results[idx];
 
     let error: string | undefined;
 
@@ -362,6 +443,16 @@ export async function runDocBlocks(
     const assertErr = evaluateAssert(assert, blockOut);
     if (assertErr) {
       error = assertErr;
+    }
+
+    // A block can fail (non-zero exit) even when its partial stdout happens
+    // to satisfy the assert — surface that as a failure too, with the real
+    // stderr/exit detail rather than a masked, empty diff.
+    if (blockFailed) {
+      const detail = blockErr.trim() ? blockErr.trim().slice(0, 500) : "(no stderr captured)";
+      error = error
+        ? `${error}\n\nBlock command also exited non-zero:\n${detail}`
+        : `Block command exited non-zero:\n${detail}`;
     }
 
     // If jobSucceeds: true, extract jobId from the block output and poll
@@ -394,7 +485,7 @@ export async function runDocBlocks(
       blockIndex: idx,
       script: block.script,
       stdout: blockOut,
-      stderr: idx === annotated.length - 1 ? fullErr : "",
+      stderr: blockErr,
       passed: error === undefined,
       error,
       durationMs,
