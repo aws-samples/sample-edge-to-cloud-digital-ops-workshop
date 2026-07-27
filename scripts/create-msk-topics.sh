@@ -102,7 +102,7 @@ MSK_PASS=$(echo "$SECRET_JSON" | python3 -c "import sys,json; print(json.load(sy
 echo "▶ Fetching MSK bootstrap brokers …"
 MSK_CLUSTER_ARN=$(aws kafka list-clusters-v2 \
   --region "$REGION" \
-  --filter-by-name "workshop-${DEPLOYMENT_ID}-msk" \
+  --cluster-name-filter "workshop-${DEPLOYMENT_ID}-msk" \
   --query "ClusterInfoList[0].ClusterArn" --output text)
 
 if [[ -z "$MSK_CLUSTER_ARN" || "$MSK_CLUSTER_ARN" == "None" ]]; then
@@ -163,7 +163,14 @@ if $DRY_RUN; then
 fi
 
 if $USE_PYTHON_FALLBACK; then
-  python3 -m pip install --quiet --user kafka-python
+  # Install kafka-python only if it isn't already importable. On PEP 668
+  # "externally-managed" interpreters (Homebrew Python, recent Debian/Ubuntu),
+  # a plain `pip install --user` is refused, so fall back to
+  # `--break-system-packages` — this is a throwaway CLI dep, not a system one.
+  if ! python3 -c "import kafka" >/dev/null 2>&1; then
+    python3 -m pip install --quiet --user kafka-python \
+      || python3 -m pip install --quiet --user --break-system-packages kafka-python
+  fi
   TOPICS_JSON=$(printf '%s\n' "${TOPICS[@]}" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))")
   python3 - "$MSK_BOOTSTRAP" "$MSK_USER" "$MSK_PASS" "$PARTITIONS" "$REPLICATION" "$TOPICS_JSON" <<'PYEOF'
 import sys, json
