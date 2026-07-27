@@ -102,21 +102,57 @@ kubectl create secret generic msk-credentials \
 ```
 <!-- e2e:assert {"contains": "secret/msk-credentials"} -->
 
-!!! warning "MSK auto-create topics is disabled"
-    Create the sensor topics before running the DDL.
-    Run this once from any machine with AWS credentials:
+!!! warning "MSK auto-create topics is disabled — and MSK is VPC-private"
+    Create the sensor topics before running the DDL. **The shared MSK cluster has
+    no public endpoint** (`PublicAccess: DISABLED`), so `create-msk-topics.sh` only
+    works from a host *inside* the workshop VPC — running it from your laptop will
+    hang and time out reaching the brokers on `:9096`.
+
+    Run it from the EKS cluster itself, using a throwaway pod that already sits on
+    the cluster's pod network (which routes to MSK). This needs only your existing
+    `kubectl` access — no VPC bastion. We use a small Python image with
+    `kafka-python` rather than the JVM Kafka CLI: the admin JVM's default heap can
+    OOM on the workshop's memory-constrained nodes, whereas the Python client is
+    light enough to run reliably.
 
     ```bash
-    scripts/create-msk-topics.sh --deployment-id ws-slot00
+    MSK_BOOTSTRAP=$(aws kafka get-bootstrap-brokers \
+      --cluster-arn "$(aws cloudformation list-exports \
+        --query "Exports[?Name=='workshop-platform-msk-arn'].Value" --output text)" \
+      --region us-east-1 --query BootstrapBrokerStringSaslScram --output text)
+    MSK_PASS=$(aws secretsmanager get-secret-value \
+      --secret-id AmazonMSK_workshop-ws-slot00 \
+      --query SecretString --output text | python3 -c 'import sys,json; print(json.load(sys.stdin)["password"])')
+
+    kubectl -n ws-slot00 delete pod kafka-admin --ignore-not-found
+    kubectl -n ws-slot00 run kafka-admin --restart=Never --image=python:3.12-slim \
+      --command -- sleep 900
+    kubectl -n ws-slot00 wait --for=condition=Ready pod/kafka-admin --timeout=120s
+    kubectl -n ws-slot00 exec kafka-admin -- pip install --quiet kafka-python
+
+    kubectl -n ws-slot00 exec -i kafka-admin -- \
+      env MSK_BOOTSTRAP="$MSK_BOOTSTRAP" MSK_USER="workshop-ws-slot00" MSK_PASS="$MSK_PASS" python3 - <<'PYEOF'
+    import os
+    from kafka.admin import KafkaAdminClient, NewTopic
+    from kafka.errors import TopicAlreadyExistsError
+    admin = KafkaAdminClient(
+        bootstrap_servers=os.environ["MSK_BOOTSTRAP"].split(","),
+        security_protocol="SASL_SSL", sasl_mechanism="SCRAM-SHA-512",
+        sasl_plain_username=os.environ["MSK_USER"], sasl_plain_password=os.environ["MSK_PASS"])
+    for t in ["sensors.raw.sim", "raw.telemetry",
+              "sensors.raw.ws-slot00-edge-0", "sensors.raw.ws-slot00-edge-1", "sensors.raw.ws-slot00-edge-2"]:
+        try:
+            admin.create_topics([NewTopic(name=t, num_partitions=3, replication_factor=2)])
+            print("created", t)
+        except TopicAlreadyExistsError:
+            print("exists", t)
+    print("TOPICS:", sorted(admin.list_topics()))
+    PYEOF
+    kubectl -n ws-slot00 delete pod kafka-admin
     ```
-    <!-- e2e:assert {"contains": "Done"} -->
+    <!-- e2e:assert {"contains": "sensors.raw.sim"} -->
 
-    The script prefers `kafka-topics.sh` if it's on PATH (e.g. `brew install kafka`),
-    and otherwise falls back to a bundled Python implementation (installs
-    `kafka-python` on demand) — no Java or Kafka distribution required either way.
-
-    The script fetches SCRAM credentials from Secrets Manager, resolves the MSK bootstrap
-    endpoint, and creates:
+    Topics created (creating an existing topic is a no-op — safe to re-run):
 
     | Topic | Purpose |
     |-------|---------|
@@ -126,7 +162,11 @@ kubectl create secret generic msk-credentials \
     | `sensors.raw.ws-slot00-edge-2` | Per-node relay — edge 2 |
     | `raw.telemetry` | IoT Rule → MSK (system metrics) |
 
-    `--if-not-exists` makes it safe to re-run. Pass `--dry-run` to preview the commands.
+    !!! tip "From a VPC host instead?"
+        If you have shell on an EC2 instance inside the workshop VPC, you can run
+        `scripts/create-msk-topics.sh --deployment-id ws-slot00` there directly — it
+        prefers `kafka-topics.sh` on PATH and otherwise falls back to the same
+        bundled `kafka-python` implementation.
 
 **4. Install cert-manager**
 

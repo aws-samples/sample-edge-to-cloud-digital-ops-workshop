@@ -51,6 +51,7 @@ import {
   AwsSdkCall,
   PhysicalResourceId,
   AwsCustomResourcePolicy,
+  Provider,
 } from "aws-cdk-lib/custom-resources";
 import { Construct } from "constructs";
 
@@ -840,27 +841,93 @@ systemctl start sensor-sim
     });
 
     // Register the SCRAM secret with the shared MSK cluster.
-    const mskAssociateScram = new AwsCustomResource(this, "MskAssociateScram", {
-      onCreate: {
-        service: "Kafka",
-        action: "batchAssociateScramSecret",
-        parameters: {
-          ClusterArn: mskClusterArn,
-          SecretArnList: [mskCredSecret.secretArn],
-        },
-        physicalResourceId: PhysicalResourceId.of(`MskScramAssoc-${deploymentId}`),
-      } as AwsSdkCall,
-      onDelete: {
-        service: "Kafka",
-        action: "batchDisassociateScramSecret",
-        parameters: {
-          ClusterArn: mskClusterArn,
-          SecretArnList: [mskCredSecret.secretArn],
-        },
-      } as AwsSdkCall,
-      policy: AwsCustomResourcePolicy.fromSdkCalls({
-        resources: AwsCustomResourcePolicy.ANY_RESOURCE,
-      }),
+    //
+    // NOTE: `batchAssociateScramSecret` returns HTTP 200 even when it fails to
+    // associate a secret — the per-secret failures come back in the response's
+    // `UnprocessedScramSecrets` array. A plain `AwsCustomResource` treats the
+    // 200 as success and never inspects that array, so a silent failure (e.g.
+    // the secret is not yet KMS-readable when the call fires) leaves the cluster
+    // with NO usable SCRAM credential — every downstream SASL/SCRAM login
+    // (RisingWave, Redpanda Connect, the IoT Kafka action) then fails with
+    // "invalid credentials". We use a Lambda-backed custom resource that polls
+    // until the association actually shows up in `listScramSecrets`, and throws
+    // (failing the deploy loudly) if it never does.
+    const mskAssociateScramLambda = new LambdaFn(this, "MskAssociateScramFn", {
+      functionName: `workshop-${deploymentId}-msk-assoc-scram`,
+      runtime: Runtime.NODEJS_22_X,
+      architecture: Architecture.ARM_64,
+      handler: "index.handler",
+      timeout: Duration.minutes(5),
+      code: Code.fromInline(`
+const { KafkaClient, BatchAssociateScramSecretCommand, BatchDisassociateScramSecretCommand, ListScramSecretsCommand } = require("@aws-sdk/client-kafka");
+const SECRET_ARN = process.env.SECRET_ARN;
+const kafka = new KafkaClient({});
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function isAssociated() {
+  let token;
+  do {
+    const out = await kafka.send(new ListScramSecretsCommand({ ClusterArn: process.env.CLUSTER_ARN, NextToken: token }));
+    if ((out.SecretArnList || []).includes(SECRET_ARN)) return true;
+    token = out.NextToken;
+  } while (token);
+  return false;
+}
+
+exports.handler = async (event) => {
+  const type = event.RequestType;
+  if (type === "Delete") {
+    try {
+      await kafka.send(new BatchDisassociateScramSecretCommand({ ClusterArn: process.env.CLUSTER_ARN, SecretArnList: [SECRET_ARN] }));
+    } catch (e) { console.log("disassociate (ignored on delete):", e.message); }
+    return { PhysicalResourceId: "MskScramAssoc-" + process.env.SECRET_ARN };
+  }
+
+  // Create/Update — associate, then poll listScramSecrets until it sticks.
+  // Secret/KMS eventual consistency can make the first attempt land in
+  // UnprocessedScramSecrets; retry a handful of times before giving up.
+  const MAX = 8;
+  for (let attempt = 1; attempt <= MAX; attempt++) {
+    if (await isAssociated()) {
+      console.log("secret associated after attempt " + attempt);
+      return { PhysicalResourceId: "MskScramAssoc-" + process.env.SECRET_ARN };
+    }
+    const res = await kafka.send(new BatchAssociateScramSecretCommand({ ClusterArn: process.env.CLUSTER_ARN, SecretArnList: [SECRET_ARN] }));
+    const unprocessed = res.UnprocessedScramSecrets || [];
+    if (unprocessed.length === 0 && await isAssociated()) {
+      console.log("secret associated cleanly on attempt " + attempt);
+      return { PhysicalResourceId: "MskScramAssoc-" + process.env.SECRET_ARN };
+    }
+    console.log("attempt " + attempt + " unprocessed=" + JSON.stringify(unprocessed) + " — retrying");
+    await sleep(15000);
+  }
+  throw new Error("Failed to associate SCRAM secret " + SECRET_ARN + " with cluster after " + MAX + " attempts");
+};
+      `),
+      environment: {
+        CLUSTER_ARN: mskClusterArn,
+        SECRET_ARN: mskCredSecret.secretArn,
+      },
+    });
+    mskAssociateScramLambda.addToRolePolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: [
+        "kafka:BatchAssociateScramSecret",
+        "kafka:BatchDisassociateScramSecret",
+        "kafka:ListScramSecrets",
+      ],
+      resources: [mskClusterArn],
+    }));
+
+    const mskAssociateScramProvider = new Provider(this, "MskAssociateScramProvider", {
+      onEventHandler: mskAssociateScramLambda,
+    });
+    const mskAssociateScram = new CustomResource(this, "MskAssociateScram", {
+      serviceToken: mskAssociateScramProvider.serviceToken,
+      properties: {
+        // Force the resource to re-run whenever the secret ARN changes.
+        SecretArn: mskCredSecret.secretArn,
+      },
     });
     mskAssociateScram.node.addDependency(mskCredSecret);
 
