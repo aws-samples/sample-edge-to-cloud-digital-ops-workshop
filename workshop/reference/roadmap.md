@@ -58,8 +58,8 @@ Against live `ws-slot00` on 2026-07-27, after merging #67/#68/#69/#70/#72:
 | #70 | bug/e2e | EKS access done; K3s network path (item 2) remaining | Partial |
 | #68 | e2e | Doc-runner as sole e2e test | Tail work (#74, #70 item 2) |
 | ~~#23~~ | needs-review | Test doc runner | ✅ Closed — satisfied by `pnpm run test*` scripts, verified on ws-slot00 |
-| #29 | feature | 3-way data-freshness comparison (Athena/Iceberg tier) | Open |
-| #31 | feature | Edge digital-ops backlog metric | Open |
+| ~~#29~~ | feature | 3-way data-freshness comparison (Athena/Iceberg tier) | ✅ Closed (PR #82) |
+| ~~#31~~ | feature | Edge digital-ops backlog metric | ✅ Closed (PR #84) — Redpanda consumer-group lag scraped from `/public_metrics` |
 | ~~#36~~ | ops | Populate per-slot fields in DEPLOYMENT_SUMMARY.md | ✅ Closed (PR #78) |
 | ~~#38~~ | feature | Register a new IoT device over SSH | ✅ Closed (PR #79) — verified end-to-end |
 
@@ -68,9 +68,14 @@ Against live `ws-slot00` on 2026-07-27, after merging #67/#68/#69/#70/#72:
 | # | Title | Blocked by |
 |---|---|---|
 | #37 | Full-suite green-run sign-off on a fresh slot | #27, #28, #74, #75 |
-| #41 | Exercise platform teardown verification | #29, #31 (#36, #38 now closed) |
 | #27 | Re-run shadow-job on slots 01/02/03, confirm green | (blocks #37) |
 | #28 | Exercise per-slot teardown verification | paused pending active dev |
+
+**#41 (Exercise platform teardown verification) is now UNBLOCKED** — all its
+blockers (#29, #30, #31, #33, #35, #36, #38, #40) are closed. It requires a live
+platform deployment to exercise `scripts/teardown.sh` + `pnpm run
+sandbox:delete-all`, so it needs an operator with an active slot rather than a
+code change.
 
 > GitHub's native issue-relationships feature is the source of truth for
 > blocked-by/blocking (see `CLAUDE.md`). This table is a convenience mirror —
