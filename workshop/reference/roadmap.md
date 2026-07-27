@@ -39,8 +39,8 @@ Against live `ws-slot00` on 2026-07-27, after merging #67/#68/#69/#70/#72:
 - [x] Auto-start Managed Flink Iceberg sink on platform deploy (#69)
 - [x] IAM-driven EKS access entries so participants can `helm`/`kubectl` (#70 item 1)
 - [x] Fix `set -e` session-abort masking in doc-runner (#72)
-- [ ] Fix non-exported var threading between blocks (#74) — **in progress**
-- [ ] Resolve IoT Job block timeouts (#75)
+- [x] Fix non-exported var threading between blocks (#74) — PR #76 (fleet-management 4/6 → 6/6)
+- [ ] Resolve IoT Job block timeouts (#75) — diagnosed: flapping MQTT on one device (NAT idle-timeout suspected), not a poll-ceiling bug
 - [ ] SSM port-forward path for session-5 K3s Helm blocks (#70 item 2)
 - [ ] Full-suite green-run sign-off on a fresh slot (#37)
 
@@ -50,8 +50,8 @@ Against live `ws-slot00` on 2026-07-27, after merging #67/#68/#69/#70/#72:
 
 | # | Type | Title | Status |
 |---|---|---|---|
-| #74 | bug/e2e | Block isolation drops non-exported shell vars → "unbound variable" | In progress |
-| #75 | bug/e2e | IoT Job blocks time out at 900s (device health vs. poll ceiling) | Triage |
+| #74 | bug/e2e | Block isolation drops non-exported shell vars → "unbound variable" | Fix in PR #76 |
+| #75 | bug/e2e | IoT Job blocks time out at 900s | Diagnosed — flapping MQTT on 1 device (NAT idle-timeout suspected) |
 | #70 | bug/e2e | EKS access done; K3s network path (item 2) remaining | Partial |
 | #68 | e2e | Doc-runner as sole e2e test | Tail work (#74, #70 item 2) |
 | #23 | needs-review | Test doc runner | Likely satisfied by current `test` scripts |
