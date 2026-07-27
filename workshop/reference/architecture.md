@@ -1,6 +1,6 @@
 # Architecture Reference
 
-This page summarizes the full edge-to-cloud pipeline architecture. The source document is [docs/notes/real-time-pipeline-architecture.md](../../docs/notes/real-time-pipeline-architecture.md).
+This page summarizes the full edge-to-cloud pipeline architecture. The source document is [docs/notes/real-time-pipeline-architecture.md](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/docs/notes/real-time-pipeline-architecture.md).
 
 ---
 
