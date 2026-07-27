@@ -40,7 +40,7 @@ interface FreshnessBarDatum {
 }
 
 // ── shared hook: poll /api/freshness every N ms ───────────────────────────────
-function useFreshness(tier: "risingwave" | "timescaledb", intervalMs = 3000) {
+function useFreshness(tier: "risingwave" | "timescaledb" | "athena", intervalMs = 3000) {
   const [data, setData] = useState<FreshnessPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -65,18 +65,17 @@ function useFreshness(tier: "risingwave" | "timescaledb", intervalMs = 3000) {
 }
 
 // ── chart 1 component ─────────────────────────────────────────────────────────
-function FreshnessChart({ rw, tsdb }: { rw: FreshnessPayload | null; tsdb: FreshnessPayload | null }) {
+function FreshnessChart({ rw, tsdb, athena }: { rw: FreshnessPayload | null; tsdb: FreshnessPayload | null; athena: FreshnessPayload | null }) {
   // We keep a rolling 30-point history so the chart scrolls like a time series.
   const historyRef = useRef<Array<{ t: number; rw_ms: number | null; tsdb_ms: number | null; athena_ms: number | null }>>([]);
 
   const rwMs   = rw?.tierFreshness.risingwave_ms   ?? null;
   const tsMs   = tsdb?.tierFreshness.timescaledb_ms ?? null;
-  // Athena is not polled live — use the last known value from whichever payload has it
-  const atMs   = rw?.tierFreshness.athena_ms ?? tsdb?.tierFreshness.athena_ms ?? null;
-  const sampledAt = rw?.sampled_at ?? tsdb?.sampled_at ?? Date.now();
+  const atMs   = athena?.tierFreshness.athena_ms ?? null;
+  const sampledAt = rw?.sampled_at ?? tsdb?.sampled_at ?? athena?.sampled_at ?? Date.now();
 
   useEffect(() => {
-    if (rwMs == null && tsMs == null) return;
+    if (rwMs == null && tsMs == null && atMs == null) return;
     historyRef.current = [
       ...historyRef.current.slice(-29),
       { t: sampledAt, rw_ms: rwMs, tsdb_ms: tsMs, athena_ms: atMs },
@@ -250,6 +249,9 @@ function Pulse({ active }: { active: boolean }) {
 export default function DashboardPage() {
   const { data: rwData,   error: rwError   } = useFreshness("risingwave",  3000);
   const { data: tsdbData, error: tsdbError } = useFreshness("timescaledb", 3000);
+  // Athena/Iceberg is the slow warehouse tier — a query takes seconds, so poll
+  // it far less often than the two live stores.
+  const { data: athenaData, error: athenaError } = useFreshness("athena", 15000);
 
   const [tick, setTick] = useState(false);
   useEffect(() => {
@@ -257,7 +259,7 @@ export default function DashboardPage() {
     return () => clearInterval(id);
   }, []);
 
-  const isMock = rwData?.source === "mock" || tsdbData?.source === "mock";
+  const isMock = rwData?.source === "mock" || tsdbData?.source === "mock" || athenaData?.source === "mock";
 
   return (
     <div className="page">
@@ -266,15 +268,16 @@ export default function DashboardPage() {
         <div style={{ display: "flex", gap: "1rem", fontSize: "0.82rem", color: "#94a3b8" }}>
           <span><Pulse active={!rwError && rwData != null} />RisingWave {rwError ? `(${rwError})` : rwData?.source === "mock" ? "(mock)" : "live"}</span>
           <span><Pulse active={!tsdbError && tsdbData != null} />TimescaleDB {tsdbError ? `(${tsdbError})` : tsdbData?.source === "mock" ? "(mock)" : "live"}</span>
+          <span><Pulse active={!athenaError && athenaData != null} />Athena {athenaError ? `(${athenaError})` : athenaData?.source === "mock" ? "(mock)" : "live"}</span>
           {isMock && (
             <span style={{ color: "#f59e0b" }}>
-              ⚠ Mock data — set RISINGWAVE_ENDPOINT and TIMESCALEDB_ENDPOINT env vars to connect to live databases
+              ⚠ Mock data — set RISINGWAVE_ENDPOINT, TIMESCALEDB_ENDPOINT, and ATHENA_DATABASE env vars to connect to live sources
             </span>
           )}
         </div>
       </div>
 
-      <FreshnessChart  rw={rwData}   tsdb={tsdbData} />
+      <FreshnessChart  rw={rwData}   tsdb={tsdbData} athena={athenaData} />
       <div style={{ height: "1rem" }} />
       <ResourceChart   rw={rwData}   tsdb={tsdbData} />
       <div style={{ height: "1rem" }} />

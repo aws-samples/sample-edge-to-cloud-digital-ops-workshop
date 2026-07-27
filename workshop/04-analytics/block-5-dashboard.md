@@ -6,15 +6,15 @@
 
 ## What You'll Build
 
-A real-time web dashboard that polls both RisingWave and TimescaleDB every 3 seconds and renders three live charts:
+A real-time web dashboard that polls RisingWave and TimescaleDB every 3 seconds — and the Athena/Iceberg warehouse tier every 15 seconds — then renders three live charts:
 
 | Chart | Y axis | Source |
 |---|---|---|
-| **Data Freshness** | Milliseconds — **log scale** | Both DBs |
-| **Fleet Free CPU & Memory** | Percent free (higher = healthier) | Both DBs |
-| **Time Since Last Message** | Seconds per node | Both DBs |
+| **Data Freshness** | Milliseconds — **log scale** | All three tiers |
+| **Fleet Free CPU & Memory** | Percent free (higher = healthier) | Both live DBs |
+| **Time Since Last Message** | Seconds per node | Both live DBs |
 
-Both databases serve the same data, so you can directly compare how stale each store's view of the fleet is.
+All three stores serve the same telemetry, so you can directly compare how stale each store's view of the fleet is — a live streaming MV (RisingWave), a live relational scan (TimescaleDB), and an on-demand warehouse query (Athena over the Iceberg table in S3).
 
 ---
 
@@ -58,6 +58,24 @@ A linear axis would make RisingWave and TimescaleDB indistinguishable — the lo
     ```
     Same query, same column semantics. Both use `ingest_ts` so clock-skew between EC2 edge nodes and the test runner is eliminated.
 
+??? example "API query — Athena / Iceberg"
+    ```sql
+    SELECT
+      thing_name AS site_id,
+      MAX(message_timestamp) AS latest_ts_ms,
+      AVG(100.0 - CAST(cpu_pct AS double))      AS avg_free_cpu_pct,
+      AVG(100.0 - CAST(mem_used_pct AS double)) AS avg_free_mem_pct
+    FROM workshop_telemetry.telemetry
+    GROUP BY thing_name
+    ```
+    Same `Date.now() - MAX(...)` freshness formula, run against the Iceberg
+    table in S3 via Athena. `message_timestamp` is the same epoch-ms basis as
+    `ts_ms` in the other tiers, so the three numbers are apples-to-apples. The
+    route submits the query, polls `GetQueryExecution` until it succeeds (cap
+    30 s), and reads the result — which is why this tier reports tens of seconds
+    of "freshness" even when the data itself is recent: you're measuring the
+    warehouse round-trip, not a live push.
+
 ---
 
 ## Chart 2 — Fleet Free CPU & Memory
@@ -87,24 +105,39 @@ RISINGWAVE_ENDPOINT=postgres://root@<risingwave-frontend-svc>:4567/dev
 
 # TimescaleDB — standard Postgres on port 5432
 TIMESCALEDB_ENDPOINT=postgres://workshop:<password>@<timescaledb-rw-svc>:5432/edge
+
+# Athena / Iceberg — the warehouse tier. Only the Glue database name is
+# required; the workgroup, table, and (optional) per-slot filter default sanely.
+ATHENA_DATABASE=workshop_telemetry
+# ATHENA_WORKGROUP=workshop-shared          # default
+# ATHENA_TABLE=telemetry                    # default
+# WORKSHOP_DEPLOYMENT_ID=ws-slot00          # optional: scope to one slot's rows
 ```
 
-Both values are available after completing Block 1.
+The two `*_ENDPOINT` values are available after completing Block 1. The Athena
+tier needs no endpoint — it uses your task/pod IAM role to call Athena, so the
+role must allow `athena:StartQueryExecution` / `GetQueryExecution` /
+`GetQueryResults`, Glue read on `workshop_telemetry`, and read/write on the
+workgroup's S3 results location. When `ATHENA_DATABASE` is unset the Athena tier
+falls back to mock data, exactly like the two live DBs.
 
 ---
 
 ## How the API Route Works
 
-All three chart datasets come from a single call to `/api/freshness?tier=risingwave` (or `timescaledb`). The route handler runs one SQL query, computes freshness from `Date.now() - MAX(ts_ms)`, and returns a typed `FreshnessPayload` object:
+Each tier's chart datasets come from a single call to `/api/freshness?tier=risingwave` (or `timescaledb`, or `athena`). The route handler runs one query per tier, computes freshness from `Date.now() - MAX(...)`, and returns a typed `FreshnessPayload` object:
 
 ```typescript
 interface FreshnessPayload {
   tierFreshness: { risingwave_ms, timescaledb_ms, athena_ms };
   fleetResources: { avg_free_cpu_pct, avg_free_mem_pct };
   nodeAge: Array<{ site_id, age_seconds }>;
-  source: "risingwave" | "timescaledb" | "mock";
+  source: "risingwave" | "timescaledb" | "athena" | "mock";
   sampled_at: number;
 }
 ```
 
-The dashboard component calls both endpoints every 3 seconds using `setInterval` inside a `useEffect`, then passes both payloads to each chart so they can render side-by-side bars.
+The dashboard calls the two live endpoints every 3 seconds and the Athena
+endpoint every 15 seconds (it's a slow warehouse query, not a live push) using
+`setInterval` inside a `useEffect`, then passes all three payloads to the
+freshness chart so it can render the tiers side-by-side.
