@@ -116,6 +116,7 @@ nav:
       - Block 3 — Day-2 Operations Scenario: 07-capstone/block-3-day2.md
       - Block 4 — Teardown: 07-capstone/block-4-teardown.md
   - Reference:
+      - Roadmap & E2E Status: reference/roadmap.md
       - Architecture Reference: reference/architecture.md
       - Architecture Decisions: reference/decisions.md
       - Device Client vs. Greengrass: reference/device-client-vs-greengrass.md

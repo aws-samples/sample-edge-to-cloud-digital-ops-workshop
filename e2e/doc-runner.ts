@@ -2,10 +2,12 @@
  * doc-runner.ts — Extract and run annotated bash blocks from workshop .md files.
  *
  * Each bash block immediately followed by <!-- e2e:assert {...} --> is collected.
- * Blocks from a single .md file each run as their own bash process, with
- * exported vars threaded between them via a scratch env file so shared
- * session state (e.g. `export FOO=bar` in one block, read by a later one)
- * still carries over. Substitutions are applied before execution:
+ * Blocks from a single .md file each run as their own bash process, with shell
+ * vars threaded between them via a scratch env file so shared session state
+ * (e.g. `FOO=bar` in one block, read by a later one) still carries over —
+ * matching what a participant sees in one interactive shell. Blocks run under
+ * `set -a` so even bare (non-`export`ed) assignments thread across; see #74.
+ * Substitutions are applied before execution:
  *   ws-slot00        → DEPLOYMENT_ID
  *   000000000000     → ACCOUNT_ID
  *   workshop-platform-000000000000 → SHARED_BUCKET
@@ -371,22 +373,43 @@ export async function runDocBlocks(
   // concatenated into one `set -euo pipefail` script — a failing block used
   // to abort the whole session, so every later block in the file was reported
   // as failed too (empty stdout, indistinguishable from a real assertion
-  // failure). See #72. Exported vars are threaded between blocks via a
-  // scratch env file so shared session state (e.g. `export FOO=bar` in block
-  // N used by block N+1) still carries over. Only vars newly exported or
-  // changed relative to one fixed pre-run baseline are persisted — dumping
-  // the whole process environment via `export -p` would otherwise leak
-  // ambient AWS credentials / tokens into a plaintext tmp file. The baseline
-  // is captured once, up front: diffing against each block's own starting
-  // env instead would "forget" vars accumulated by earlier blocks the moment
-  // a later block doesn't itself export anything new.
+  // failure). See #72. Session state is threaded between blocks via a scratch
+  // env file so a var set in block N is visible in block N+1 — matching what a
+  // participant sees running the commands in one interactive shell.
+  //
+  // Each block runs under `set -a` (allexport), so a *bare* assignment
+  // (`JOB_ID=...`, no `export`) is marked for export and captured by the
+  // `export -p` dump in the EXIT trap, just like an explicit `export`. Without
+  // this, non-exported vars — which the docs use freely — were silently
+  // dropped between blocks, so a later block referencing them died with
+  // `unbound variable` under `set -u`. See #74.
+  //
+  // Only vars newly exported or changed relative to one fixed pre-run baseline
+  // are persisted — dumping the whole environment via `export -p` would
+  // otherwise leak ambient AWS credentials / tokens (already present at
+  // baseline) into a plaintext tmp file. The baseline is captured once, up
+  // front: diffing against each block's own starting env instead would
+  // "forget" vars accumulated by earlier blocks the moment a later block
+  // doesn't itself export anything new.
+  // Threading is by variable *name*, not by line-diffing raw `export -p`
+  // output: an earlier version diffed full `name=value` lines with `comm -13`,
+  // which corrupted the env file whenever a threaded value spanned multiple
+  // lines (e.g. `RESULT=$(aws ... --output json)` holding pretty-printed JSON)
+  // — the value's later lines leaked out as stray commands. Instead we snapshot
+  // the set of exported var *names* at baseline, and in each block's EXIT trap
+  // emit only the newly-exported names via `declare -p`, which quotes any value
+  // (multi-line included) safely. Names-only diffing also keeps the security
+  // property: vars already present at baseline (ambient AWS creds/tokens) are
+  // never re-emitted into the plaintext tmp file.
   const runToken = `${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
   const envFile = join(tmpdir(), `e2e-doc-run-${runToken}-env.sh`);
   const baselineFile = join(tmpdir(), `e2e-doc-run-${runToken}-baseline.sh`);
   writeFileSync(envFile, "", { mode: 0o600 });
+  // `compgen -e` lists exported variable *names*, one per line — no quoting
+  // gymnastics needed to parse them out of `export -p`.
   writeFileSync(
     baselineFile,
-    execSync(`bash -c 'export -p | sort'`, { encoding: "utf8" }),
+    execSync(`bash -c 'compgen -e | sort'`, { encoding: "utf8" }),
     { mode: 0o600 }
   );
 
@@ -399,7 +422,13 @@ export async function runDocBlocks(
         "set -euo pipefail",
         `export AWS_DEFAULT_REGION="${subs.REGION}"`,
         `source "${envFile}"`,
-        `trap 'comm -13 "${baselineFile}" <(export -p | sort) > "${envFile}"' EXIT`,
+        // On exit, persist only vars exported by this (or an earlier) block —
+        // names not present at baseline — re-emitted with `declare -p` so
+        // multi-line values survive intact. See #74.
+        `trap 'for _v in $(compgen -e | sort | comm -13 "${baselineFile}" -); do declare -p "$_v"; done > "${envFile}"' EXIT`,
+        // allexport: bare `FOO=bar` assignments (no explicit `export`) are
+        // marked for export so they thread to later blocks. See #74.
+        "set -a",
         substituted,
       ];
       const scriptPath = join(tmpdir(), `e2e-doc-run-${runToken}-${idx}.sh`);
