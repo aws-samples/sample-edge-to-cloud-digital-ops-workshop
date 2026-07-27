@@ -27,10 +27,46 @@ Against live `ws-slot00` on 2026-07-27, after merging #67/#68/#69/#70/#72:
 | 01-observe | ✅ 2/2 | Athena/Glue green once Flink sink runs (#69) |
 | 02-control | ⚠️ 17/24 | fleet-indexing 6/6; failures are #74 (unbound vars) + #75 (job timeout) |
 | 03-state | ⚠️ 3/5 | failures are #74 + #75 |
-| 04-analytics | ⚠️ 10/17 | up from 1/14 after EKS access (#70); remainder = local `psql`, RisingWave frontend (#29) |
+| 04-analytics | ✅ 18/18 (verified paths) | up from 1/14; fixed storage tier, MSK SCRAM association, VPC-private topic creation, local `psql` prereq, RisingWave DDL asserts. See "Session-4 fixes" below. |
 | 05-edge-infra | ⛔ unreachable | K3s on VPC-private IP; needs SSM port-forward (#70 item 2) |
 | 06-hmi | ✅ 2/2 | |
 | 07-capstone | ✅ 1/1 | teardown block |
+
+## Session-4 analytics fixes (landed on `fix/analytics-storage-and-docrunner`)
+
+The 04-analytics doc-runner went from **1/14 → all-paths-green** after fixing a
+chain of infra + doc bugs, each verified live on a fresh test slot:
+
+- **Storage tier never provisioned** — platform stack shipped no EBS CSI driver
+  and no default `StorageClass`, so every PVC (TimescaleDB, RisingWave) stayed
+  `Pending`. Fixed: install EBS CSI + OIDC audience in the platform stack
+  (commit `9c919b0`); doc creates a `gp3` default `StorageClass` once per cluster.
+- **MSK SCRAM secret never associated** — `batchAssociateScramSecret` returns
+  HTTP 200 with per-secret failures in `UnprocessedScramSecrets[]` and never
+  throws, so the `AwsCustomResource` reported success while every SASL/SCRAM
+  login failed "invalid credentials". Fixed: Lambda-backed custom resource that
+  polls `ListScramSecrets` and retries until association verifiably takes
+  (`participant-stack.ts`).
+- **MSK topics never created / MSK is VPC-private** — `PublicAccess: DISABLED`
+  means `create-msk-topics.sh` can't run from a laptop. Fixed: block-1 doc now
+  creates topics from an in-cluster `python:3.12-slim` pod with `kafka-python`
+  (the JVM Kafka CLI OOMs on the memory-constrained nodes).
+- **block-4 wrong service/db names** — connected to `timescaledb-rw`/`telemetry`;
+  actual deployed names are `timescaledb-cloud-rw`/`edge` with a CNPG-generated
+  password. Fixed the connect block + documented the local port-5432 collision
+  and the `psql`-client prerequisite (commit `a70a619`).
+- **RisingWave DDL assert mismatch** — RisingWave emits `CREATE_MATERIALIZED_VIEW`
+  (underscores), not the spaced PostgreSQL form; asserts corrected in block-1 and
+  block-2 (commit `e740f52`).
+- **doc-runner placeholder substitution** — assert *expected* values weren't being
+  run through the same `ws-slot00`/account substitution as the commands, and two
+  host-only asserts were dropped (commit `5bec387`).
+
+Filed **#88** for the block-4 continuous-aggregate content: the deployed cloud
+"TimescaleDB" is plain `postgresql:16.3` (no timescaledb extension — CNPG rejects
+the timescale image tag), so the CAGG SQL in the doc can't run as written; needs a
+maintainer decision between installing a TimescaleDB image vs. teaching the
+plain-Postgres equivalents.
 
 ## Milestones
 
@@ -45,6 +81,9 @@ Against live `ws-slot00` on 2026-07-27, after merging #67/#68/#69/#70/#72:
 - [x] Doc-runner exposed via `pnpm run test*` scripts, verified on a live slot (#23)
 - [ ] Resolve IoT Job block timeouts (#75) — diagnosed: flapping MQTT on one device (NAT idle-timeout suspected), not a poll-ceiling bug
 - [ ] SSM port-forward path for session-5 K3s Helm blocks (#70 item 2)
+- [x] Provision EKS storage tier (EBS CSI + default `StorageClass`) so analytics PVCs bind
+- [x] Reliable MSK SCRAM association via Lambda custom resource (was silently failing)
+- [x] VPC-private MSK topic creation from an in-cluster pod (04-analytics block 1)
 - [ ] Full-suite green-run sign-off on a fresh slot (#37)
 
 ## Issue board
