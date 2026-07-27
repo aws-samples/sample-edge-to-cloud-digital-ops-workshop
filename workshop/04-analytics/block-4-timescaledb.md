@@ -6,16 +6,23 @@
 
 ## Connect to TimescaleDB
 
+The CNPG primary (read-write) service is `timescaledb-cloud-rw` and the workshop database is `edge` (created by the cluster's `bootstrap.initdb`). The password is in the CNPG-generated `timescaledb-cloud-app` Secret:
+
 ```bash
-kubectl port-forward -n ws-slot00 svc/timescaledb-rw 5432:5432 > /tmp/tsdb-cloud-pf.log 2>&1 &
+TSDB_PASS=$(kubectl get secret timescaledb-cloud-app -n ws-slot00 \
+  -o jsonpath='{.data.password}' | base64 -d)
+kubectl port-forward -n ws-slot00 svc/timescaledb-cloud-rw 5432:5432 > /tmp/tsdb-cloud-pf.log 2>&1 &
 TSDB_PF_PID=$!
 sleep 5
-psql -h localhost -p 5432 -U workshop -d telemetry -c "SELECT 1;"
+PGPASSWORD="$TSDB_PASS" psql -h localhost -p 5432 -U workshop -d edge -c "SELECT 1;"
 kill "$TSDB_PF_PID" 2>/dev/null || true
 ```
 <!-- e2e:assert {"contains": "1 row"} -->
 
-Or keep the port-forward running in a separate terminal and connect interactively with `psql -h localhost -p 5432 -U workshop -d telemetry`.
+Or keep the port-forward running in a separate terminal and connect interactively with `PGPASSWORD="$TSDB_PASS" psql -h localhost -p 5432 -U workshop -d edge`.
+
+!!! tip "Port 5432 already in use?"
+    If you have a local PostgreSQL running, `psql -h localhost -p 5432` connects to *it*, not the forward. Map the forward to a free local port instead — `kubectl port-forward … 15432:5432` — and connect with `-p 15432`.
 
 ---
 
