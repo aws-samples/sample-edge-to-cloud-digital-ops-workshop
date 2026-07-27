@@ -23,6 +23,7 @@ import {
   CfnCluster as EksCfnCluster,
   CfnNodegroup,
   CfnAccessEntry,
+  CfnAddon,
 } from "aws-cdk-lib/aws-eks";
 import {
   CfnCluster as MskCluster,
@@ -252,10 +253,49 @@ export class PlatformStack extends Stack {
     // Each participant's risingwave-cloud ServiceAccount (created manually in
     // Session 4, Block 1) assumes this role via IRSA to read/write its own
     // workshop-<slot>-<account>-risingwave-state bucket.
+    // `clientIds` MUST include sts.amazonaws.com — it becomes the OIDC
+    // provider's audience list, and STS rejects every AssumeRoleWithWebIdentity
+    // call (InvalidIdentityToken) whose token audience isn't listed. Without it
+    // IRSA silently fails for the EBS CSI driver, RisingWave, and every other
+    // service account that assumes an IAM role via this provider.
     const eksOidcProvider = new OpenIdConnectProvider(this, "EksOidcProvider", {
       url: eksCluster.attrOpenIdConnectIssuerUrl,
+      clientIds: ["sts.amazonaws.com"],
     });
     const oidcProviderHost = Fn.select(1, Fn.split("//", eksCluster.attrOpenIdConnectIssuerUrl));
+
+    // ── EBS CSI driver ──────────────────────────────────────────────────────
+    // EKS 1.30 ships with the in-tree `kubernetes.io/aws-ebs` provisioner
+    // disabled (CSI migration is complete), so without the EBS CSI driver addon
+    // every PersistentVolumeClaim — TimescaleDB (CloudNativePG), RisingWave's
+    // meta/state store, etc. — stays `Pending` forever and Session 4/5 pods
+    // never schedule. The driver needs its own IRSA role scoped to the
+    // `ebs-csi-controller-sa` service account in kube-system.
+    const ebsCsiSubCondition = new CfnJson(this, "EbsCsiSubCondition", {
+      value: {
+        [`${oidcProviderHost}:sub`]:
+          "system:serviceaccount:kube-system:ebs-csi-controller-sa",
+        [`${oidcProviderHost}:aud`]: "sts.amazonaws.com",
+      },
+    });
+    const ebsCsiRole = new Role(this, "EbsCsiDriverRole", {
+      assumedBy: new FederatedPrincipal(
+        eksOidcProvider.openIdConnectProviderArn,
+        { StringEquals: ebsCsiSubCondition } as unknown as Conditions,
+        "sts:AssumeRoleWithWebIdentity"
+      ),
+      managedPolicies: [
+        ManagedPolicy.fromAwsManagedPolicyName("service-role/AmazonEBSCSIDriverPolicy"),
+      ],
+    });
+    const ebsCsiAddon = new CfnAddon(this, "EbsCsiAddon", {
+      clusterName: eksCluster.ref,
+      addonName: "aws-ebs-csi-driver",
+      serviceAccountRoleArn: ebsCsiRole.roleArn,
+      resolveConflicts: "OVERWRITE",
+    });
+    // The addon's controller Deployment is only schedulable once nodes exist.
+    ebsCsiAddon.addDependency(eksNodegroup);
     // Each condition operator's inner map has a key built from a deploy-time
     // token (the OIDC host), so each map must be resolved via CfnJson rather
     // than a plain object literal.

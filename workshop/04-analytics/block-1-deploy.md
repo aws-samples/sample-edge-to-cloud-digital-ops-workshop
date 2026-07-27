@@ -27,6 +27,30 @@ kubectl get nodes
 ```
 <!-- e2e:assert {"contains": "Ready"} -->
 
+!!! info "Default StorageClass (cluster-scoped, run once)"
+    The platform stack installs the EBS CSI driver, but the cluster ships with
+    no *default* `StorageClass` — so a PersistentVolumeClaim that doesn't name
+    one (TimescaleDB, RisingWave) stays `Pending` forever. Create a CSI-backed
+    `gp3` default once per cluster (facilitator/CI):
+
+    ```bash
+    kubectl apply -f - <<'EOF'
+    apiVersion: storage.k8s.io/v1
+    kind: StorageClass
+    metadata:
+      name: gp3
+      annotations:
+        storageclass.kubernetes.io/is-default-class: "true"
+    provisioner: ebs.csi.aws.com
+    volumeBindingMode: WaitForFirstConsumer
+    allowVolumeExpansion: true
+    parameters:
+      type: gp3
+      encrypted: "true"
+    EOF
+    ```
+    <!-- e2e:assert {"contains": "storageclass.storage.k8s.io/gp3"} -->
+
 **2. Add Helm repos**
 
 ```bash
@@ -143,7 +167,7 @@ helm upgrade --install risingwave-operator risingwavelabs/risingwave-operator \
   -f helm/risingwave-values.yaml
 
 # Wait for operator
-kubectl wait --for=condition=available deployment/risingwave-operator-controller-manager \
+kubectl wait --for=condition=available deployment/risingwave-operator \
   -n risingwave-system --timeout=120s
 
 # Deploy the RisingWave CR into your participant namespace
