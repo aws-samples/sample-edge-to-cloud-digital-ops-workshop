@@ -35,7 +35,7 @@ Against live `ws-slot00` on 2026-07-27, after merging #67/#68/#69/#70/#72:
 ## Milestones
 
 - [x] Broaden `e2e:assert` annotation coverage to every session (#67)
-- [x] Consolidate on doc-runner; remove `runner.ts` (#68, mostly — see open tail)
+- [x] Consolidate on doc-runner; remove `runner.ts` (#68 — closed, commit `2703c4e`)
 - [x] Auto-start Managed Flink Iceberg sink on platform deploy (#69)
 - [x] IAM-driven EKS access entries so participants can `helm`/`kubectl` (#70 item 1)
 - [x] Fix `set -e` session-abort masking in doc-runner (#72)
@@ -53,29 +53,27 @@ Against live `ws-slot00` on 2026-07-27, after merging #67/#68/#69/#70/#72:
 
 | # | Type | Title | Status |
 |---|---|---|---|
-| #74 | bug/e2e | Block isolation drops non-exported shell vars → "unbound variable" | Fix in PR #76 |
-| #75 | bug/e2e | IoT Job blocks time out at 900s | Diagnosed — flapping MQTT on 1 device (NAT idle-timeout suspected) |
-| #70 | bug/e2e | EKS access done; K3s network path (item 2) remaining | Partial |
-| #68 | e2e | Doc-runner as sole e2e test | Tail work (#74, #70 item 2) |
 | ~~#23~~ | needs-review | Test doc runner | ✅ Closed — satisfied by `pnpm run test*` scripts, verified on ws-slot00 |
 | ~~#29~~ | feature | 3-way data-freshness comparison (Athena/Iceberg tier) | ✅ Closed (PR #82) |
 | ~~#31~~ | feature | Edge digital-ops backlog metric | ✅ Closed (PR #84) — Redpanda consumer-group lag scraped from `/public_metrics` |
 | ~~#36~~ | ops | Populate per-slot fields in DEPLOYMENT_SUMMARY.md | ✅ Closed (PR #78) |
 | ~~#38~~ | feature | Register a new IoT device over SSH | ✅ Closed (PR #79) — verified end-to-end |
+| ~~#68~~ | e2e | Doc-runner as sole e2e test | ✅ Closed — `runner.ts`/`report-writer.ts` removed, scripts repointed, CLAUDE.md updated (commit `2703c4e`) |
+| ~~#74~~ | bug/e2e | Block isolation drops non-exported shell vars → "unbound variable" | ✅ Closed (PR #76) |
 
-### Blocked
+### Remaining — all require a live deployment / operator action (no code change)
 
-| # | Title | Blocked by |
+Every open issue below needs an active AWS slot or manual operator step; none is
+completable as a pure code change:
+
+| # | Title | What it needs |
 |---|---|---|
-| #37 | Full-suite green-run sign-off on a fresh slot | #27, #28, #74, #75 |
-| #27 | Re-run shadow-job on slots 01/02/03, confirm green | (blocks #37) |
-| #28 | Exercise per-slot teardown verification | paused pending active dev |
-
-**#41 (Exercise platform teardown verification) is now UNBLOCKED** — all its
-blockers (#29, #30, #31, #33, #35, #36, #38, #40) are closed. It requires a live
-platform deployment to exercise `scripts/teardown.sh` + `pnpm run
-sandbox:delete-all`, so it needs an operator with an active slot rather than a
-code change.
+| #75 | IoT Job blocks time out at 900s | Diagnosed as flapping MQTT on one device (NAT idle-timeout suspected). Needs live-device debugging / a re-run to confirm. |
+| #70 | Doc-runner IAM + network path for sessions 03–05 | Item 2: SSM port-forward path for session-5 K3s Helm blocks — needs CI-role IAM change validated against a live cluster. |
+| #41 | Exercise platform teardown verification | **Now unblocked** (all of #29,#30,#31,#33,#35,#36,#38,#40 closed). Needs a live platform to run `scripts/teardown.sh` + `pnpm run sandbox:delete-all`. |
+| #37 | Full-suite green-run sign-off on a fresh slot | Blocked by #27, #28, #75. A release-gate run on a fresh slot. |
+| #27 | Re-run shadow-job on slots 01/02/03, confirm green | Live-slot job re-run (blocks #37). |
+| #28 | Exercise per-slot teardown verification | Live-slot teardown run. |
 
 > GitHub's native issue-relationships feature is the source of truth for
 > blocked-by/blocking (see `CLAUDE.md`). This table is a convenience mirror —
