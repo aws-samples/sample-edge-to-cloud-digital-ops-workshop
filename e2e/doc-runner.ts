@@ -227,15 +227,21 @@ function extractJsonValues(text: string): unknown[] {
   return values;
 }
 
-function evaluateAssert(assert: AssertSpec, stdout: string): string | null {
+function evaluateAssert(assert: AssertSpec, stdout: string, subs: RunnerSubstitutions): string | null {
+  // The command is run with placeholders substituted (ws-slot00 → the real
+  // slot), so the *expected* text must be substituted the same way — otherwise
+  // a doc that asserts `contains: "ws-slot00"` fails on every non-ws-slot00
+  // slot even though the output is correct for that slot.
   if (assert.contains !== undefined) {
-    if (!stdout.includes(assert.contains))
-      return `Expected stdout to contain "${assert.contains}" but got:\n${stdout.slice(0, 500)}`;
+    const expected = applySubstitutions(assert.contains, subs);
+    if (!stdout.includes(expected))
+      return `Expected stdout to contain "${expected}" but got:\n${stdout.slice(0, 500)}`;
   }
 
   if (assert.notContains !== undefined) {
-    if (stdout.includes(assert.notContains))
-      return `Expected stdout NOT to contain "${assert.notContains}" but got:\n${stdout.slice(0, 500)}`;
+    const expected = applySubstitutions(assert.notContains, subs);
+    if (stdout.includes(expected))
+      return `Expected stdout NOT to contain "${expected}" but got:\n${stdout.slice(0, 500)}`;
   }
 
   if (assert.jsonPath !== undefined) {
@@ -249,9 +255,10 @@ function evaluateAssert(assert: AssertSpec, stdout: string): string | null {
     const parsed = values[values.length - 1];
     const value = resolveDotPath(parsed, assert.jsonPath);
     if (assert.matches !== undefined) {
-      const re = new RegExp(assert.matches);
+      const pattern = applySubstitutions(assert.matches, subs);
+      const re = new RegExp(pattern);
       if (!re.test(String(value ?? "")))
-        return `jsonPath "${assert.jsonPath}" value "${value}" does not match /${assert.matches}/`;
+        return `jsonPath "${assert.jsonPath}" value "${value}" does not match /${pattern}/`;
     }
   }
 
@@ -490,7 +497,7 @@ export async function runDocBlocks(
     let error: string | undefined;
 
     // Evaluate assert
-    const assertErr = evaluateAssert(assert, blockOut);
+    const assertErr = evaluateAssert(assert, blockOut, subs);
     if (assertErr) {
       error = assertErr;
     }

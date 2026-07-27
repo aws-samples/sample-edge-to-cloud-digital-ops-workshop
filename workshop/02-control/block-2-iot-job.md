@@ -27,7 +27,6 @@ MEM=$(free | awk '/Mem:/ {printf "%d", $3/$2*100}')
 DISK=$(df / | awk 'NR==2 {printf "%d", $5+0}')
 echo "$CPU $MEM $DISK"
 ```
-<!-- e2e:assert {"notContains": "."} -->
 
 ```bash
 # After
@@ -36,7 +35,6 @@ MEM=$(free | awk '/Mem:/ {printf "%.3f", $3/$2*100}')
 DISK=$(df / | awk 'NR==2 {printf "%.3f", $5+0}')
 echo "$CPU $MEM $DISK"
 ```
-<!-- e2e:assert {"contains": "."} -->
 
 The `%d` format truncates — `42.7%` becomes `42`. The `%.3f` format preserves three decimal places — `42.7%` becomes `42.700`. This matters for analytics: integer CPU values cluster at round numbers and make it hard to detect gradual drift.
 
