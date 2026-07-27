@@ -77,13 +77,15 @@ else:
     print('—')
 " 2>/dev/null) || STACK="—"
 
-    BUCKET=$(cfn_export "workshop-${ID}-bucket")
-    MSK_ARN=$(cfn_export "workshop-${ID}-msk-arn")
-    EVENTS_HTTP=$(cfn_export "workshop-${ID}-events-http")
-    EVENTS_RT=$(cfn_export "workshop-${ID}-events-realtime")
+    # Per-slot exports (participant-stack.ts). MSK is a *shared* platform resource,
+    # so its ARN comes from the platform stack export, not a per-slot one.
+    BUCKET=$(cfn_export "workshop-${ID}-shared-bucket")
+    MSK_ARN=$(cfn_export "workshop-platform-msk-arn")
+    GRAPHQL_ENDPOINT=$(cfn_export "workshop-${ID}-graphql-endpoint")
     CLAIM_SECRET=$(cfn_export "workshop-${ID}-claim-secret")
     MSK_CRED_SECRET=$(cfn_export "workshop-${ID}-msk-cred-secret")
     EKS_CLUSTER=$(cfn_export "workshop-${ID}-eks-cluster")
+    PARTICIPANT_ROLE=$(cfn_export "workshop-${ID}-participant-role")
 
     cat <<SLOT
 ## \`${ID}\`
@@ -96,12 +98,12 @@ else:
 | Workshop URL | [${DOCS_BASE_URL}/?did=${ID}&aid=${ACCOUNT}](${DOCS_BASE_URL}/?did=${ID}&aid=${ACCOUNT}) |
 | CloudFormation stack | \`${STACK:-—}\` |
 | S3 bucket | \`${BUCKET}\` |
-| MSK cluster ARN | \`${MSK_ARN}\` |
-| AppSync Events HTTP endpoint | \`${EVENTS_HTTP}\` |
-| AppSync Events Realtime endpoint | \`${EVENTS_RT}\` |
+| MSK cluster ARN (shared) | \`${MSK_ARN}\` |
+| AppSync GraphQL endpoint | \`${GRAPHQL_ENDPOINT}\` |
 | Claim cert secret ARN | \`${CLAIM_SECRET}\` |
 | MSK SCRAM credential secret ARN | \`${MSK_CRED_SECRET}\` |
 | EKS cluster | \`${EKS_CLUSTER}\` |
+| Participant role ARN | \`${PARTICIPANT_ROLE}\` |
 
 ### Quick commands
 
