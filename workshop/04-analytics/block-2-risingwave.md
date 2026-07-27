@@ -50,7 +50,7 @@ sed -e "s|__MSK_BOOTSTRAP__|$MSK_BOOTSTRAP|g" \
     risingwave/ddl-cloud.sql | psql -h localhost -p 4567 -U root -d dev
 kill "$RW_PF_PID" 2>/dev/null || true
 ```
-<!-- e2e:assert {"contains": "CREATE MATERIALIZED VIEW"} -->
+<!-- e2e:assert {"contains": "CREATE_MATERIALIZED_VIEW"} -->
 
 ??? example "View source — ddl-cloud.sql"
     [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/risingwave/ddl-cloud.sql){ .md-button target=_blank }

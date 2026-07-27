@@ -243,7 +243,7 @@ sed -e "s|__MSK_BOOTSTRAP__|$MSK_BOOTSTRAP|g" \
 # Stop the background port-forward once the DDL has applied
 kill "$RW_PF_PID" 2>/dev/null || true
 ```
-<!-- e2e:assert {"contains": "CREATE MATERIALIZED VIEW"} -->
+<!-- e2e:assert {"contains": "CREATE_MATERIALIZED_VIEW"} -->
 
 **10. Wait for all pods**
 
