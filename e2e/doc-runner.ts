@@ -325,7 +325,28 @@ function pollJobUntilDone(
     execSync(`sleep ${pollIntervalMs / 1000}`);
   }
 
-  throw new Error(`IoT Job ${jobId} timed out after ${timeoutMs}ms`);
+  // On timeout, name the device(s) still not done so the operator can triage
+  // immediately (stuck/offline device vs. a genuinely slow rollout) without a
+  // re-run. Re-fetch a final snapshot — the loop exits between polls.
+  let stuck = "";
+  try {
+    const raw = execSync(
+      `aws iot list-job-executions-for-job --job-id ${jobId} --region ${region} --output json`,
+      { encoding: "utf8" }
+    );
+    const resp = JSON.parse(raw) as { executionSummaries?: Array<{ jobExecutionSummary?: { status?: string }; thingArn?: string }> };
+    const pending = (resp.executionSummaries ?? []).filter((s) =>
+      ["IN_PROGRESS", "QUEUED"].includes(s.jobExecutionSummary?.status ?? "")
+    );
+    stuck = pending
+      .map((s) => `${s.thingArn?.split(":thing/")[1] ?? "?"}=${s.jobExecutionSummary?.status}`)
+      .join(", ");
+  } catch { /* best-effort */ }
+
+  throw new Error(
+    `IoT Job ${jobId} timed out after ${timeoutMs}ms` +
+    (stuck ? ` — still pending: ${stuck}. Check that these device(s) are online and running the IoT Device Client.` : "")
+  );
 }
 
 // ── Platform-stack safety guard ──────────────────────────────────────────────
