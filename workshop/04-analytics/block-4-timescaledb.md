@@ -26,6 +26,16 @@ Or keep the port-forward running in a separate terminal and connect interactivel
 
 ---
 
+!!! info "This cluster runs the real TimescaleDB extension"
+    `k8s/timescaledb-cloud-cluster.yaml` uses a CloudNativePG-compatible operand
+    image with the `timescaledb` extension baked in and `create_hypertable()`
+    already applied to `sensor_readings` — so the continuous-aggregate SQL below
+    runs as-is. CNPG (not the image) still owns HA, failover, and backups; only
+    the container image changed. All telemetry lands in one table,
+    `sensor_readings(ts_ms, sensor, site_id, value, unit, partition_time)`, with
+    one row per metric — CPU readings arrive as rows where `sensor = 'cpu_pct'`
+    and `site_id` is the reporting thing name.
+
 ## Create a Continuous Aggregate
 
 ```sql
@@ -33,12 +43,13 @@ Or keep the port-forward running in a separate terminal and connect interactivel
 CREATE MATERIALIZED VIEW cpu_hourly
 WITH (timescaledb.continuous) AS
 SELECT
-  time_bucket('1 hour', message_timestamp) AS bucket,
-  thing_name,
-  AVG(cpu_pct) AS avg_cpu,
-  MAX(cpu_pct) AS max_cpu
-FROM telemetry_raw
-GROUP BY bucket, thing_name;
+  time_bucket('1 hour', partition_time) AS bucket,
+  site_id,
+  AVG(value) AS avg_cpu,
+  MAX(value) AS max_cpu
+FROM sensor_readings
+WHERE sensor = 'cpu_pct'
+GROUP BY bucket, site_id;
 
 -- Add a refresh policy
 SELECT add_continuous_aggregate_policy('cpu_hourly',
@@ -46,6 +57,36 @@ SELECT add_continuous_aggregate_policy('cpu_hourly',
   end_offset        => INTERVAL '1 hour',
   schedule_interval => INTERVAL '30 minutes');
 ```
+
+Apply it against the deployed cluster (safe to re-run — `CREATE ... IF NOT EXISTS`
+and `add_continuous_aggregate_policy(..., if_not_exists => true)`):
+
+```bash
+TSDB_PASS=$(kubectl get secret timescaledb-cloud-app -n ws-slot00 \
+  -o jsonpath='{.data.password}' | base64 -d)
+kubectl port-forward -n ws-slot00 svc/timescaledb-cloud-rw 5432:5432 > /tmp/tsdb-cagg-pf.log 2>&1 &
+TSDB_PF_PID=$!
+sleep 5
+PGPASSWORD="$TSDB_PASS" psql -h localhost -p 5432 -U workshop -d edge -v ON_ERROR_STOP=1 <<'SQL'
+CREATE MATERIALIZED VIEW IF NOT EXISTS cpu_hourly
+WITH (timescaledb.continuous) AS
+SELECT time_bucket('1 hour', partition_time) AS bucket,
+       site_id,
+       AVG(value) AS avg_cpu,
+       MAX(value) AS max_cpu
+FROM sensor_readings
+WHERE sensor = 'cpu_pct'
+GROUP BY bucket, site_id;
+
+SELECT add_continuous_aggregate_policy('cpu_hourly',
+  start_offset      => INTERVAL '3 hours',
+  end_offset        => INTERVAL '1 hour',
+  schedule_interval => INTERVAL '30 minutes',
+  if_not_exists     => true);
+SQL
+kill "$TSDB_PF_PID" 2>/dev/null || true
+```
+<!-- e2e:assert {"contains": "CREATE MATERIALIZED VIEW"} -->
 
 ---
 
@@ -64,10 +105,11 @@ With this set, a plain `SELECT` is transparently rewritten by the query planner:
 -- What the planner actually executes:
 SELECT * FROM <materialization_hypertable>
 UNION ALL
-SELECT time_bucket('1 hour', message_timestamp), thing_name,
-       AVG(cpu_pct), MAX(cpu_pct)
-FROM telemetry_raw
-WHERE message_timestamp > <materialization_watermark>
+SELECT time_bucket('1 hour', partition_time), site_id,
+       AVG(value), MAX(value)
+FROM sensor_readings
+WHERE sensor = 'cpu_pct'
+  AND partition_time > <materialization_watermark>
 GROUP BY 1, 2;
 ```
 

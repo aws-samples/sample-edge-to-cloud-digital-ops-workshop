@@ -9,8 +9,13 @@ metadata:
     app.kubernetes.io/component: timescaledb
 spec:
   instances: 1
-  imageName: ghcr.io/cloudnative-pg/postgresql:16.8
+  # TimescaleDB extension baked into a CNPG-compatible operand image (see the
+  # cloud cluster manifest for why the official timescale/timescaledb-ha tag
+  # can't be used with CNPG). The operator still owns HA/failover/backups.
+  imageName: ghcr.io/clevyr/cloudnativepg-timescale:16.4-ts2.16
   postgresql:
+    shared_preload_libraries:
+      - timescaledb
     parameters:
       max_connections: "100"
       shared_buffers: "256MB"
@@ -23,6 +28,7 @@ spec:
       database: edge
       owner: workshop
       postInitApplicationSQL:
+        - CREATE EXTENSION IF NOT EXISTS timescaledb;
         - |
           CREATE TABLE IF NOT EXISTS sensor_readings (
             ts_ms          BIGINT          NOT NULL,
@@ -32,8 +38,10 @@ spec:
             unit           TEXT,
             partition_time TIMESTAMPTZ     NOT NULL
           );
+        - SELECT create_hypertable('sensor_readings', 'partition_time', if_not_exists => TRUE);
         - CREATE INDEX IF NOT EXISTS idx_sr_sensor ON sensor_readings(sensor, partition_time DESC);
-        - "GRANT SELECT, INSERT, UPDATE ON sensor_readings TO workshop;"
+        # workshop must OWN the hypertable to build continuous aggregates on it.
+        - "ALTER TABLE sensor_readings OWNER TO workshop;"
   storage:
     size: 10Gi
   resources:

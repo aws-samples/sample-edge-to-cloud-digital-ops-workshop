@@ -19,13 +19,25 @@ spec:
   # 1 primary + 1 streaming standby for cloud HA.
   instances: 2
 
-  # PostgreSQL 16 with TimescaleDB extension binaries pre-installed.
-  imageName: ghcr.io/cloudnative-pg/postgresql:16.3
+  # PostgreSQL 16 with the TimescaleDB extension binaries baked in.
+  #
+  # The CNPG operator, not the image, provides HA/failover/backups — we keep all
+  # of that unchanged and only swap the *operand* image for one that ships the
+  # compiled timescaledb.so, so `CREATE EXTENSION timescaledb` and continuous
+  # aggregates work (see Block 4). CNPG's image-tag validator rejects the
+  # official `timescale/timescaledb-ha:pg16-tsX` tags (non-semver); the clevyr
+  # community image is the same upstream CNPG base + TimescaleDB, tagged in
+  # CNPG's expected `<pg>.<minor>-ts<ext>` form so it passes validation.
+  imageName: ghcr.io/clevyr/cloudnativepg-timescale:16.4-ts2.16
 
   # ────────────────────────────────────────────────────────────────────────────
   # PostgreSQL configuration
   # ────────────────────────────────────────────────────────────────────────────
   postgresql:
+    # timescaledb is a preload library — it must be loaded at server start,
+    # before any database connection, or CREATE EXTENSION fails.
+    shared_preload_libraries:
+      - timescaledb
     parameters:
       max_connections: "200"
       shared_buffers: "512MB"
@@ -46,10 +58,11 @@ spec:
       #   secret:
       #     name: timescaledb-cloud-workshop-credentials
 
-      postInitSQL:
-        # Create the sensor_readings table that Redpanda Connect writes to.
-        # Using vanilla Postgres (no TimescaleDB ext) — CNPG's tag validator
-        # rejects all timescale/timescaledb-ha image tags.
+      # postInitApplicationSQL runs inside the application database (`edge`) after
+      # shared_preload_libraries is active — the right place to CREATE EXTENSION
+      # and build the sensor_readings hypertable Redpanda Connect writes to.
+      postInitApplicationSQL:
+        - CREATE EXTENSION IF NOT EXISTS timescaledb;
         - |
           CREATE TABLE IF NOT EXISTS sensor_readings (
             ts_ms          BIGINT          NOT NULL,
@@ -60,7 +73,14 @@ spec:
             partition_time TIMESTAMPTZ     NOT NULL
           );
 
+        # Promote sensor_readings to a hypertable so continuous aggregates
+        # (Block 4) can be built directly on it.
+        - SELECT create_hypertable('sensor_readings', 'partition_time', if_not_exists => TRUE);
         - CREATE INDEX IF NOT EXISTS idx_sensor_readings_sensor ON sensor_readings(sensor, partition_time DESC);
+        # postInitApplicationSQL runs as the superuser, so hand the table to the
+        # workshop role — it must OWN the hypertable to build a continuous
+        # aggregate on it (Block 4), not merely hold DML grants.
+        - ALTER TABLE sensor_readings OWNER TO workshop;
 
   # ────────────────────────────────────────────────────────────────────────────
   # Storage — 50 Gi for fleet-wide cloud data (larger than the 10 Gi edge node)

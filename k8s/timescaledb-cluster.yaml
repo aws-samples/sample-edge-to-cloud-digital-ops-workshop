@@ -19,9 +19,11 @@ spec:
   # Single instance for workshop — no standby replicas.
   instances: 1
 
-  # PostgreSQL 16 with TimescaleDB installed via the community TimescaleDB
-  # container image (includes the extension binaries).
-  imageName: timescale/timescaledb-ha:pg16
+  # PostgreSQL 16 with the TimescaleDB extension baked in. NOTE: CNPG's image-tag
+  # validator rejects the official `timescale/timescaledb-ha:pg16-tsX` tags
+  # (non-semver), so we use the clevyr community operand image — the same CNPG
+  # base + TimescaleDB, tagged in CNPG's expected form.
+  imageName: ghcr.io/clevyr/cloudnativepg-timescale:16.4-ts2.16
 
   # ────────────────────────────────────────────────────────────────────────────
   # PostgreSQL configuration
@@ -51,8 +53,10 @@ spec:
       #   secret:
       #     name: timescaledb-workshop-credentials
 
-      # Enable TimescaleDB extension in the bootstrap database.
-      postInitSQL:
+      # Enable TimescaleDB extension in the application database (`edge`).
+      # postInitApplicationSQL (not postInitSQL) runs inside `edge`, after
+      # shared_preload_libraries is active.
+      postInitApplicationSQL:
         - CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
         - |
           CREATE TABLE IF NOT EXISTS sensor_readings (
