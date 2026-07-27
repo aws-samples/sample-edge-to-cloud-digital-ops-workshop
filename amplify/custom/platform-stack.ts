@@ -647,6 +647,47 @@ export class PlatformStack extends Stack {
       exportName: "workshop-platform-flink-app-name",
       value: flinkApp.ref,
     });
+
+    // Managed Flink apps deploy in READY state and never run until something
+    // calls StartApplication — without this, the Iceberg sink (and the Glue
+    // catalog it populates) never starts and participants see no Athena data.
+    // Runs on both create and update so a redeploy after a manual stop
+    // resumes the app too; ResourceInUseException (already running) is
+    // expected and ignored.
+    const flinkAppAutoStart = new AwsCustomResource(this, "FlinkAppAutoStart", {
+      onCreate: {
+        service: "KinesisAnalyticsV2",
+        action: "startApplication",
+        parameters: {
+          ApplicationName: flinkApp.applicationName,
+          RunConfiguration: {
+            ApplicationRestoreConfiguration: {
+              ApplicationRestoreType: "SKIP_RESTORE_FROM_SNAPSHOT",
+            },
+          },
+        },
+        physicalResourceId: PhysicalResourceId.of("FlinkAppAutoStart"),
+        ignoreErrorCodesMatching: "ResourceInUseException",
+      },
+      onUpdate: {
+        service: "KinesisAnalyticsV2",
+        action: "startApplication",
+        parameters: {
+          ApplicationName: flinkApp.applicationName,
+          RunConfiguration: {
+            ApplicationRestoreConfiguration: {
+              ApplicationRestoreType: "SKIP_RESTORE_FROM_SNAPSHOT",
+            },
+          },
+        },
+        physicalResourceId: PhysicalResourceId.of("FlinkAppAutoStart"),
+        ignoreErrorCodesMatching: "ResourceInUseException",
+      },
+      policy: AwsCustomResourcePolicy.fromSdkCalls({
+        resources: [`arn:aws:kinesisanalytics:${this.region}:${this.account}:application/workshop-iceberg-sink`],
+      }),
+    });
+    flinkAppAutoStart.node.addDependency(flinkApp);
     }
 
     // ── Athena workgroup ─────────────────────────────────────────────────────

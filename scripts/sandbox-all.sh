@@ -52,30 +52,9 @@ npx cdk deploy \
   "$PLATFORM_STACK_NAME"
 echo ">>> Platform stack deployed."
 
-# ── Start Flink application if not already running ───────────────────────────
-FLINK_APP_NAME=$(aws cloudformation list-exports \
-  --query "Exports[?Name=='workshop-platform-flink-app-name'].Value" \
-  --output text 2>/dev/null || echo "")
-if [[ -n "$FLINK_APP_NAME" ]]; then
-  FLINK_STATUS=$(aws kinesisanalyticsv2 describe-application \
-    --application-name "$FLINK_APP_NAME" \
-    --query "ApplicationDetail.ApplicationStatus" \
-    --output text 2>/dev/null || echo "NOT_FOUND")
-  if [[ "$FLINK_STATUS" == "READY" ]]; then
-    echo ">>> Starting Flink application $FLINK_APP_NAME..."
-    aws kinesisanalyticsv2 start-application \
-      --application-name "$FLINK_APP_NAME" \
-      --run-configuration '{"ApplicationRestoreConfiguration":{"ApplicationRestoreType":"SKIP_RESTORE_FROM_SNAPSHOT"}}' \
-      && echo ">>> Flink application start initiated (status transitions to STARTING then RUNNING)." \
-      || echo ">>> WARNING: kinesisanalyticsv2:StartApplication failed (e.g. missing IAM permission) — continuing without starting Flink."
-  elif [[ "$FLINK_STATUS" == "RUNNING" || "$FLINK_STATUS" == "STARTING" ]]; then
-    echo ">>> Flink application $FLINK_APP_NAME already $FLINK_STATUS — skipping start."
-  else
-    echo ">>> WARNING: Flink application $FLINK_APP_NAME is in status $FLINK_STATUS — skipping start."
-  fi
-else
-  echo ">>> WARNING: Could not resolve Flink app name from CloudFormation exports — skipping start."
-fi
+# Starting the Flink application is now handled by a CDK custom resource in
+# PlatformStack (FlinkAppAutoStart) — it calls StartApplication on every
+# create/update, so no manual step is needed here.
 
 # ── Patch Glue Iceberg table for Lake Formation compatibility ─────────────────
 # GlueCatalog creates the Iceberg table with null InputFormat/SerdeInfo.
