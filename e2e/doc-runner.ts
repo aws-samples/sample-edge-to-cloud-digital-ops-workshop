@@ -2,10 +2,12 @@
  * doc-runner.ts — Extract and run annotated bash blocks from workshop .md files.
  *
  * Each bash block immediately followed by <!-- e2e:assert {...} --> is collected.
- * Blocks from a single .md file each run as their own bash process, with
- * exported vars threaded between them via a scratch env file so shared
- * session state (e.g. `export FOO=bar` in one block, read by a later one)
- * still carries over. Substitutions are applied before execution:
+ * Blocks from a single .md file each run as their own bash process, with shell
+ * vars threaded between them via a scratch env file so shared session state
+ * (e.g. `FOO=bar` in one block, read by a later one) still carries over —
+ * matching what a participant sees in one interactive shell. Blocks run under
+ * `set -a` so even bare (non-`export`ed) assignments thread across; see #74.
+ * Substitutions are applied before execution:
  *   ws-slot00        → DEPLOYMENT_ID
  *   000000000000     → ACCOUNT_ID
  *   workshop-platform-000000000000 → SHARED_BUCKET
