@@ -22,6 +22,7 @@ import {
 import {
   CfnCluster as EksCfnCluster,
   CfnNodegroup,
+  CfnAccessEntry,
 } from "aws-cdk-lib/aws-eks";
 import {
   CfnCluster as MskCluster,
@@ -55,6 +56,18 @@ export interface PlatformStackProps extends StackProps {
    * uploads the JAR once the bucket exists, then redeploys with it back on.
    */
   readonly deployFlinkApp?: boolean;
+
+  /**
+   * IAM principal ARNs (e.g. the CI role, a facilitator's admin role) to grant
+   * cluster-scoped EKS access via an access entry — so they can run kubectl/helm
+   * against workshop-eks without ever needing the "creator admin" bootstrap
+   * (which only applies to whoever ran the very first `cdk deploy`). Defaults
+   * to none. Cluster-scoped because these principals need to exercise the
+   * one-time operator installs (cert-manager, risingwave-operator, cnpg) that
+   * span every participant namespace — participants get a narrower,
+   * namespace-scoped entry instead (see ParticipantStack).
+   */
+  readonly eksAdminPrincipalArns?: string[];
 }
 
 /**
@@ -210,6 +223,28 @@ export class PlatformStack extends Stack {
       exportName: "workshop-eks-cluster-name",
       value: eksCluster.ref,
       description: "Run: aws eks update-kubeconfig --name workshop-eks to configure kubectl",
+    });
+
+    // Cluster-scoped access entries for admin/CI principals. `accessConfig.
+    // bootstrapClusterCreatorAdminPermissions` only grants admin to whoever ran
+    // the very first `cdk deploy` — every other principal (a re-run CI role, a
+    // second facilitator) is invisible to the cluster's RBAC until explicitly
+    // added here. AmazonEKSAdminPolicy (not ...ClusterAdminPolicy) covers the
+    // namespace/secret/deployment/CRD-install operations block-1-deploy.md
+    // needs without granting Kubernetes RBAC-management rights.
+    (props?.eksAdminPrincipalArns ?? []).forEach((principalArn, i) => {
+      const accessEntry = new CfnAccessEntry(this, `EksAdminAccessEntry${i}`, {
+        clusterName: eksCluster.ref,
+        principalArn,
+        type: "STANDARD",
+        accessPolicies: [
+          {
+            policyArn: "arn:aws:eks::aws:cluster-access-policy/AmazonEKSAdminPolicy",
+            accessScope: { type: "cluster" },
+          },
+        ],
+      });
+      accessEntry.node.addDependency(eksCluster);
     });
 
     // ── IRSA for cloud RisingWave (S3 state store) ──────────────────────────

@@ -12,11 +12,15 @@ import {
 import {
   Role,
   ServicePrincipal,
+  AccountPrincipal,
+  ArnPrincipal,
+  CompositePrincipal,
   ManagedPolicy,
   PolicyStatement,
   Effect,
   CfnInstanceProfile,
 } from "aws-cdk-lib/aws-iam";
+import { CfnAccessEntry } from "aws-cdk-lib/aws-eks";
 import {
   CfnProvisioningTemplate,
   CfnPolicy as IotPolicy,
@@ -53,6 +57,18 @@ import { Construct } from "constructs";
 export interface ParticipantStackProps extends StackProps {
   deploymentId: string;
   graphqlEndpoint: string; // CloudFormation export name — resolved via Fn.importValue
+
+  /**
+   * IAM principal ARNs (users, roles, or SSO permission sets) trusted to
+   * assume this slot's `WorkshopParticipantRole`. Defaults to this account's
+   * root, which lets any IAM principal in the account that has been granted
+   * `sts:AssumeRole` on the role's ARN assume it — the actual gate is then
+   * whichever IAM policy the account admin attaches to their participants,
+   * not this stack. Pass explicit ARNs instead to restrict assumption to a
+   * specific SSO permission set / IAM group without relying on a separate
+   * policy attachment.
+   */
+  readonly participantRoleTrustedPrincipalArns?: string[];
 }
 
 /**
@@ -69,6 +85,10 @@ export interface ParticipantStackProps extends StackProps {
  *  - IoT Rule → AppSync bridge Lambda → Amplify GraphQL subscription
  *  - Per-slot MSK SASL/SCRAM secret (references shared cluster + shared KMS key)
  *  - Kubernetes namespace (ws-slotNN) in the shared workshop-eks cluster
+ *
+ *  - `WorkshopParticipantRole-<deploymentId>` — the IAM role a participant
+ *    assumes to run kubectl/helm against their namespace in the shared
+ *    workshop-eks cluster, with a namespace-scoped EKS access entry attached
  *
  * Shared infrastructure (S3, MSK cluster, Flink, Glue, Athena) lives in
  * WorkshopPlatformStack and is imported via Fn.importValue.
@@ -908,6 +928,46 @@ systemctl start sensor-sim
       },
     });
 
+    // ── Participant IAM role + namespace-scoped EKS access ──────────────────
+    // Lets AWS IAM be the thing that decides who can run kubectl/helm in this
+    // slot's namespace: whoever the account admin grants sts:AssumeRole on
+    // this role's ARN gets in, and revoking that grant removes access — no
+    // `aws eks create-access-entry` call needed per participant, no facilitator
+    // script to run per attendee. The access entry itself is namespace-scoped
+    // (AmazonEKSEditPolicy), so a participant can never see another slot's
+    // namespace or touch the cluster-scoped operators installed by the
+    // cluster-scoped admin access entries in WorkshopPlatformStack.
+    const participantRoleTrustedPrincipals = (props.participantRoleTrustedPrincipalArns?.length
+      ? props.participantRoleTrustedPrincipalArns.map((arn) => new ArnPrincipal(arn))
+      : [new AccountPrincipal(this.account)]);
+
+    const participantRole = new Role(this, "ParticipantRole", {
+      roleName: `WorkshopParticipantRole-${deploymentId}`,
+      description: `Assumed by ${deploymentId} participants to run kubectl/helm against their namespace on workshop-eks`,
+      assumedBy: new CompositePrincipal(...participantRoleTrustedPrincipals),
+    });
+
+    // eks:DescribeCluster is needed for `aws eks update-kubeconfig`; the actual
+    // Kubernetes RBAC authorization comes from the access entry below, not IAM.
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["eks:DescribeCluster"],
+      resources: [`arn:aws:eks:${this.region}:${this.account}:cluster/workshop-eks`],
+    }));
+
+    const participantAccessEntry = new CfnAccessEntry(this, "ParticipantEksAccessEntry", {
+      clusterName: "workshop-eks",
+      principalArn: participantRole.roleArn,
+      type: "STANDARD",
+      accessPolicies: [
+        {
+          policyArn: "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy",
+          accessScope: { type: "namespace", namespaces: [deploymentId] },
+        },
+      ],
+    });
+    participantAccessEntry.node.addDependency(participantRole);
+
     // ── Outputs ──────────────────────────────────────────────────────────────
     new CfnOutput(this, "DeploymentId", {
       exportName: `workshop-${deploymentId}-deployment-id`,
@@ -923,6 +983,12 @@ systemctl start sensor-sim
       exportName: `workshop-${deploymentId}-eks-cluster`,
       value: "workshop-eks",
       description: "Shared EKS cluster. Run: aws eks update-kubeconfig --name workshop-eks",
+    });
+
+    new CfnOutput(this, "ParticipantRoleArn", {
+      exportName: `workshop-${deploymentId}-participant-role`,
+      value: participantRole.roleArn,
+      description: `Assume this role for kubectl/helm access to namespace ${deploymentId} on workshop-eks`,
     });
 
     new CfnOutput(this, "MskCredSecretArn", {
@@ -953,6 +1019,11 @@ systemctl start sensor-sim
     new StringParameter(this, "EksClusterNameSsmParam", {
       parameterName: `/workshop/${deploymentId}/eks-cluster-name`,
       stringValue: "workshop-eks",
+    });
+
+    new StringParameter(this, "ParticipantRoleArnSsmParam", {
+      parameterName: `/workshop/${deploymentId}/participant-role-arn`,
+      stringValue: participantRole.roleArn,
     });
 
     new StringParameter(this, "MskCredSecretArnSsmParam", {

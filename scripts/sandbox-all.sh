@@ -38,6 +38,12 @@ if ! aws s3api head-object --bucket "$PLATFORM_BUCKET" --key "$FLINK_JAR_KEY" >/
   NEEDS_FLINK_REDEPLOY=1
 fi
 
+# To grant cluster-scoped EKS access (cert-manager/risingwave-operator/cnpg
+# installs in block-1-deploy.md) to CI or a second facilitator role that isn't
+# the one that ran the very first deploy, export
+# WORKSHOP_EKS_ADMIN_PRINCIPAL_ARNS (comma-separated) before running this
+# script — platform-app.ts reads it directly. See platform-stack.ts.
+
 echo ">>> Deploying $PLATFORM_STACK_NAME..."
 npx cdk deploy \
   --app "$PLATFORM_APP" \

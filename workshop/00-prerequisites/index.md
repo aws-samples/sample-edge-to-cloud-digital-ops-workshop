@@ -115,6 +115,15 @@ pnpm run sandbox:all ws-slot00 ws-slot01 ws-slot02 ws-slot03 ws-slot04 ws-slot05
 
 ---
 
+## EKS Access for Participants and Other Admins
+
+`workshop-eks` is shared across all slots. `accessConfig.bootstrapClusterCreatorAdminPermissions` only grants cluster-admin to the one identity that ran the very first `cdk deploy` — no one else, including participants, can run `kubectl`/`helm` against the cluster until they're explicitly authorized:
+
+- **Each participant slot** gets its own `WorkshopParticipantRole-<id>` IAM role (created by `ParticipantStack`) with an EKS access entry scoped to just that slot's namespace (`AmazonEKSEditPolicy`, namespace-scoped). By default this role trusts the whole account (any principal with `sts:AssumeRole` granted on it can assume it) — grant that permission on the participant's actual workshop IAM identity so `aws eks update-kubeconfig --name workshop-eks --role-arn arn:aws:iam::<account>:role/WorkshopParticipantRole-<id>` works for them. This is how IAM — not a per-participant `aws eks create-access-entry` call — ends up deciding who can reach which namespace.
+- **A second admin or CI role** (one that didn't run the original deploy) needs cluster-scoped access to run the one-time operator installs in `block-1-deploy.md` (cert-manager, risingwave-operator, cnpg). Pass its ARN via `--context eksAdminPrincipalArns=<arn1>,<arn2>` (or `WORKSHOP_EKS_ADMIN_PRINCIPAL_ARNS`, comma-separated) on the `WorkshopPlatformStack` deploy — this creates a `CfnAccessEntry` tracked by CloudFormation, so unlike an ad hoc `aws eks create-access-entry` call it survives redeploys and shows up in `cdk diff`.
+
+---
+
 ## Initial Telemetry Configuration
 
 Devices publish OS metrics as soon as they register.

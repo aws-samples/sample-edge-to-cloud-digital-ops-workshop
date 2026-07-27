@@ -17,6 +17,9 @@ aws eks update-kubeconfig \
 ```
 <!-- e2e:assert {"contains": "context"} -->
 
+!!! info "Namespace-scoped access via IAM"
+    Steps 4, 6, and 7 below (cert-manager, the RisingWave operator, the CNPG operator) are cluster-scoped installs — run once per cluster by whoever has cluster-admin access (the facilitator, or CI). If you're a participant without cluster-admin, your own operations (namespace `ws-slot00` only — Steps 2, 3, 5, 8, 9) work via `WorkshopParticipantRole-ws-slot00`, an IAM role with an EKS access entry scoped to just your namespace: run `aws eks update-kubeconfig --region us-east-1 --name workshop-eks --role-arn arn:aws:iam::000000000000:role/WorkshopParticipantRole-ws-slot00` instead, once your admin has granted your IAM identity `sts:AssumeRole` on that role.
+
 Confirm nodes are Ready:
 
 ```bash
