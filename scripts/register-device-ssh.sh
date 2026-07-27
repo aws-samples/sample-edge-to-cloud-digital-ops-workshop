@@ -154,6 +154,18 @@ ssh_run "sudo THING_NAME='$THING_NAME' DEPLOYMENT_ID='$DEPLOYMENT_ID' \
   IOT_ENDPOINT='$IOT_ENDPOINT' bash -s" <<'PROVISION'
 set -euo pipefail
 
+# Clear any state left by a previous fleet-provisioning run. After a successful
+# provision the device client writes a runtime config (~/.aws-iot-device-client/
+# with "completed-fp": true) and the minted per-device certificate; on the next
+# start it reuses that identity and never re-runs provisioning with the claim
+# cert. If that old per-device cert has since been revoked/deleted (e.g. the slot
+# was redeployed), the client just loops on AWS_ERROR_MQTT_UNEXPECTED_HANGUP and
+# the device silently fails to re-register. Wiping the runtime state forces a
+# clean fleet-provisioning run against the claim cert. The service runs as root,
+# so the runtime dir lives under /root.
+systemctl stop aws-iot-device-client 2>/dev/null || true
+rm -rf /root/.aws-iot-device-client
+
 install -d -m 700 /etc/aws-iot-device-client/certs
 install -m 644 /tmp/claim.pem.crt        /etc/aws-iot-device-client/certs/claim.pem.crt
 install -m 600 /tmp/claim-private.pem.key /etc/aws-iot-device-client/certs/claim-private.pem.key
