@@ -32,6 +32,14 @@ spec:
               value: {{ .Values.risingwave.serviceName | default "edge-stack-risingwave" | quote }}
             - name: RISINGWAVE_PORT
               value: "4567"
+            # Edge Redpanda Admin API (Prometheus /public_metrics) — used by the
+            # WAN Relay Backlog card to read the relay consumer group's lag.
+            - name: REDPANDA_ADMIN_URL
+              value: "http://{{ .Release.Name }}-0.{{ .Release.Name }}.{{ .Release.Namespace }}.svc.cluster.local:9644"
+            - name: RELAY_CONSUMER_GROUP
+              value: "relay-group-{{ .Values.deploymentId }}"
+            - name: RELAY_TOPIC
+              value: "sensors.raw.sim"
             - name: TIMESCALE_HOST
               value: "timescaledb-rw"
             - name: TIMESCALE_PORT

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { SensorStats } from "../api/digital-ops/route";
+import type { RelayLagResponse } from "../api/relay-lag/route";
 
 interface ApiResponse {
   stats: SensorStats[];
@@ -49,18 +50,28 @@ const tdStyle: React.CSSProperties = {
 
 export default function OpsPage() {
   const [data, setData] = useState<ApiResponse | null>(null);
+  const [relay, setRelay] = useState<RelayLagResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/digital-ops");
-      const json: ApiResponse = await res.json();
-      setData(json);
+      const [statsRes, relayRes] = await Promise.allSettled([
+        fetch("/api/digital-ops").then((r) => r.json() as Promise<ApiResponse>),
+        fetch("/api/relay-lag").then((r) => r.json() as Promise<RelayLagResponse>),
+      ]);
+      setData(
+        statsRes.status === "fulfilled"
+          ? statsRes.value
+          : { stats: [], queryDurationMs: 0, error: String(statsRes.reason) }
+      );
+      setRelay(
+        relayRes.status === "fulfilled"
+          ? relayRes.value
+          : { streams: [], scrapedAt: Date.now(), queryDurationMs: 0, error: String(relayRes.reason) }
+      );
       setLastRefresh(new Date());
-    } catch (err) {
-      setData({ stats: [], queryDurationMs: 0, error: String(err) });
     } finally {
       setLoading(false);
     }
@@ -207,31 +218,106 @@ export default function OpsPage() {
         )}
       </div>
 
-      {/* WAN relay placeholder */}
+      {/* WAN relay backlog — edge → cloud MSK consumer-group lag */}
       <div style={cardStyle}>
-        <h2>WAN Relay Lag</h2>
+        <h2>WAN Relay Backlog</h2>
+        <p style={{ color: "#8b949e", fontSize: 12, marginTop: 0, marginBottom: 12 }}>
+          Records buffered on the edge that the relay has not yet forwarded to
+          cloud MSK, from the Redpanda consumer-group offset lag. A rising
+          backlog means the WAN link is down — the edge keeps ingesting while the
+          relay stalls, then drains once connectivity returns.
+        </p>
+
+        {relay?.error && (
+          <div
+            style={{
+              color: "#da3633",
+              background: "#1c1c1c",
+              border: "1px solid #da3633",
+              borderRadius: 4,
+              padding: "8px 12px",
+              marginBottom: 12,
+              fontSize: 12,
+            }}
+          >
+            Redpanda metrics error: {relay.error}
+          </div>
+        )}
+
         <table style={tableStyle}>
           <thead>
             <tr>
-              <th style={thStyle}>Stream</th>
-              <th style={{ ...thStyle, textAlign: "right" }}>Lag (ms)</th>
+              <th style={thStyle}>Consumer group</th>
+              <th style={thStyle}>Topic</th>
+              <th style={{ ...thStyle, textAlign: "right" }}>Backlog (records)</th>
+              <th style={{ ...thStyle, textAlign: "right" }}>Partitions</th>
               <th style={thStyle}>Status</th>
             </tr>
           </thead>
           <tbody>
-            <tr>
-              <td style={tdStyle}>Edge → Cloud MSK</td>
-              <td
-                style={{ ...tdStyle, textAlign: "right", color: "#8b949e" }}
-              >
-                N/A
-              </td>
-              <td style={{ ...tdStyle, color: "#8b949e" }}>
-                N/A — connect to cloud MSK to see lag
-              </td>
-            </tr>
+            {!relay || relay.streams.length === 0 ? (
+              <tr>
+                <td
+                  colSpan={5}
+                  style={{ ...tdStyle, color: "#8b949e", textAlign: "center" }}
+                >
+                  {loading
+                    ? "Loading…"
+                    : relay?.error
+                    ? "No data — is the edge Redpanda Admin API reachable?"
+                    : "No relay consumer group registered yet"}
+                </td>
+              </tr>
+            ) : (
+              relay.streams.map((s) => {
+                const caughtUp = s.backlog === 0;
+                return (
+                  <tr key={`${s.group}|${s.topic}`}>
+                    <td style={tdStyle}>
+                      <code
+                        style={{
+                          background: "#21262d",
+                          padding: "1px 6px",
+                          borderRadius: 3,
+                          fontSize: 12,
+                        }}
+                      >
+                        {s.group}
+                      </code>
+                    </td>
+                    <td style={{ ...tdStyle, color: "#8b949e" }}>{s.topic}</td>
+                    <td
+                      style={{
+                        ...tdStyle,
+                        textAlign: "right",
+                        color: caughtUp ? "#238636" : "#e3b341",
+                        fontWeight: caughtUp ? 400 : 600,
+                      }}
+                    >
+                      {s.backlog.toLocaleString()}
+                    </td>
+                    <td style={{ ...tdStyle, textAlign: "right", color: "#8b949e" }}>
+                      {s.partitions}
+                    </td>
+                    <td style={{ ...tdStyle, color: caughtUp ? "#238636" : "#e3b341" }}>
+                      {caughtUp ? "Caught up" : "Backlog draining / WAN degraded"}
+                    </td>
+                  </tr>
+                );
+              })
+            )}
           </tbody>
         </table>
+
+        {relay && (
+          <div style={metaStyle}>
+            <span>Scrape: {relay.queryDurationMs} ms</span>
+            <span>
+              Source: Redpanda /public_metrics @{" "}
+              {process.env.NEXT_PUBLIC_REDPANDA_ADMIN_HOST ?? "edge-stack-0:9644"}
+            </span>
+          </div>
+        )}
       </div>
     </>
   );
