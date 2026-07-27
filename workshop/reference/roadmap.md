@@ -40,6 +40,9 @@ Against live `ws-slot00` on 2026-07-27, after merging #67/#68/#69/#70/#72:
 - [x] IAM-driven EKS access entries so participants can `helm`/`kubectl` (#70 item 1)
 - [x] Fix `set -e` session-abort masking in doc-runner (#72)
 - [x] Fix non-exported var threading between blocks (#74) — PR #76 (fleet-management 4/6 → 6/6)
+- [x] Fix `deployment-summary.sh` CFN export names so per-slot fields populate (#36) — PR #78
+- [x] SSH device-registration flow verified end-to-end; fixed stale fleet-provisioning runtime state on re-register (#38) — PR #79
+- [x] Doc-runner exposed via `pnpm run test*` scripts, verified on a live slot (#23)
 - [ ] Resolve IoT Job block timeouts (#75) — diagnosed: flapping MQTT on one device (NAT idle-timeout suspected), not a poll-ceiling bug
 - [ ] SSM port-forward path for session-5 K3s Helm blocks (#70 item 2)
 - [ ] Full-suite green-run sign-off on a fresh slot (#37)
@@ -54,18 +57,18 @@ Against live `ws-slot00` on 2026-07-27, after merging #67/#68/#69/#70/#72:
 | #75 | bug/e2e | IoT Job blocks time out at 900s | Diagnosed — flapping MQTT on 1 device (NAT idle-timeout suspected) |
 | #70 | bug/e2e | EKS access done; K3s network path (item 2) remaining | Partial |
 | #68 | e2e | Doc-runner as sole e2e test | Tail work (#74, #70 item 2) |
-| #23 | needs-review | Test doc runner | Likely satisfied by current `test` scripts |
+| ~~#23~~ | needs-review | Test doc runner | ✅ Closed — satisfied by `pnpm run test*` scripts, verified on ws-slot00 |
 | #29 | feature | 3-way data-freshness comparison (Athena/Iceberg tier) | Open |
 | #31 | feature | Edge digital-ops backlog metric | Open |
-| #36 | ops | Populate per-slot fields in DEPLOYMENT_SUMMARY.md | Open |
-| #38 | feature | Register a new IoT device over SSH | Open (script + doc exist) |
+| ~~#36~~ | ops | Populate per-slot fields in DEPLOYMENT_SUMMARY.md | ✅ Closed (PR #78) |
+| ~~#38~~ | feature | Register a new IoT device over SSH | ✅ Closed (PR #79) — verified end-to-end |
 
 ### Blocked
 
 | # | Title | Blocked by |
 |---|---|---|
 | #37 | Full-suite green-run sign-off on a fresh slot | #27, #28, #74, #75 |
-| #41 | Exercise platform teardown verification | #29, #31, #36, #38 |
+| #41 | Exercise platform teardown verification | #29, #31 (#36, #38 now closed) |
 | #27 | Re-run shadow-job on slots 01/02/03, confirm green | (blocks #37) |
 | #28 | Exercise per-slot teardown verification | paused pending active dev |
 
