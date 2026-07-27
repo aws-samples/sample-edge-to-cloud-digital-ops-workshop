@@ -92,16 +92,58 @@ else
   echo "  Shared EKS cluster not found — skipping namespace deletion."
 fi
 
-# ── 7. Delete MSK cluster ─────────────────────────────────────────────────────
-echo "--- MSK ---"
-MSK_ARN=$(aws kafka list-clusters-v2 \
-  --region "$REGION" \
-  --filter-by-name "workshop-${DEPLOYMENT_ID}-msk" \
-  --query "ClusterInfoList[0].ClusterArn" --output text 2>/dev/null || true)
+# ── 7. Detach this slot from the SHARED MSK cluster ──────────────────────────
+# MSK is a shared platform resource (one cluster for all slots) — never deleted
+# by a per-slot teardown. But each slot associates its own SASL/SCRAM secret and
+# creates per-slot edge topics on that shared cluster; both leak onto the cluster
+# unless we clean them up here, BEFORE the secret itself is deleted in step 10
+# (disassociation needs the secret to still exist).
+echo "--- MSK (shared — detaching this slot only) ---"
+SHARED_MSK_ARN=$(aws cloudformation list-exports --region "$REGION" \
+  --query "Exports[?Name=='workshop-platform-msk-arn'].Value" --output text 2>/dev/null || true)
 
-if [ -n "$MSK_ARN" ] && [ "$MSK_ARN" != "None" ]; then
-  echo "  Deleting MSK cluster: $MSK_ARN"
-  run aws kafka delete-cluster --region "$REGION" --cluster-arn "$MSK_ARN"
+if [ -n "$SHARED_MSK_ARN" ] && [ "$SHARED_MSK_ARN" != "None" ]; then
+  # Disassociate this slot's SCRAM secret (match by name so a deleted/renamed
+  # secret ARN still resolves from the live association list).
+  SCRAM_ARN=$(aws kafka list-scram-secrets --region "$REGION" \
+    --cluster-arn "$SHARED_MSK_ARN" \
+    --query "SecretArnList[?contains(@, 'AmazonMSK_workshop-${DEPLOYMENT_ID}-')]" \
+    --output text 2>/dev/null || true)
+  if [ -n "$SCRAM_ARN" ] && [ "$SCRAM_ARN" != "None" ]; then
+    echo "  Disassociating SCRAM secret: $SCRAM_ARN"
+    run aws kafka batch-disassociate-scram-secret --region "$REGION" \
+      --cluster-arn "$SHARED_MSK_ARN" --secret-arn-list "$SCRAM_ARN"
+  fi
+
+  # Delete this slot's per-slot edge topics. The generic sensors.raw.sim /
+  # raw.telemetry topics are shared across slots and are intentionally left.
+  BOOTSTRAP=$(aws kafka get-bootstrap-brokers --region "$REGION" \
+    --cluster-arn "$SHARED_MSK_ARN" \
+    --query BootstrapBrokerStringSaslScram --output text 2>/dev/null || true)
+  if [ -n "$BOOTSTRAP" ] && [ "$BOOTSTRAP" != "None" ] && command -v kafka-topics.sh >/dev/null 2>&1; then
+    MSK_PASS=$(aws secretsmanager get-secret-value --region "$REGION" \
+      --secret-id "AmazonMSK_workshop-${DEPLOYMENT_ID}" \
+      --query SecretString --output text 2>/dev/null \
+      | python3 -c 'import sys,json; print(json.load(sys.stdin)["password"])' 2>/dev/null || true)
+    if [ -n "$MSK_PASS" ]; then
+      CFG=$(mktemp)
+      cat > "$CFG" <<EOF
+security.protocol=SASL_SSL
+sasl.mechanism=SCRAM-SHA-512
+sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="workshop-${DEPLOYMENT_ID}" password="${MSK_PASS}";
+EOF
+      for N in 0 1 2; do
+        run kafka-topics.sh --bootstrap-server "$BOOTSTRAP" --command-config "$CFG" \
+          --delete --topic "sensors.raw.${DEPLOYMENT_ID}-edge-${N}" 2>/dev/null || true
+      done
+      rm -f "$CFG"
+    fi
+  else
+    echo "  (kafka-topics.sh not on PATH — skipping per-slot topic deletion;"
+    echo "   topics are harmless idle metadata on the shared cluster.)"
+  fi
+else
+  echo "  Shared MSK cluster export not found — skipping MSK detach."
 fi
 
 # ── 8. Empty and delete S3 buckets ────────────────────────────────────────────

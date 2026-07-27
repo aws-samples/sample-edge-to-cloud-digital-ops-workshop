@@ -30,13 +30,16 @@ The script destroys resources in order to respect dependencies:
 4. IoT Provisioning Template
 5. EC2 instances
 6. EKS namespace (participant namespace on the shared cluster)
-7. MSK cluster
+7. Detach from the **shared** MSK cluster — disassociate this slot's SASL/SCRAM secret and delete its per-slot edge topics (the cluster itself is shared and is never deleted by a slot teardown)
 8. S3 buckets (Iceberg data + RisingWave state)
 9. Athena workgroup
 10. Secrets Manager secrets (claim cert, MSK SCRAM creds)
 11. SSM parameters (k3s token, kubeconfig)
 
-The shared VPCs (`workshop-edge`, `workshop-cloud`) are **preserved** for the next session or reuse.
+The shared VPCs (`workshop-edge`, `workshop-cloud`), the shared **MSK cluster**,
+and the shared **EKS cluster** are **preserved** for the next session or reuse —
+a per-slot teardown only removes that slot's own resources and its footprint
+*on* the shared clusters (EKS namespace, MSK SCRAM association + topics).
 
 !!! warning
     Once teardown completes, all device state, telemetry history, and shadow state is destroyed. Export any data you want to keep beforehand.
