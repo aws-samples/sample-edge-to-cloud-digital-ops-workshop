@@ -62,11 +62,17 @@ chain of infra + doc bugs, each verified live on a fresh test slot:
   run through the same `ws-slot00`/account substitution as the commands, and two
   host-only asserts were dropped (commit `5bec387`).
 
-Filed **#88** for the block-4 continuous-aggregate content: the deployed cloud
-"TimescaleDB" is plain `postgresql:16.3` (no timescaledb extension — CNPG rejects
-the timescale image tag), so the CAGG SQL in the doc can't run as written; needs a
-maintainer decision between installing a TimescaleDB image vs. teaching the
-plain-Postgres equivalents.
+**#88 (closed)** — block-4 continuous aggregates now run for real. The cloud
+"TimescaleDB" was plain `postgresql:16.3` (no timescaledb extension), so the CAGG
+SQL couldn't run and referenced a nonexistent `telemetry_raw`/`cpu_pct` schema.
+Fixed by keeping CNPG (operator owns HA/failover/backups) and swapping only the
+*operand* image to a CNPG-compatible build with timescaledb baked in
+(`ghcr.io/clevyr/cloudnativepg-timescale:16.4-ts2.16` — the official
+`timescale/timescaledb-ha` tags are non-semver and fail CNPG's validator).
+`postInitApplicationSQL` now `CREATE EXTENSION`, promotes `sensor_readings` to a
+hypertable, and `ALTER TABLE ... OWNER TO workshop` (a CAGG needs ownership of the
+source table). block-4 DDL rewritten against the real `sensor_readings` schema
+with an e2e-asserted bash block; verified live (doc-runner 2/2).
 
 ## Milestones
 
