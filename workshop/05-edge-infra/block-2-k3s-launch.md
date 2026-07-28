@@ -12,7 +12,7 @@ Launch both steps simultaneously — they run independently and must both comple
 
 ```bash
 aws s3 cp job-scripts/deploy-k3s.sh \
-  s3://workshop-platform-000000000000/ws-slot00/job-scripts/deploy-k3s.sh
+  s3://workshop-platform-000000000000/job-scripts/ws-slot00/deploy-k3s.sh
 ```
 <!-- e2e:assert {"contains": "upload:"} -->
 
@@ -32,7 +32,7 @@ aws s3 cp job-scripts/deploy-k3s.sh \
         "type": "runHandler",
         "input": {
           "handler": "run-script.sh",
-          "args": ["s3://workshop-platform-000000000000/ws-slot00/job-scripts/deploy-k3s.sh"]
+          "args": ["s3://workshop-platform-000000000000/job-scripts/ws-slot00/deploy-k3s.sh"]
         },
         "runAsUser": ""
       }
