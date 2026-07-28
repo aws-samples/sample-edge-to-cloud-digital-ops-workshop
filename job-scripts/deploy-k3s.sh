@@ -7,6 +7,12 @@ set -euo pipefail
 
 INSTANCE_ID=$(ec2-metadata --instance-id | cut -d' ' -f2)
 REGION=$(ec2-metadata --availability-zone | cut -d' ' -f2 | sed 's/.$//')
+
+# The IoT Device Client runs job handlers without the telemetry service's
+# EnvironmentFile, so DEPLOYMENT_ID is not in the environment here. Source the
+# same env file the CDK writes to every device so we target this slot's Thing
+# Group and SSM parameter paths — not the ws-slot00 placeholder default.
+[ -f /etc/workshop-telemetry.env ] && . /etc/workshop-telemetry.env
 DEPLOYMENT_ID="${DEPLOYMENT_ID:-ws-slot00}"
 SSM_TOKEN_PATH="/workshop/${DEPLOYMENT_ID}/k3s-token"
 SSM_KUBECONFIG_PATH="/workshop/${DEPLOYMENT_ID}/kubeconfig"
