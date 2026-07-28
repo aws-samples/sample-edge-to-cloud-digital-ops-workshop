@@ -85,12 +85,37 @@ kubectl create secret generic msk-credentials \
 
 ## Deploy the Edge Stack
 
+The release needs two slot-specific endpoints that aren't known until deploy
+time, so discover them and pass them on the command line (these override the
+placeholders in `helm/edge-stack-values.yaml`, so you don't have to hand-edit the
+file):
+
+- **`mqtt.host`** — the sensor simulator EC2's **private IP** (the ingest
+  pipeline connects to its Mosquitto broker).
+- **`mskBootstrapServers`** — the **shared** MSK cluster's SASL/SCRAM bootstrap
+  brokers (the WAN relay forwards `sensors.raw.*` there).
+
 ```bash
+SIM_IP=$(aws ec2 describe-instances \
+  --filters "Name=tag:Name,Values=workshop-ws-slot00-sensor-sim" \
+            "Name=instance-state-name,Values=running" \
+  --query "Reservations[0].Instances[0].PrivateIpAddress" \
+  --output text)
+
+MSK_ARN=$(aws cloudformation list-exports \
+  --query "Exports[?Name=='workshop-platform-msk-arn'].Value" --output text)
+MSK_BROKERS=$(aws kafka get-bootstrap-brokers --cluster-arn "$MSK_ARN" \
+  --query "BootstrapBrokerStringSaslScram" --output text)
+# helm --set treats commas as key separators, so escape the commas between brokers.
+MSK_BROKERS_ESC="${MSK_BROKERS//,/\\,}"
+
 helm dependency update helm/edge-stack
 helm upgrade --install edge-stack ./helm/edge-stack \
   --namespace edge --create-namespace \
   -f helm/edge-stack-values.yaml \
-  --set deploymentId=ws-slot00
+  --set deploymentId=ws-slot00 \
+  --set mqtt.host="$SIM_IP" \
+  --set mskBootstrapServers="$MSK_BROKERS_ESC"
 ```
 <!-- e2e:assert {"contains": "edge-stack"} -->
 
