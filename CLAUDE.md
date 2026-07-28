@@ -208,6 +208,39 @@ Rules for this pattern:
 - Never have Claude run this script itself in the background and call it done — Claude's own sandbox doesn't persist between invocations, so a script it starts won't survive to post the follow-up comment. It must be handed to the user to run.
 - Claude applies the `awaiting-monitor` label when it hands off the monitor script, and the monitor script removes it as part of its final `gh` call (`gh issue edit ... --remove-label`, which works on PRs too since PRs are issues under the hood) — right before the `@claude` comment that re-triggers Claude. `gh issue edit` (not `pr edit`) is used because a PR number and an issue number are the same underlying entity in this repo's numbering.
 
+## Delegating Work to the Remote Agent (`@agentcore-claude`)
+
+A remote development agent is wired into this repo's GitHub. Mentioning
+**`@agentcore-claude`** in a GitHub **issue or PR comment** hands that thread to
+the agent, which picks up the task, works it in its own environment, and pushes a
+branch / opens or updates a PR. Use it to parallelize independent work while you
+keep going locally — it is a peer worker, not a subprocess you wait on.
+
+**When to delegate:**
+- The task is **self-contained and well-scoped** — a single doc file, one script,
+  one chart — with a clear definition of done the agent can verify itself.
+- It's **independent** of what you're actively editing (no shared-file merge races).
+- It doesn't need live-AWS state that only your authenticated laptop session has,
+  **unless** the agent's environment is set up for it — prefer static/offline work
+  (doc edits, chart fixes verifiable via `helm template`, unit-level changes) for
+  the remote agent, and keep live-slot validation (doc-runner against a real slot,
+  IoT jobs, kubectl into a private K3s) on the local session that holds credentials.
+
+**How to assign:**
+1. Ensure a GitHub issue exists describing the task (create one if needed) with
+   enough context to work standalone — repro, file paths, and the acceptance check.
+2. Comment `@agentcore-claude` on that issue with a crisp instruction and the
+   done-criteria (e.g. "make `mkdocs build --strict` pass" or "the resource names
+   in this doc match the rendered Helm output").
+3. Record any blocking/blocked-by relationship with the native GitHub
+   issue-relationships API (see the section above) — don't rely on prose.
+4. Track the resulting PR like any other; review before merge. Two agents must
+   not edit the same file on divergent branches — split by file/module.
+
+**What to keep local (do NOT delegate):** anything requiring this machine's AWS
+credentials or the SSM tunnel into a private K3s cluster, platform/slot teardown,
+and any change you can't hand off with a self-verifiable acceptance check.
+
 ## Local / Internal Notes (not committed)
 
 The line below imports machine-local and Amazon-internal guidance from a gitignored file. It silently no-ops for anyone who clones the public repo without it.
