@@ -8,6 +8,8 @@ import {
   Peer,
   Port,
   CfnNatGateway,
+  CfnVPCPeeringConnection,
+  CfnRoute,
 } from "aws-cdk-lib/aws-ec2";
 import {
   Role,
@@ -161,6 +163,41 @@ export class PlatformStack extends Stack {
     this.cloudVpc.addGatewayEndpoint("S3Endpoint", {
       service: GatewayVpcEndpointAwsService.S3,
     });
+
+    // ── Edge ↔ Cloud VPC peering ─────────────────────────────────────────────
+    // The Session-5 "WAN relay" (Redpanda Connect in the edge VPC) forwards
+    // edge `sensors.raw.*` to the shared MSK cluster in the cloud VPC. MSK is
+    // private-only, so without a network path between 10.0.0.0/16 and
+    // 10.1.0.0/16 the relay's producer times out dialing the brokers. Peer the
+    // two VPCs (same account+region → auto-accepted) and add reciprocal routes
+    // on every subnet route table in both VPCs. The MSK security group is also
+    // opened to the edge CIDR below (see mskSg).
+    const edgeCloudPeering = new CfnVPCPeeringConnection(this, "EdgeCloudPeering", {
+      vpcId: this.edgeVpc.vpcId,
+      peerVpcId: this.cloudVpc.vpcId,
+      tags: [{ key: "Name", value: "workshop-edge-to-cloud" }],
+    });
+
+    // Route every subnet's table to the peer CIDR, in both directions. Each
+    // subnet (public + private) carries a routeTable we attach a CfnRoute to.
+    [...this.edgeVpc.publicSubnets, ...this.edgeVpc.privateSubnets].forEach(
+      (subnet, i) => {
+        new CfnRoute(this, `EdgeToCloudRoute${i}`, {
+          routeTableId: subnet.routeTable.routeTableId,
+          destinationCidrBlock: this.cloudVpc.vpcCidrBlock,
+          vpcPeeringConnectionId: edgeCloudPeering.ref,
+        });
+      }
+    );
+    [...this.cloudVpc.publicSubnets, ...this.cloudVpc.privateSubnets].forEach(
+      (subnet, i) => {
+        new CfnRoute(this, `CloudToEdgeRoute${i}`, {
+          routeTableId: subnet.routeTable.routeTableId,
+          destinationCidrBlock: this.edgeVpc.vpcCidrBlock,
+          vpcPeeringConnectionId: edgeCloudPeering.ref,
+        });
+      }
+    );
 
     // ── Shared EKS cluster ───────────────────────────────────────────────────
     // One cluster hosts all participant namespaces. Provisioned here (pre-workshop)
@@ -378,6 +415,10 @@ export class PlatformStack extends Stack {
     });
     mskSg.addIngressRule(Peer.ipv4(this.cloudVpc.vpcCidrBlock), Port.tcp(9096), "MSK SASL/SCRAM from VPC");
     mskSg.addIngressRule(Peer.ipv4(this.cloudVpc.vpcCidrBlock), Port.tcp(9098), "MSK IAM from VPC");
+    // The Session-5 WAN relay produces to MSK from the edge VPC over the
+    // edge↔cloud peering connection (see EdgeCloudPeering above), so admit the
+    // edge CIDR on the SASL/SCRAM port too.
+    mskSg.addIngressRule(Peer.ipv4(this.edgeVpc.vpcCidrBlock), Port.tcp(9096), "MSK SASL/SCRAM from edge VPC (WAN relay)");
 
     const mskCluster = new MskCluster(this, "MskCluster", {
       clusterName: "workshop-platform-msk",
