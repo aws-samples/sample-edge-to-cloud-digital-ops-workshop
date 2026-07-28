@@ -208,6 +208,17 @@ risingwave:
 cnpg:
   enabled: true
 
+  # The cloudnative-pg subchart ships its CRDs as ordinary templates
+  # (templates/crds/crds.yaml), which Helm renders in the SAME pass as the
+  # TimescaleDB Cluster CR below — so on a fresh cluster the API server has no
+  # postgresql.cnpg.io/v1 kind yet and `helm install` fails with
+  # "no matches for kind Cluster". We instead vendor those CRDs into this
+  # umbrella chart's crds/ directory (helm/edge-stack/crds/cnpg-crds.yaml),
+  # which Helm always applies BEFORE any template renders. Disable the
+  # subchart's copy here to avoid installing them twice.
+  crds:
+    create: false
+
   resources:
     requests:
       cpu: 50m
