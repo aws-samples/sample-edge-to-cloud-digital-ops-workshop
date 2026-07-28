@@ -45,9 +45,12 @@ jobs:
       - name: Check links with lychee
         uses: lycheeverse/lychee-action@v2
         with:
-          # Check the built HTML output; skip anchors (drift fast), localhost, and AWS console (auth-gated)
+          # Check the built HTML output; skip anchors (drift fast), localhost, and AWS console (auth-gated).
+          # --root-dir resolves MkDocs' root-relative hrefs (e.g. /03-state/) against the built site root,
+          # otherwise lychee reports them as unresolvable and every PR fails on the generated 404.html.
           args: >
             --no-progress
+            --root-dir "${{ github.workspace }}/site"
             --exclude-loopback
             --exclude 'console\.aws\.amazon\.com'
             --exclude '#'
