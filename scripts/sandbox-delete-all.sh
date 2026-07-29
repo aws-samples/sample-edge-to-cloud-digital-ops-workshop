@@ -92,6 +92,18 @@ if [[ "$STACK_STATUS" == "DOES_NOT_EXIST" ]]; then
   exit 0
 fi
 
+# Empty the shared bucket first. Its `autoDeleteObjects` Lambda times out paging
+# a large bucket during `cdk destroy`, leaving the stack DELETE_FAILED (#111).
+# Clearing it up front from the CLI (which pages without a Lambda timeout) makes
+# the auto-delete custom resource a no-op. Belt-and-braces alongside the CDK
+# lifecycle rules that keep the bucket small in the first place.
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || true)
+SHARED_BUCKET="workshop-platform-${ACCOUNT_ID}"
+if [[ -n "$ACCOUNT_ID" ]] && aws s3api head-bucket --bucket "$SHARED_BUCKET" 2>/dev/null; then
+  echo ">>> Emptying shared bucket $SHARED_BUCKET before destroy..."
+  aws s3 rm "s3://${SHARED_BUCKET}" --recursive || true
+fi
+
 echo ">>> Destroying $PLATFORM_STACK..."
 npx cdk destroy \
   --app "$PLATFORM_APP" \

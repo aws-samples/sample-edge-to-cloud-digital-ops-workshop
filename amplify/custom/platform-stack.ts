@@ -1,4 +1,4 @@
-import { Stack, StackProps, CfnOutput, CfnDeletionPolicy, RemovalPolicy, Fn, CfnJson } from "aws-cdk-lib";
+import { Stack, StackProps, CfnOutput, CfnDeletionPolicy, RemovalPolicy, Duration, Fn, CfnJson } from "aws-cdk-lib";
 import {
   Vpc,
   SubnetType,
@@ -380,6 +380,32 @@ export class PlatformStack extends Stack {
       blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
       encryption: BucketEncryption.S3_MANAGED,
       versioned: false,
+      // Expire transient scratch prefixes so the bucket doesn't grow unbounded
+      // over the platform's lifetime. Athena query results and IoT-error dumps
+      // are pure regenerable scratch — left alone they accumulate across every
+      // slot until the `autoDeleteObjects` Lambda times out paging them all on
+      // `cdk destroy`, leaving the stack DELETE_FAILED (issue #111). Note this
+      // does NOT touch `telemetry/` (the Iceberg table data — real workshop
+      // output) or per-slot job-doc prefixes; the belt-and-braces teardown fix
+      // is emptying the bucket in scripts/sandbox-delete-all.sh before destroy.
+      lifecycleRules: [
+        {
+          id: "expire-athena-results",
+          prefix: "athena-results/",
+          expiration: Duration.days(7),
+        },
+        {
+          id: "expire-iot-errors",
+          prefix: "iot-errors/",
+          expiration: Duration.days(14),
+        },
+        {
+          // Abort dangling multipart uploads (a classic silent source of
+          // bucket bloat that the auto-delete Lambda must also page through).
+          id: "abort-incomplete-mpu",
+          abortIncompleteMultipartUploadAfter: Duration.days(1),
+        },
+      ],
     });
 
     new CfnOutput(this, "WorkshopBucketName", {
@@ -776,6 +802,12 @@ export class PlatformStack extends Stack {
     // this workgroup (ATHENA_WORKGROUP=workshop-shared).
     const athenaWorkGroup = new CfnWorkGroup(this, "AthenaWorkGroup", {
       name: "workshop-shared",
+      // Once the workgroup holds any query-execution history (always, after a
+      // participant runs a query), CloudFormation refuses to delete it unless
+      // this is set — leaving `cdk destroy` in DELETE_FAILED (issue #111). The
+      // per-slot scripts/teardown.sh already passes --recursive-delete-option
+      // for the same reason.
+      recursiveDeleteOption: true,
       workGroupConfiguration: {
         engineVersion: {
           selectedEngineVersion: "Athena engine version 3",
