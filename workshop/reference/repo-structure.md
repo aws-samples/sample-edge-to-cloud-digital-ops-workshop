@@ -15,6 +15,8 @@ edge-digital-ops-workshop/
 │   └── add-shadows.sh              # Session 3: app-deployment + device-health shadows
 ├── scripts/
 │   ├── create-workshop-user.sh     # Create Cognito user for the front-end UI
+│   ├── grant-ci-access.sh          # Grant a CI/facilitator role EKS + Cognito access
+│   ├── edge-kubeconfig.sh          # SSM port-forward kubectl to a slot's private K3s
 │   └── teardown.sh                 # Ordered resource cleanup
 ├── workshop/                       # MkDocs source (this documentation)
 │   ├── index.md
