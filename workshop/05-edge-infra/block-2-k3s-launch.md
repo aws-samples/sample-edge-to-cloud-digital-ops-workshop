@@ -45,6 +45,48 @@ aws s3 cp job-scripts/deploy-k3s.sh \
    - Device 1 handler: stands up the K3s server node, writes token + kubeconfig to SSM
    - Devices 2 & 3 handlers: poll SSM Parameter Store for the K3s server token, then join as agents
 
+    Upload the job document and create the job:
+
+    ```bash
+    cat > /tmp/deploy-k3s-job-doc.json << 'EOF'
+    {
+      "version": "1.0",
+      "steps": [
+        {
+          "action": {
+            "name": "deploy-k3s",
+            "type": "runHandler",
+            "input": {
+              "handler": "run-script.sh",
+              "args": ["s3://workshop-platform-000000000000/job-scripts/ws-slot00/deploy-k3s.sh"]
+            },
+            "runAsUser": ""
+          }
+        }
+      ]
+    }
+    EOF
+
+    aws s3 cp /tmp/deploy-k3s-job-doc.json \
+      s3://workshop-platform-000000000000/ws-slot00/job-docs/deploy-k3s-job-doc.json
+    ```
+    <!-- e2e:assert {"contains": "upload:"} -->
+
+    ??? example "AWS CLI equivalent — create the K3s bootstrap job"
+        ```bash
+        JOB_ID="ws-slot00-deploy-k3s-$(date +%s)"
+        aws iot create-job \
+          --job-id "$JOB_ID" \
+          --targets "$(aws iot describe-thing-group \
+              --thing-group-name ws-slot00-devices \
+              --query thingGroupArn --output text)" \
+          --document-source \
+              s3://workshop-platform-000000000000/ws-slot00/job-docs/deploy-k3s-job-doc.json \
+          --timeout-config '{"inProgressTimeoutInMinutes":45}' \
+          --output json
+        ```
+        <!-- e2e:assert {"jsonPath": "jobId", "matches": "deploy-k3s-\\d+$", "jobSucceeds": true, "jobTimeoutMinutes": 45} -->
+
 3. Observe job status per device: `IN_PROGRESS` → `SUCCEEDED`
 
 !!! info "Ordering without job dependencies"
