@@ -4,7 +4,7 @@ Maintainer-facing tracker for workshop build-out and end-to-end (doc-runner) tes
 coverage. Participant instructions live in the session docs; this page tracks the
 work *behind* them. Keep it current as issues open, land, and close.
 
-_Last updated: 2026-07-27._
+_Last updated: 2026-07-29._
 
 ## Testing model
 
@@ -18,19 +18,29 @@ participant copy-pastes.
 cd e2e && npx tsx doc-runner-cli.ts workshop/02-control --deployment-id ws-slot00
 ```
 
-## Latest full-slot run
+## Latest full-slot run — #37 release baseline
 
-Against live `ws-slot00` on 2026-07-27, after merging #67/#68/#69/#70/#72:
+Against a **clean slot `ws-slot38`** on 2026-07-29 (all code fixes deployed:
+#102 CreateGrant, #103 device-client restart; doc fixes from #105/#107/#108):
+**65/66 asserted blocks pass.** The single red is `05-edge-infra/index.md`'s
+docker build — a local buildx/ECR-login artifact (`public.ecr.aws` 403 on the
+metadata HEAD; direct `docker pull` succeeds), not a product defect. This is the
+release baseline that closed #37.
 
 | Session | Result | Notes |
 |---|---|---|
-| 01-observe | ✅ 2/2 | Athena/Glue green once Flink sink runs (#69) |
-| 02-control | ⚠️ 17/24 | fleet-indexing 6/6; failures are #74 (unbound vars) + #75 (job timeout) |
-| 03-state | ⚠️ 3/5 | failures are #74 + #75 |
-| 04-analytics | ✅ 18/18 (verified paths) | up from 1/14; fixed storage tier, MSK SCRAM association, VPC-private topic creation, local `psql` prereq, RisingWave DDL asserts. See "Session-4 fixes" below. |
-| 05-edge-infra | ⛔ unreachable | K3s on VPC-private IP; needs SSM port-forward (#70 item 2) |
-| 06-hmi | ✅ 2/2 | |
-| 07-capstone | ✅ 1/1 | teardown block |
+| 01-observe | ✅ | Athena/Glue green |
+| 02-control | ✅ | iot-job 6/6 after #103 fix (notify-next race gone); fleet-indexing/management green |
+| 03-state | ✅ | shadow-job + ui green |
+| 04-analytics | ✅ 15/15 + 2/2 + 2/2 | after clearing shared-EKS capacity exhaustion (see ops note below) |
+| 05-edge-infra | ✅ | k3s-launch 4/4, helm 4/4, verify 6/6; only `index.md` docker build red (local runner artifact) |
+| 06-hmi | ✅ | |
+| 07-capstone | ✅ | teardown block |
+
+> **Ops note:** don't stack multiple slots' analytics workloads on the shared
+> 2-node EKS at once — leftover namespaces pin both nodes at ~99% memory and new
+> slots' RisingWave/TimescaleDB pods stay `Pending`. Delete stale `ws-slotNN`
+> namespaces before a fresh analytics run.
 
 ## Session-4 analytics fixes (landed on `fix/analytics-storage-and-docrunner`)
 
@@ -85,12 +95,13 @@ with an e2e-asserted bash block; verified live (doc-runner 2/2).
 - [x] Fix `deployment-summary.sh` CFN export names so per-slot fields populate (#36) — PR #78
 - [x] SSH device-registration flow verified end-to-end; fixed stale fleet-provisioning runtime state on re-register (#38) — PR #79
 - [x] Doc-runner exposed via `pnpm run test*` scripts, verified on a live slot (#23)
-- [ ] Resolve IoT Job block timeouts (#75) — diagnosed: flapping MQTT on one device (NAT idle-timeout suspected), not a poll-ceiling bug
-- [ ] SSM port-forward path for session-5 K3s Helm blocks (#70 item 2)
+- [x] Resolve IoT Job block timeouts (#75/#103) — root cause was the aws-iot-device-client v1.10.0 fleet-provisioning jobs-subscription race, NOT a poll-ceiling bug. Fixed with a sentinel-guarded one-time post-provision restart (PR #105).
+- [x] SSM port-forward path for session-5 K3s Helm blocks (#70 item 3) — `scripts/edge-kubeconfig.sh` (PR #109)
 - [x] Provision EKS storage tier (EBS CSI + default `StorageClass`) so analytics PVCs bind
 - [x] Reliable MSK SCRAM association via Lambda custom resource (was silently failing)
+- [x] MSK SCRAM Lambda needs `kms:CreateGrant` on the SCRAM CMK — clean-slot deploy blocker exposed by #37 (PR #102)
 - [x] VPC-private MSK topic creation from an in-cluster pod (04-analytics block 1)
-- [ ] Full-suite green-run sign-off on a fresh slot (#37)
+- [x] Full-suite green-run sign-off on a fresh slot (#37) — **65/66 asserted blocks** on clean slot ws-slot38; sole red is a local buildx/ECR artifact, not a defect. CLOSED.
 
 ## Issue board
 
@@ -106,19 +117,23 @@ with an e2e-asserted bash block; verified live (doc-runner 2/2).
 | ~~#68~~ | e2e | Doc-runner as sole e2e test | ✅ Closed — `runner.ts`/`report-writer.ts` removed, scripts repointed, CLAUDE.md updated (commit `2703c4e`) |
 | ~~#74~~ | bug/e2e | Block isolation drops non-exported shell vars → "unbound variable" | ✅ Closed (PR #76) |
 
-### Remaining — all require a live deployment / operator action (no code change)
+### Closed since last update (2026-07-29 session)
 
-Every open issue below needs an active AWS slot or manual operator step; none is
-completable as a pure code change:
-
-| # | Title | What it needs |
+| # | Title | Resolution |
 |---|---|---|
-| #75 | IoT Job blocks time out at 900s | Diagnosed as flapping MQTT on one device (NAT idle-timeout suspected). Needs live-device debugging / a re-run to confirm. |
-| #70 | Doc-runner IAM + network path for sessions 03–05 | Item 2: SSM port-forward path for session-5 K3s Helm blocks — needs CI-role IAM change validated against a live cluster. |
-| #41 | Exercise platform teardown verification | **Now unblocked** (all of #29,#30,#31,#33,#35,#36,#38,#40 closed). Needs a live platform to run `scripts/teardown.sh` + `pnpm run sandbox:delete-all`. |
-| #37 | Full-suite green-run sign-off on a fresh slot | Blocked by #27, #28, #75. A release-gate run on a fresh slot. |
-| #27 | Re-run shadow-job on slots 01/02/03, confirm green | Live-slot job re-run (blocks #37). |
-| #28 | Exercise per-slot teardown verification | Live-slot teardown run. |
+| ~~#27~~ | Re-run shadow-job on slots, confirm green | ✅ Closed (blocker for #37) |
+| ~~#28~~ | Exercise per-slot teardown verification | ✅ Closed — verified clean via live AWS API |
+| ~~#37~~ | Full-suite green-run sign-off on a fresh slot | ✅ Closed — 65/66 on clean slot ws-slot38; sole red is a local buildx/ECR artifact |
+| ~~#70~~ | Doc-runner IAM + network path for sessions 03–05 | ✅ Closed (PR #109) — EKS access entry + Cognito grant applied live & codified in `grant-ci-access.sh`; K3s SSM path in `edge-kubeconfig.sh` |
+| ~~#75~~ | IoT Job blocks time out | ✅ Closed — root cause was the device-client FP jobs-subscription race (#103), fixed in PR #105 |
+| ~~#93~~ | block-4-verify names/ports | ✅ Closed (PR #101) |
+| ~~#106~~ | block-4-verify EKS fall-through | ✅ Closed (PR #107) |
+
+### Remaining — held on user go-ahead (no code change)
+
+| # | Title | Status |
+|---|---|---|
+| #41 | Exercise platform teardown verification (Phase 9) | **Unblocked** (all blockers closed). Must run LAST, after active development pauses — it wipes the shared EKS/MSK/VPCs (~40 min rebuild). Dispatched to `@agentcore-claude` 2026-07-29. |
 
 > GitHub's native issue-relationships feature is the source of truth for
 > blocked-by/blocking (see `CLAUDE.md`). This table is a convenience mirror —
