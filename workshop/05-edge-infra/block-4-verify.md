@@ -93,16 +93,15 @@ kubectl logs -n edge job/edge-stack-rw-ddl
 ```
 <!-- e2e:assert {"contains": "CREATE_MATERIALIZED_VIEW"} -->
 
-If the job failed, re-run manually — `risingwave/ddl.sql` uses `CREATE ... IF NOT EXISTS` throughout, so it's safe to re-run even when the post-install hook already succeeded:
+If the job failed, re-run manually — `risingwave/ddl.sql` uses `CREATE ... IF NOT EXISTS` throughout, so it's safe to re-run even when the post-install hook already succeeded (in that case the already-existing views are skipped, so you'll see `CREATE_SOURCE` but not a fresh `CREATE_MATERIALIZED_VIEW` — that's expected and harmless):
 
 ```bash
 kubectl port-forward -n edge svc/edge-stack-risingwave 4567:4567 > /tmp/rw-edge-pf.log 2>&1 &
 RW_PF_PID=$!
 sleep 5
-psql -h localhost -p 4567 -U root -f risingwave/ddl.sql
+psql -h localhost -p 4567 -U root -d dev -f risingwave/ddl.sql
 kill "$RW_PF_PID" 2>/dev/null || true
 ```
-<!-- e2e:assert {"contains": "CREATE_MATERIALIZED_VIEW"} -->
 
 **4. Confirm RisingWave materialized views are computing**
 
@@ -110,7 +109,7 @@ kill "$RW_PF_PID" 2>/dev/null || true
 kubectl port-forward -n edge svc/edge-stack-risingwave 4567:4567 > /tmp/rw-edge-pf2.log 2>&1 &
 RW_PF_PID=$!
 sleep 5
-psql -h localhost -p 4567 -U root -c "SELECT * FROM mv_sensor_latest LIMIT 5;"
+psql -h localhost -p 4567 -U root -d dev -c "SELECT * FROM mv_sensor_latest LIMIT 5;"
 kill "$RW_PF_PID" 2>/dev/null || true
 ```
 <!-- e2e:assert {"contains": "row"} -->
