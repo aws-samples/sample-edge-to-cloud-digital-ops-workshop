@@ -72,12 +72,14 @@ MSK_CREDS=$(aws secretsmanager get-secret-value \
 MSK_USER=$(echo "$MSK_CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)['username'])")
 MSK_PASS=$(echo "$MSK_CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
 
-# Create the secret in the edge namespace
+# Create the secret in the edge namespace (idempotent — re-runnable if the
+# secret already exists from an earlier attempt).
 kubectl create namespace edge --dry-run=client -o yaml | kubectl apply -f -
 kubectl create secret generic msk-credentials \
   --namespace edge \
   --from-literal=MSK_USERNAME="$MSK_USER" \
-  --from-literal=MSK_PASSWORD="$MSK_PASS"
+  --from-literal=MSK_PASSWORD="$MSK_PASS" \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
 <!-- e2e:assert {"contains": "secret/msk-credentials"} -->
 
