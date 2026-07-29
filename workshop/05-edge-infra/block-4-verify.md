@@ -9,7 +9,7 @@
 **1. Confirm sensor simulator is publishing**
 
 ```bash
-kubectl logs -n edge deployment/redpanda-connect-ingest --tail=50
+kubectl logs -n edge deployment/edge-stack-rp-connect-ingest --tail=50
 ```
 <!-- e2e:assert {"notContains": "error"} -->
 
@@ -18,7 +18,7 @@ You should see MQTT messages being received and written to Redpanda topics.
 **2. Inspect Redpanda topics via Redpanda Console**
 
 ```bash
-kubectl port-forward -n edge svc/redpanda-console 8080:8080 > /tmp/redpanda-console-pf.log 2>&1 &
+kubectl port-forward -n edge svc/edge-stack-console 8080:8080 > /tmp/redpanda-console-pf.log 2>&1 &
 RC_PF_PID=$!
 sleep 5
 curl -sf http://localhost:8080 | head -c 200
@@ -41,10 +41,10 @@ kubectl logs -n edge job/edge-stack-rw-ddl
 If the job failed, re-run manually — `risingwave/ddl.sql` uses `CREATE ... IF NOT EXISTS` throughout, so it's safe to re-run even when the post-install hook already succeeded:
 
 ```bash
-kubectl port-forward -n edge svc/edge-stack-risingwave 4566:4566 > /tmp/rw-edge-pf.log 2>&1 &
+kubectl port-forward -n edge svc/edge-stack-risingwave 4567:4567 > /tmp/rw-edge-pf.log 2>&1 &
 RW_PF_PID=$!
 sleep 5
-psql -h localhost -p 4566 -U root -f risingwave/ddl.sql
+psql -h localhost -p 4567 -U root -f risingwave/ddl.sql
 kill "$RW_PF_PID" 2>/dev/null || true
 ```
 <!-- e2e:assert {"contains": "CREATE MATERIALIZED VIEW"} -->
@@ -52,10 +52,10 @@ kill "$RW_PF_PID" 2>/dev/null || true
 **4. Confirm RisingWave materialized views are computing**
 
 ```bash
-kubectl port-forward -n edge svc/edge-stack-risingwave 4566:4566 > /tmp/rw-edge-pf2.log 2>&1 &
+kubectl port-forward -n edge svc/edge-stack-risingwave 4567:4567 > /tmp/rw-edge-pf2.log 2>&1 &
 RW_PF_PID=$!
 sleep 5
-psql -h localhost -p 4566 -U root -c "SELECT * FROM mv_sensor_latest LIMIT 5;"
+psql -h localhost -p 4567 -U root -c "SELECT * FROM mv_sensor_latest LIMIT 5;"
 kill "$RW_PF_PID" 2>/dev/null || true
 ```
 <!-- e2e:assert {"contains": "row"} -->
@@ -63,7 +63,7 @@ kill "$RW_PF_PID" 2>/dev/null || true
 **5. Confirm WAN relay is forwarding to cloud MSK**
 
 ```bash
-kubectl logs -n edge deployment/redpanda-connect-relay --tail=50
+kubectl logs -n edge deployment/edge-stack-rp-connect-relay --tail=50
 ```
 <!-- e2e:assert {"notContains": "error"} -->
 
