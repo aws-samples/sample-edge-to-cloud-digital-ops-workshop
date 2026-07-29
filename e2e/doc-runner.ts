@@ -54,6 +54,9 @@ export interface AssertSpec {
   jsonPath?: string;
   matches?: string;
   jobSucceeds?: boolean;
+  /** Poll ceiling for jobSucceeds, in minutes. Defaults to 15. Longer-running
+   *  jobs (e.g. the K3s bootstrap, which the docs allow 45 min) set this higher. */
+  jobTimeoutMinutes?: number;
 }
 
 export interface BlockResult {
@@ -530,7 +533,10 @@ export async function runDocBlocks(
         error = `jobSucceeds: true but could not extract jobId from block output:\n${blockOut.slice(0, 500)}`;
       } else {
         try {
-          pollJobUntilDone(jobId, subs.REGION);
+          const timeoutMs = assert.jobTimeoutMinutes
+            ? assert.jobTimeoutMinutes * 60_000
+            : undefined;
+          pollJobUntilDone(jobId, subs.REGION, timeoutMs);
         } catch (pollErr: unknown) {
           error = pollErr instanceof Error ? pollErr.message : String(pollErr);
         }

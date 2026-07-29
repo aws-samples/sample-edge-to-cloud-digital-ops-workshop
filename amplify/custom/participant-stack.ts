@@ -664,9 +664,56 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
+# One-time restart after fleet provisioning writes its runtime config, to work
+# around an aws-iot-device-client v1.10.x race: the jobs \`notify-next\`
+# subscription established during the initial fleet-provisioning session (claim
+# cert → CreateKeysAndCertificate → RegisterThing → reconnect with the permanent
+# cert) does NOT reliably receive the FIRST job created after connect — the
+# execution sits QUEUED indefinitely with zero device-log activity until the
+# client is restarted (which fires StartNextPendingJobExecution). Warm/subsequent
+# jobs are unaffected. A single restart once the runtime config is in place fixes
+# it permanently, so the very first IoT job on a fresh slot runs without any
+# manual intervention. Guarded by a sentinel so it only ever runs once. See #103.
+cat > /usr/local/bin/iot-post-provision-restart.sh <<'PPR'
+#!/bin/bash
+set -uo pipefail
+SENTINEL=/var/lib/iot-post-provision-restart.done
+RUNTIME_CONF=/root/.aws-iot-device-client/aws-iot-device-client-runtime.conf
+[[ -f "$SENTINEL" ]] && exit 0
+# Wait up to 5 min for fleet provisioning to export the runtime config.
+for _ in $(seq 1 60); do
+  [[ -f "$RUNTIME_CONF" ]] && break
+  sleep 5
+done
+if [[ -f "$RUNTIME_CONF" ]]; then
+  sleep 5
+  systemctl restart aws-iot-device-client
+fi
+mkdir -p "$(dirname "$SENTINEL")"
+touch "$SENTINEL"
+PPR
+chmod +x /usr/local/bin/iot-post-provision-restart.sh
+
+cat > /etc/systemd/system/iot-post-provision-restart.service <<EOF
+[Unit]
+Description=One-time aws-iot-device-client restart after fleet provisioning (#103)
+After=aws-iot-device-client.service
+Wants=aws-iot-device-client.service
+ConditionPathExists=!/var/lib/iot-post-provision-restart.done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/iot-post-provision-restart.sh
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 systemctl daemon-reload
-systemctl enable aws-iot-device-client workshop-telemetry
+systemctl enable aws-iot-device-client workshop-telemetry iot-post-provision-restart
 systemctl start aws-iot-device-client workshop-telemetry
+systemctl start --no-block iot-post-provision-restart
 `;
 
     const amiId = MachineImage.latestAmazonLinux2023().getImage(this).imageId;
