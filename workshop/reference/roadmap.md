@@ -124,16 +124,18 @@ with an e2e-asserted bash block; verified live (doc-runner 2/2).
 | ~~#27~~ | Re-run shadow-job on slots, confirm green | ✅ Closed (blocker for #37) |
 | ~~#28~~ | Exercise per-slot teardown verification | ✅ Closed — verified clean via live AWS API |
 | ~~#37~~ | Full-suite green-run sign-off on a fresh slot | ✅ Closed — 65/66 on clean slot ws-slot38; sole red is a local buildx/ECR artifact |
+| ~~#41~~ | Exercise platform teardown verification (Phase 9) | ✅ Closed — `WorkshopPlatformStack` DELETE_COMPLETE, all shared EKS/MSK/VPCs/peering/bucket/exports gone (verified live). Exposed #111. |
 | ~~#70~~ | Doc-runner IAM + network path for sessions 03–05 | ✅ Closed (PR #109) — EKS access entry + Cognito grant applied live & codified in `grant-ci-access.sh`; K3s SSM path in `edge-kubeconfig.sh` |
 | ~~#75~~ | IoT Job blocks time out | ✅ Closed — root cause was the device-client FP jobs-subscription race (#103), fixed in PR #105 |
 | ~~#93~~ | block-4-verify names/ports | ✅ Closed (PR #101) |
 | ~~#106~~ | block-4-verify EKS fall-through | ✅ Closed (PR #107) |
+| ~~#111~~ | Platform teardown fails (Athena workgroup + S3 auto-delete) | ✅ Closed (PR #112) — Athena `recursiveDeleteOption`, S3 lifecycle rules, bucket pre-empty in `sandbox-delete-all.sh` |
 
-### Remaining — held on user go-ahead (no code change)
+### Remaining
 
-| # | Title | Status |
-|---|---|---|
-| #41 | Exercise platform teardown verification (Phase 9) | **Unblocked** (all blockers closed). Must run LAST, after active development pauses — it wipes the shared EKS/MSK/VPCs (~40 min rebuild). Dispatched to `@agentcore-claude` 2026-07-29. |
+_Board is empty — all tracked issues closed as of 2026-07-29._ The shared platform is
+**torn down** (platform teardown #41 completed); the next full-slot run will redeploy it
+via `pnpm run sandbox` (platform deploys first if absent, ~40 min).
 
 > GitHub's native issue-relationships feature is the source of truth for
 > blocked-by/blocking (see `CLAUDE.md`). This table is a convenience mirror —
