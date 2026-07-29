@@ -918,6 +918,19 @@ exports.handler = async (event) => {
       ],
       resources: [mskClusterArn],
     }));
+    // MSK's BatchAssociateScramSecret creates a KMS grant on the secret's CMK (so
+    // the broker can decrypt the SCRAM credential) AS THE CALLING PRINCIPAL — the
+    // caller must therefore hold kms:CreateGrant on that key, or the association
+    // comes back in UnprocessedScramSecrets with
+    // "InvalidSecretArn: You are not authorized to invoke the CreateGrant
+    // operation on the KMS key". Without this the custom resource retries 8× and
+    // fails the deploy. (Previously masked because SCRAM was associated manually
+    // via the admin role's kms:* — an automated clean-slot deploy exposes it.)
+    mskAssociateScramLambda.addToRolePolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["kms:CreateGrant", "kms:DescribeKey"],
+      resources: [mskScramKeyArn],
+    }));
 
     const mskAssociateScramProvider = new Provider(this, "MskAssociateScramProvider", {
       onEventHandler: mskAssociateScramLambda,
