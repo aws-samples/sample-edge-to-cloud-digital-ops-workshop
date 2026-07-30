@@ -19,6 +19,25 @@ PLATFORM_APP="npx tsx amplify/custom/platform-app.ts"
 PLATFORM_STACK_NAME="WorkshopPlatformStack"
 FLINK_JAR_KEY="flink-apps/flink-iceberg-sink-1.0.0.jar"
 
+# The platform stack now manages /workshop/platform/edge-nat-gateway-id as a CFN
+# resource. On accounts first provisioned by an older platform stack the value
+# exists as an out-of-band orphan (written by a previous version of this script);
+# CFN can't *create* a managed parameter on top of an existing unmanaged one.
+# Before (re)deploying the platform stack, delete the orphan — but never a value
+# that is already a resource of the stack (that one belongs to CFN).
+ensure_no_orphan_nat_ssm() {
+  local stack_name="$1"
+  local param="/workshop/platform/edge-nat-gateway-id"
+  aws ssm get-parameter --name "$param" >/dev/null 2>&1 || return 0  # nothing there
+  if aws cloudformation describe-stack-resources --stack-name "$stack_name" \
+      --query "StackResources[?ResourceType=='AWS::SSM::Parameter'].PhysicalResourceId" \
+      --output text 2>/dev/null | grep -qx "$param"; then
+    return 0  # already stack-managed — leave it for the update to reconcile
+  fi
+  echo ">>> Deleting orphaned SSM $param (not stack-managed) before platform deploy."
+  aws ssm delete-parameter --name "$param" >/dev/null 2>&1 || true
+}
+
 # ── Deploy platform stack (always) ───────────────────────────────────────────
 # cdk deploy is idempotent: if nothing changed it finishes in seconds.
 #
@@ -43,6 +62,8 @@ fi
 # the one that ran the very first deploy, export
 # WORKSHOP_EKS_ADMIN_PRINCIPAL_ARNS (comma-separated) before running this
 # script — platform-app.ts reads it directly. See platform-stack.ts.
+
+ensure_no_orphan_nat_ssm "$PLATFORM_STACK_NAME"
 
 echo ">>> Deploying $PLATFORM_STACK_NAME..."
 npx cdk deploy \
@@ -194,26 +215,24 @@ else
   echo ">>> WARNING: Could not resolve MSK brokers or admin secret — skipping topic creation."
 fi
 
-# ── Publish edge NAT gateway ID to SSM (once) ────────────────────────────────
-# //TODO - Move this into the platform stack. This should not be an sdk call.
+# ── Verify edge NAT gateway ID in SSM ────────────────────────────────────────
+# The platform stack publishes /workshop/platform/edge-nat-gateway-id (tied to
+# the NAT gateway's lifecycle, so it's always fresh). ParticipantStack reads it.
+# This is a read-only sanity check — the script no longer writes the value.
 EDGE_NAT_SSM="/workshop/platform/edge-nat-gateway-id"
 EXISTING_NAT_SSM=$(aws ssm get-parameter --name "$EDGE_NAT_SSM" --query "Parameter.Value" --output text 2>/dev/null || echo "None")
-if [[ "$EXISTING_NAT_SSM" != "None" && -n "$EXISTING_NAT_SSM" ]]; then
-  echo ">>> SSM $EDGE_NAT_SSM already set: $EXISTING_NAT_SSM. Skipping."
-else
-  EDGE_VPC_ID=$(aws ec2 describe-vpcs \
-    --filters "Name=tag:Name,Values=workshop-edge" \
-    --query "Vpcs[0].VpcId" --output text)
-  EDGE_NAT_ID=$(aws ec2 describe-nat-gateways \
-    --filter "Name=vpc-id,Values=${EDGE_VPC_ID}" "Name=state,Values=available" \
-    --query "NatGateways[0].NatGatewayId" --output text)
-  if [[ -z "$EDGE_NAT_ID" || "$EDGE_NAT_ID" == "None" ]]; then
-    echo "ERROR: No NAT gateway found in edge VPC $EDGE_VPC_ID — is the platform stack deployed?" >&2
-    exit 1
-  fi
-  aws ssm put-parameter --name "$EDGE_NAT_SSM" --value "$EDGE_NAT_ID" --type String --overwrite
-  echo ">>> SSM $EDGE_NAT_SSM set to $EDGE_NAT_ID."
+if [[ "$EXISTING_NAT_SSM" == "None" || -z "$EXISTING_NAT_SSM" ]]; then
+  echo "ERROR: SSM $EDGE_NAT_SSM is not set. The platform stack publishes this — was it deployed?" >&2
+  exit 1
 fi
+EXISTING_NAT_STATE=$(aws ec2 describe-nat-gateways --nat-gateway-ids "$EXISTING_NAT_SSM" \
+  --query "NatGateways[0].State" --output text 2>/dev/null || echo "missing")
+if [[ "$EXISTING_NAT_STATE" != "available" ]]; then
+  echo "ERROR: SSM $EDGE_NAT_SSM points at $EXISTING_NAT_SSM (state: $EXISTING_NAT_STATE), not a live NAT gateway." >&2
+  echo "       The platform stack is stale — redeploy it to refresh the parameter." >&2
+  exit 1
+fi
+echo ">>> SSM $EDGE_NAT_SSM points at live NAT gateway $EXISTING_NAT_SSM."
 
 # ── Create shared IoT VPC destination (once) ────────────────────────────────
 # //TODO - This should also be created in the platform stack
