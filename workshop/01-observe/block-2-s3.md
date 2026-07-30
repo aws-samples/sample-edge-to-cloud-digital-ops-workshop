@@ -5,7 +5,7 @@
 ---
 
 !!! note "What's actually in S3"
-    Telemetry lands here via the **IoT Rules Engine → S3 action** (one JSON file per message). The workshop uses this simpler direct-to-S3 path rather than the full MSK → MSK Connect → Hudi pipeline shown in the architecture overview — that path is introduced conceptually here and deployed in Session 4. The S3 → Athena mechanics are identical either way.
+    Telemetry lands here via the **IoT Rules Engine → S3 action** (one JSON file per message). The workshop uses this simpler direct-to-S3 path rather than the full MSK → Managed Flink → Iceberg pipeline shown in the architecture overview — that path is introduced conceptually here and deployed in Session 4. The S3 → Athena mechanics are identical either way.
 
 ## Steps
 
@@ -18,12 +18,12 @@
 
 ## Discussion Questions
 
-- Why might you prefer Parquet + Hudi over raw JSON at scale? (Hint: compression, schema evolution, query performance.)
-- What is Apache Hudi? What is **MoR** (Merge on Read) vs CoW (Copy on Write)?
-- Why would MSK Connect write batches rather than one file per message? (Hint: think about S3 object count and small-file overhead in Athena.)
+- Why might you prefer Parquet + Iceberg over raw JSON at scale? (Hint: compression, schema evolution, query performance.)
+- What is Apache Iceberg? How does its snapshot/manifest model differ from a plain Hive table?
+- Why would the Flink sink write batched checkpoints rather than one file per message? (Hint: think about S3 object count and small-file overhead in Athena.)
 
 !!! info "The production path"
-    In a production deployment, MSK Connect (Hudi Sink Connector) reads from the MSK topic and writes Parquet files with time-based partitioning. This gives Athena faster queries, 90–95% compression, and automatic schema evolution. The Glue Data Catalog table is registered on first write — no crawler needed. Sessions 5–7 show the full path.
+    In a production deployment, a Managed Flink application reads from the MSK topic and writes Parquet files into an Iceberg table on a checkpoint interval, with time-based partitioning. This gives Athena faster queries, 90–95% compression, and automatic schema evolution. The Glue Data Catalog table's `metadata_location` is updated on every commit — no crawler needed. Sessions 5–7 show the full path.
 
 ---
 

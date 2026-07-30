@@ -11,7 +11,7 @@
 |---|---|---|
 | [Block 0](block-0-fleet-provisioning.md) | 45 min | Fleet Provisioning — how devices got into IoT Core |
 | [Block 1](block-1-console-tour.md) | 45 min | Orientation & Console Tour — subscribe to live telemetry |
-| [Block 2](block-2-s3.md) | 45 min | S3 Observation — Hudi files written by MSK Connect |
+| [Block 2](block-2-s3.md) | 45 min | S3 Observation — Iceberg files written by Managed Flink |
 | [Block 3](block-3-athena.md) | 60 min | Athena Data Freshness Query |
 | Wrap-up | 15 min | Recap + preview Session 2 |
 
@@ -26,4 +26,4 @@
 
 ## Key Takeaway
 
-By the end of this session you will have measured the **data freshness floor** of the archive tier (Hudi/Athena: 30–90 seconds) and understood why it cannot serve a live operational dashboard. This sets up the motivation for the higher-frequency tiers introduced in Sessions 3–4.
+By the end of this session you will have measured the **data freshness floor** of the archive tier (Iceberg/Athena: 30–90 seconds) and understood why it cannot serve a live operational dashboard. This sets up the motivation for the higher-frequency tiers introduced in Sessions 3–4.

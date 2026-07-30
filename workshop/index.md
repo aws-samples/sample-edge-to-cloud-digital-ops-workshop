@@ -130,8 +130,8 @@ flowchart TD
 | **AWS IoT Core** | Managed MQTT broker for cloud-connected devices; fleet provisioning; device shadows; IoT Jobs | Sessions 1–4 |
 | **IoT Rules Engine** | Routes MQTT messages directly to MSK via a VPC Kafka action — no Lambda hop needed | Sessions 1–4 |
 | **Amazon MSK** | Cloud-side stream buffer; raw stream written to S3; feeds RisingWave and TimescaleDB | Sessions 1–4 |
-| **MSK Connect + Hudi Sink** | Writes raw telemetry from MSK to S3 as a Hudi MoR table; auto-registers in Glue catalog | Session 1 |
-| **Amazon Athena** | Query engine over the Hudi table; measures the archive-tier freshness floor | Session 1 |
+| **Managed Flink Iceberg Sink** | Writes raw telemetry from MSK to S3 as an Apache Iceberg table; auto-registers in Glue catalog | Session 1 |
+| **Amazon Athena** | Query engine over the Iceberg table; measures the archive-tier freshness floor | Session 1 |
 | **Cloud RisingWave** | Fleet analytics; continuously maintained materialized views; sub-100 ms query latency | Session 4 |
 | **Cloud TimescaleDB** | Hot-tier history (days–weeks); continuous aggregates; ad-hoc SQL; business data joins | Session 4 |
 | **Redpanda @ Edge** | Durable stream buffer at the edge; offline replay when WAN is down | Sessions 5–7 |
@@ -187,8 +187,8 @@ Three query tiers serve different access patterns. Choosing the wrong tier costs
 | Fleet-wide aggregate right now (e.g. total pump rate) | **RisingWave** | MV spans all devices; returns instantly regardless of fleet size |
 | Last 7/30/180-day trend chart (hourly buckets) | **TimescaleDB** | Continuous aggregates precompute buckets on write; query scans tiny aggregate table, not raw rows |
 | "What happened on this device in the last 48 hours?" | **TimescaleDB** | Hypertable chunk pruning; targeted scan is fast even on raw rows |
-| ML training — months of raw sensor history | **Hudi / Athena** | Full dataset; batch-optimized; cost-effective at scale |
-| Compliance audit — raw records since a specific date | **Hudi / Athena** | Immutable archive; query by time range |
+| ML training — months of raw sensor history | **Iceberg / Athena** | Full dataset; batch-optimized; cost-effective at scale |
+| Compliance audit — raw records since a specific date | **Iceberg / Athena** | Immutable archive; query by time range |
 
 ---
 
@@ -203,7 +203,7 @@ The workshop makes this ladder directly observable — each tier is wired to a p
 | Cloud RisingWave MV | SSE via ALB → Next.js SUBSCRIBE cursor | ~300–650 ms | Flat — incremental MV update |
 | Edge TimescaleDB CAGG | AppSync Event triggers HTTP request → Next.js Route Handler → Edge TimescaleDB CAGG | ~100–400 ms (LAN) | Flat — edge fleet is fixed at 3 devices |
 | Cloud TimescaleDB CAGG | AppSync Event triggers HTTP query → CAGG + live scan | ~100 ms–3 s | Grows: live scan over un-materialized tail |
-| Hudi / Athena | MSK Connect flush + Hudi delta log commit | ~30–90 s | Grows with data volume |
+| Iceberg / Athena | Managed Flink checkpoint + Iceberg commit | ~30–90 s | Grows with data volume |
 
 !!! tip "Why does TimescaleDB freshness grow with fleet size?"
     At 3 devices the CAGG live scan touches ~30 un-materialized rows per query. At 500 devices (5,000 rows/second) the same query scans ~25,000 un-materialized rows — pushing freshness to 500 ms–3 s. RisingWave's MV cost stays flat because it was updated incrementally on every insert: the freshness cost is paid at write time, not read time.
