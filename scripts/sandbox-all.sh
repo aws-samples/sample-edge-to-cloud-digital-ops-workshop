@@ -241,7 +241,7 @@ echo ">>> Shared uploads complete."
 # ── Build and upload Flink JAR to S3 ─────────────────────────────────────────
 # Managed Flink reads the JAR from S3 at app start. Build if the key doesn't
 # exist yet — rebuild is skipped on subsequent runs to avoid the 5-min Maven build.
-FLINK_JAR_EXISTS=$(aws s3 ls "s3://${S3_BUCKET}/${FLINK_JAR_KEY}" 2>/dev/null | wc -l | tr -d ' ')
+FLINK_JAR_EXISTS=$(aws s3 ls "s3://${S3_BUCKET}/${FLINK_JAR_KEY}" 2>/dev/null | wc -l | tr -d ' ' || true)
 if [[ "$FLINK_JAR_EXISTS" -eq 0 ]]; then
   echo ">>> Building Flink JAR..."
   (cd "$(dirname "$0")/../flink-hudi-sink" && mvn clean package -q -DskipTests)
@@ -262,29 +262,97 @@ if [[ "$NEEDS_FLINK_REDEPLOY" -eq 1 ]]; then
   echo ">>> Platform stack redeployed with Flink app."
 fi
 
-# ── Deploy one Amplify sandbox per participant (sequential) ──────────────────
-# ampx sandbox locks .amplify/artifacts/cdk.out per project, so parallel synths
-# all race for the lock and fail. Run sequentially to avoid the contention.
-echo ">>> Deploying ${#DEPLOYMENT_IDS[@]} sandboxes sequentially..."
+# ── Deploy one Amplify sandbox per participant (parallel) ────────────────────
+# `ampx sandbox` hardcodes its cloud-assembly dir to $PWD/.amplify/artifacts/
+# cdk.out (backend-deployer/cdk_deployer.js) with no override, so running it N
+# times in one working dir makes every synth race for the same directory.
+#
+# Instead we drive the deploy with raw `cdk deploy`, giving each slot its own
+# --output dir. `ampx sandbox --identifier <id>` is just sugar for a CDK deploy
+# of amplify/backend.ts with three context values that form the Amplify backend
+# identifier; the resulting stack name is a deterministic hash of that
+# identifier, so `cdk deploy` UPDATES the exact same stacks ampx would (verified:
+# amplify-<namespace>-<id>-sandbox-<hash>) rather than creating duplicates.
+# With the cdk.out contention gone, all slots deploy concurrently from one dir.
+#
+# amplify_outputs.json is intentionally not regenerated here — the sequential
+# ampx loop overwrote a single shared copy anyway (only the last slot survived),
+# and nothing in the bulk-deploy path consumes it. Run `npx ampx sandbox` for a
+# single slot if you need that file locally.
+BACKEND_NAMESPACE=$(node -e "console.log(require('./package.json').name)")
+: "${CDK_DEFAULT_ACCOUNT:=$ACCOUNT_ID}"
+CDK_DEFAULT_REGION="${CDK_DEFAULT_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region || echo us-east-1)}}"
+export CDK_DEFAULT_ACCOUNT CDK_DEFAULT_REGION
 
+MAX_PARALLEL="${SANDBOX_MAX_PARALLEL:-6}"
+LOG_DIR=$(mktemp -d /tmp/sandbox-all-logs.XXXXXX)
+echo ">>> Deploying ${#DEPLOYMENT_IDS[@]} sandboxes in parallel (max ${MAX_PARALLEL} at once, logs in ${LOG_DIR})..."
+
+# Deploy a single slot: isolated cdk.out, targets the same stacks ampx would.
+_deploy_slot() {
+  local id="$1"
+  . "$HOME/.nvm/nvm.sh" 2>/dev/null || true
+  nvm use 22 --silent 2>/dev/null || true
+  WORKSHOP_DEPLOYMENT_ID="$id" npx cdk deploy --all \
+    --app "npx tsx amplify/backend.ts" \
+    --output ".amplify/artifacts/cdk.out-${id}" \
+    --require-approval never \
+    --concurrency 5 \
+    --context amplify-backend-name="$id" \
+    --context amplify-backend-namespace="$BACKEND_NAMESPACE" \
+    --context amplify-backend-type=sandbox
+}
+
+# bash 3.2 (macOS default) has no `wait -n`, so gate concurrency by polling a
+# PID→slot map and reaping finished jobs until we're back under the cap.
+declare -a PIDS=()
+declare -a PID_IDS=()
 FAILED=0
+
+_reap_one() {
+  # Block until at least one running job exits; record its status. Returns 1
+  # only if there are no jobs to reap.
+  [[ ${#PIDS[@]} -eq 0 ]] && return 1
+  while true; do
+    local i
+    for i in "${!PIDS[@]}"; do
+      if ! kill -0 "${PIDS[$i]}" 2>/dev/null; then
+        local pid="${PIDS[$i]}" sid="${PID_IDS[$i]}" rc=0
+        wait "$pid" || rc=$?
+        unset 'PIDS[$i]' 'PID_IDS[$i]'
+        # Re-index; guard the expansion because `set -u` errors on "${arr[@]}"
+        # for an empty array under bash 3.2 (the macOS default).
+        PIDS=(${PIDS[@]+"${PIDS[@]}"}); PID_IDS=(${PID_IDS[@]+"${PID_IDS[@]}"})
+        if [[ $rc -eq 0 ]]; then
+          echo ">>> [$sid] Sandbox complete."
+        else
+          echo "ERROR: sandbox for $sid failed (rc=$rc) — see ${LOG_DIR}/${sid}.log" >&2
+          tail -n 25 "${LOG_DIR}/${sid}.log" | sed "s/^/    [$sid] /" >&2 || true
+          FAILED=1
+        fi
+        return 0
+      fi
+    done
+    sleep 2
+  done
+}
+
 for ID in "${DEPLOYMENT_IDS[@]}"; do
-  echo ">>> [$ID] Starting sandbox..."
-  if ! bash -c '
-    . "$HOME/.nvm/nvm.sh"
-    nvm use 22 --silent
-    WORKSHOP_DEPLOYMENT_ID="'"$ID"'" npx ampx sandbox --identifier "'"$ID"'" --once
-  '; then
-    echo "ERROR: sandbox for $ID failed" >&2
-    FAILED=1
-  else
-    echo ">>> [$ID] Sandbox complete."
-  fi
+  while [[ ${#PIDS[@]} -ge $MAX_PARALLEL ]]; do _reap_one; done
+  echo ">>> [$ID] Starting sandbox deploy..."
+  ( _deploy_slot "$ID" ) >"${LOG_DIR}/${ID}.log" 2>&1 &
+  PIDS+=("$!")
+  PID_IDS+=("$ID")
 done
+
+# Drain the rest.
+while [[ ${#PIDS[@]} -gt 0 ]]; do _reap_one; done
 
 if [[ $FAILED -eq 0 ]]; then
   echo ">>> All sandboxes deployed. Generating deployment summary..."
   bash "$(dirname "$0")/deployment-summary.sh" "${DEPLOYMENT_IDS[@]}"
+else
+  echo ">>> One or more sandboxes failed. Full logs retained in ${LOG_DIR}" >&2
 fi
 
 exit $FAILED
