@@ -69,7 +69,7 @@ echo ">>> Deploying $PLATFORM_STACK_NAME..."
 npx cdk deploy \
   --app "$PLATFORM_APP" \
   --require-approval never \
-  "${DEPLOY_CONTEXT_ARGS[@]}" \
+  "${DEPLOY_CONTEXT_ARGS[@]+"${DEPLOY_CONTEXT_ARGS[@]}"}" \
   "$PLATFORM_STACK_NAME"
 echo ">>> Platform stack deployed."
 
