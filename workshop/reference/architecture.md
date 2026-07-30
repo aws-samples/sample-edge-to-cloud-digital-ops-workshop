@@ -15,7 +15,7 @@ Every real-time sensor pipeline is a variation of the same four-layer model:
 | Streaming Service | Durable, ordered log; multiple consumers; replay on reconnect | MSK (cloud), Redpanda (edge) |
 | In-Memory Store | Materialized views; continuous queries; sub-50 ms latency | RisingWave |
 | Disk-Based Store | High-throughput writes; continuous aggregates; compression | TimescaleDB |
-| Object Storage | Raw stream archive; unlimited capacity; batch-read | S3 (Hudi MoR) |
+| Object Storage | Raw stream archive; unlimited capacity; batch-read | S3 (Apache Iceberg) |
 
 ---
 
@@ -40,7 +40,7 @@ Edge — K3s / K3s
 Cloud — AWS
   Amazon MSK (Provisioned, SASL/SCRAM)
     │
-    ├─► MSK Connect (Hudi Sink) ──► S3 (Hudi MoR) ──► Athena
+    ├─► Managed Flink (Iceberg Sink) ──► S3 (Apache Iceberg) ──► Athena
     │
     ├─► Cloud RisingWave (EKS) ──► ALB SSE ──► Cloud UI
     │

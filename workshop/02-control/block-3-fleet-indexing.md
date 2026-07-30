@@ -124,7 +124,7 @@ Recap the full Session 1 data path:
 EC2 (IoT Device Client)
   → MQTT publish → IoT Core
   → IoT Rules Engine → Kafka action → MSK
-  → MSK Connect (Hudi Sink) → S3
+  → Managed Flink (Iceberg Sink) → S3
   → Athena (Glue catalog)
 ```
 
