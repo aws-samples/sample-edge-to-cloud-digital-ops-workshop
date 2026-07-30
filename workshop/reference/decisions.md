@@ -13,8 +13,8 @@ Key technical decisions made during the design of this workshop architecture.
 | Industrial site HMI | React Flow | MIT license, 36.9k GitHub stars, custom SVG nodes, built-in mouseover interaction |
 | IoT Jobs fleet deployment timer | 45-min in-progress timer | K3s install ≈ 10–20 min; 45 min gives safe margin within 7-day max |
 | MSK type for IoT Rules Kafka action | Provisioned MSK only | MSK Serverless does not support SASL/SCRAM; IoT Kafka action requires Provisioned |
-| S3 table format | Hudi MoR | MSK Connect Hudi Sink runs directly against MSK — no Spark/Glue cluster required; MoR appends delta logs so new rows are queryable within seconds of connector flush interval |
-| Hudi over Iceberg | Hudi MoR with incremental query | Hudi's native incremental query path (`beginTime` cursor) pulls only changed rows — no full table scan at 5-second refresh; Iceberg has no equivalent primitive |
+| S3 table format | Apache Iceberg | Managed Flink writes directly to an Iceberg table via `GlueCatalog`, updating the Glue `metadata_location` on every commit so Athena queries the latest data with no manual table re-registration |
+| Iceberg over Hudi | Managed Flink `FlinkSink` against Iceberg | <!-- TODO: maintainer confirm rationale --> |
 | Fleet Provisioning approach | By claim | Claim cert in Secrets Manager, retrieved by EC2 instance profile; fully automated CDK deployment with no human commissioning step |
 
 ---
@@ -27,5 +27,5 @@ Key technical decisions made during the design of this workshop architecture.
 - [RisingWave SUBSCRIBE](https://risingwavelabs.mintlify.app/delivery/subscription)
 - [K3s docs](https://docs.k3s.io/)
 - [React Flow](https://reactflow.dev/)
-- [Hudi incremental query](https://hudi.apache.org/docs/querying_data#incremental-query)
+- [Apache Iceberg — Flink writes](https://iceberg.apache.org/docs/latest/flink-writes/)
 - [IoT Fleet Provisioning by claim](https://docs.aws.amazon.com/iot/latest/developerguide/provision-wo-cert.html)
