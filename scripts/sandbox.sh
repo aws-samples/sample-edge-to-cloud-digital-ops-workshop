@@ -86,7 +86,7 @@ if [[ -z "$PLATFORM_STACK" ]]; then
   npx cdk deploy \
     --app "$PLATFORM_APP" \
     --require-approval never \
-    "${DEPLOY_CONTEXT_ARGS[@]}" \
+    "${DEPLOY_CONTEXT_ARGS[@]+"${DEPLOY_CONTEXT_ARGS[@]}"}" \
     "WorkshopPlatformStack"
   echo ">>> Platform stack deployed."
 fi
