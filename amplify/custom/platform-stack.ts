@@ -45,6 +45,7 @@ import {
 } from "aws-cdk-lib/custom-resources";
 import { CfnApplication as CfnFlinkApplication } from "aws-cdk-lib/aws-kinesisanalyticsv2";
 import { CfnWorkGroup } from "aws-cdk-lib/aws-athena";
+import { StringParameter } from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 
 export interface PlatformStackProps extends StackProps {
@@ -123,8 +124,8 @@ export class PlatformStack extends Stack {
     });
 
     // Single shared NAT gateway for the edge VPC's private tier. ParticipantStack
-    // reads this ID (via SSM, written by the sandbox scripts) so each slot's own
-    // EdgeInstance subnet routes 0.0.0.0/0 through it instead of an IGW.
+    // reads this ID from SSM so each slot's own EdgeInstance subnet routes
+    // 0.0.0.0/0 through it instead of an IGW.
     const [edgeNatGateway] = this.edgeVpc.node.findAll().filter(
       (n): n is CfnNatGateway => n instanceof CfnNatGateway
     );
@@ -135,6 +136,16 @@ export class PlatformStack extends Stack {
     new CfnOutput(this, "EdgeNatGatewayId", {
       exportName: "workshop-platform-edge-nat-gateway-id",
       value: edgeNatGateway.ref,
+    });
+    // Publish the NAT gateway ID to SSM as part of the platform stack itself, so
+    // the parameter's lifecycle is tied to the NAT gateway that owns it: it is
+    // (re)created with this stack and torn down with it. This is what keeps the
+    // value fresh across a platform teardown/rebuild — previously the sandbox
+    // scripts wrote it out-of-band, so a stale ID could survive a rebuild and
+    // every slot would route to a deleted natGatewayId and roll back (#114).
+    new StringParameter(this, "EdgeNatGatewayIdParam", {
+      parameterName: "/workshop/platform/edge-nat-gateway-id",
+      stringValue: edgeNatGateway.ref,
     });
 
     // Cloud VPC: private + public subnets, 10.1.0.0/16.

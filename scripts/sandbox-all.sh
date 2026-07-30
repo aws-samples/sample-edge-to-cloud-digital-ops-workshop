@@ -19,6 +19,25 @@ PLATFORM_APP="npx tsx amplify/custom/platform-app.ts"
 PLATFORM_STACK_NAME="WorkshopPlatformStack"
 FLINK_JAR_KEY="flink-apps/flink-iceberg-sink-1.0.0.jar"
 
+# The platform stack now manages /workshop/platform/edge-nat-gateway-id as a CFN
+# resource. On accounts first provisioned by an older platform stack the value
+# exists as an out-of-band orphan (written by a previous version of this script);
+# CFN can't *create* a managed parameter on top of an existing unmanaged one.
+# Before (re)deploying the platform stack, delete the orphan — but never a value
+# that is already a resource of the stack (that one belongs to CFN).
+ensure_no_orphan_nat_ssm() {
+  local stack_name="$1"
+  local param="/workshop/platform/edge-nat-gateway-id"
+  aws ssm get-parameter --name "$param" >/dev/null 2>&1 || return 0  # nothing there
+  if aws cloudformation describe-stack-resources --stack-name "$stack_name" \
+      --query "StackResources[?ResourceType=='AWS::SSM::Parameter'].PhysicalResourceId" \
+      --output text 2>/dev/null | grep -qx "$param"; then
+    return 0  # already stack-managed — leave it for the update to reconcile
+  fi
+  echo ">>> Deleting orphaned SSM $param (not stack-managed) before platform deploy."
+  aws ssm delete-parameter --name "$param" >/dev/null 2>&1 || true
+}
+
 # ── Deploy platform stack (always) ───────────────────────────────────────────
 # cdk deploy is idempotent: if nothing changed it finishes in seconds.
 #
@@ -43,6 +62,8 @@ fi
 # the one that ran the very first deploy, export
 # WORKSHOP_EKS_ADMIN_PRINCIPAL_ARNS (comma-separated) before running this
 # script — platform-app.ts reads it directly. See platform-stack.ts.
+
+ensure_no_orphan_nat_ssm "$PLATFORM_STACK_NAME"
 
 echo ">>> Deploying $PLATFORM_STACK_NAME..."
 npx cdk deploy \
@@ -194,26 +215,24 @@ else
   echo ">>> WARNING: Could not resolve MSK brokers or admin secret — skipping topic creation."
 fi
 
-# ── Publish edge NAT gateway ID to SSM (once) ────────────────────────────────
-# //TODO - Move this into the platform stack. This should not be an sdk call.
+# ── Verify edge NAT gateway ID in SSM ────────────────────────────────────────
+# The platform stack publishes /workshop/platform/edge-nat-gateway-id (tied to
+# the NAT gateway's lifecycle, so it's always fresh). ParticipantStack reads it.
+# This is a read-only sanity check — the script no longer writes the value.
 EDGE_NAT_SSM="/workshop/platform/edge-nat-gateway-id"
 EXISTING_NAT_SSM=$(aws ssm get-parameter --name "$EDGE_NAT_SSM" --query "Parameter.Value" --output text 2>/dev/null || echo "None")
-if [[ "$EXISTING_NAT_SSM" != "None" && -n "$EXISTING_NAT_SSM" ]]; then
-  echo ">>> SSM $EDGE_NAT_SSM already set: $EXISTING_NAT_SSM. Skipping."
-else
-  EDGE_VPC_ID=$(aws ec2 describe-vpcs \
-    --filters "Name=tag:Name,Values=workshop-edge" \
-    --query "Vpcs[0].VpcId" --output text)
-  EDGE_NAT_ID=$(aws ec2 describe-nat-gateways \
-    --filter "Name=vpc-id,Values=${EDGE_VPC_ID}" "Name=state,Values=available" \
-    --query "NatGateways[0].NatGatewayId" --output text)
-  if [[ -z "$EDGE_NAT_ID" || "$EDGE_NAT_ID" == "None" ]]; then
-    echo "ERROR: No NAT gateway found in edge VPC $EDGE_VPC_ID — is the platform stack deployed?" >&2
-    exit 1
-  fi
-  aws ssm put-parameter --name "$EDGE_NAT_SSM" --value "$EDGE_NAT_ID" --type String --overwrite
-  echo ">>> SSM $EDGE_NAT_SSM set to $EDGE_NAT_ID."
+if [[ "$EXISTING_NAT_SSM" == "None" || -z "$EXISTING_NAT_SSM" ]]; then
+  echo "ERROR: SSM $EDGE_NAT_SSM is not set. The platform stack publishes this — was it deployed?" >&2
+  exit 1
 fi
+EXISTING_NAT_STATE=$(aws ec2 describe-nat-gateways --nat-gateway-ids "$EXISTING_NAT_SSM" \
+  --query "NatGateways[0].State" --output text 2>/dev/null || echo "missing")
+if [[ "$EXISTING_NAT_STATE" != "available" ]]; then
+  echo "ERROR: SSM $EDGE_NAT_SSM points at $EXISTING_NAT_SSM (state: $EXISTING_NAT_STATE), not a live NAT gateway." >&2
+  echo "       The platform stack is stale — redeploy it to refresh the parameter." >&2
+  exit 1
+fi
+echo ">>> SSM $EDGE_NAT_SSM points at live NAT gateway $EXISTING_NAT_SSM."
 
 # ── Create shared IoT VPC destination (once) ────────────────────────────────
 # //TODO - This should also be created in the platform stack
@@ -241,7 +260,7 @@ echo ">>> Shared uploads complete."
 # ── Build and upload Flink JAR to S3 ─────────────────────────────────────────
 # Managed Flink reads the JAR from S3 at app start. Build if the key doesn't
 # exist yet — rebuild is skipped on subsequent runs to avoid the 5-min Maven build.
-FLINK_JAR_EXISTS=$(aws s3 ls "s3://${S3_BUCKET}/${FLINK_JAR_KEY}" 2>/dev/null | wc -l | tr -d ' ')
+FLINK_JAR_EXISTS=$(aws s3 ls "s3://${S3_BUCKET}/${FLINK_JAR_KEY}" 2>/dev/null | wc -l | tr -d ' ' || true)
 if [[ "$FLINK_JAR_EXISTS" -eq 0 ]]; then
   echo ">>> Building Flink JAR..."
   (cd "$(dirname "$0")/../flink-hudi-sink" && mvn clean package -q -DskipTests)
@@ -262,29 +281,97 @@ if [[ "$NEEDS_FLINK_REDEPLOY" -eq 1 ]]; then
   echo ">>> Platform stack redeployed with Flink app."
 fi
 
-# ── Deploy one Amplify sandbox per participant (sequential) ──────────────────
-# ampx sandbox locks .amplify/artifacts/cdk.out per project, so parallel synths
-# all race for the lock and fail. Run sequentially to avoid the contention.
-echo ">>> Deploying ${#DEPLOYMENT_IDS[@]} sandboxes sequentially..."
+# ── Deploy one Amplify sandbox per participant (parallel) ────────────────────
+# `ampx sandbox` hardcodes its cloud-assembly dir to $PWD/.amplify/artifacts/
+# cdk.out (backend-deployer/cdk_deployer.js) with no override, so running it N
+# times in one working dir makes every synth race for the same directory.
+#
+# Instead we drive the deploy with raw `cdk deploy`, giving each slot its own
+# --output dir. `ampx sandbox --identifier <id>` is just sugar for a CDK deploy
+# of amplify/backend.ts with three context values that form the Amplify backend
+# identifier; the resulting stack name is a deterministic hash of that
+# identifier, so `cdk deploy` UPDATES the exact same stacks ampx would (verified:
+# amplify-<namespace>-<id>-sandbox-<hash>) rather than creating duplicates.
+# With the cdk.out contention gone, all slots deploy concurrently from one dir.
+#
+# amplify_outputs.json is intentionally not regenerated here — the sequential
+# ampx loop overwrote a single shared copy anyway (only the last slot survived),
+# and nothing in the bulk-deploy path consumes it. Run `npx ampx sandbox` for a
+# single slot if you need that file locally.
+BACKEND_NAMESPACE=$(node -e "console.log(require('./package.json').name)")
+: "${CDK_DEFAULT_ACCOUNT:=$ACCOUNT_ID}"
+CDK_DEFAULT_REGION="${CDK_DEFAULT_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region || echo us-east-1)}}"
+export CDK_DEFAULT_ACCOUNT CDK_DEFAULT_REGION
 
+MAX_PARALLEL="${SANDBOX_MAX_PARALLEL:-6}"
+LOG_DIR=$(mktemp -d /tmp/sandbox-all-logs.XXXXXX)
+echo ">>> Deploying ${#DEPLOYMENT_IDS[@]} sandboxes in parallel (max ${MAX_PARALLEL} at once, logs in ${LOG_DIR})..."
+
+# Deploy a single slot: isolated cdk.out, targets the same stacks ampx would.
+_deploy_slot() {
+  local id="$1"
+  . "$HOME/.nvm/nvm.sh" 2>/dev/null || true
+  nvm use 22 --silent 2>/dev/null || true
+  WORKSHOP_DEPLOYMENT_ID="$id" npx cdk deploy --all \
+    --app "npx tsx amplify/backend.ts" \
+    --output ".amplify/artifacts/cdk.out-${id}" \
+    --require-approval never \
+    --concurrency 5 \
+    --context amplify-backend-name="$id" \
+    --context amplify-backend-namespace="$BACKEND_NAMESPACE" \
+    --context amplify-backend-type=sandbox
+}
+
+# bash 3.2 (macOS default) has no `wait -n`, so gate concurrency by polling a
+# PID→slot map and reaping finished jobs until we're back under the cap.
+declare -a PIDS=()
+declare -a PID_IDS=()
 FAILED=0
+
+_reap_one() {
+  # Block until at least one running job exits; record its status. Returns 1
+  # only if there are no jobs to reap.
+  [[ ${#PIDS[@]} -eq 0 ]] && return 1
+  while true; do
+    local i
+    for i in "${!PIDS[@]}"; do
+      if ! kill -0 "${PIDS[$i]}" 2>/dev/null; then
+        local pid="${PIDS[$i]}" sid="${PID_IDS[$i]}" rc=0
+        wait "$pid" || rc=$?
+        unset 'PIDS[$i]' 'PID_IDS[$i]'
+        # Re-index; guard the expansion because `set -u` errors on "${arr[@]}"
+        # for an empty array under bash 3.2 (the macOS default).
+        PIDS=(${PIDS[@]+"${PIDS[@]}"}); PID_IDS=(${PID_IDS[@]+"${PID_IDS[@]}"})
+        if [[ $rc -eq 0 ]]; then
+          echo ">>> [$sid] Sandbox complete."
+        else
+          echo "ERROR: sandbox for $sid failed (rc=$rc) — see ${LOG_DIR}/${sid}.log" >&2
+          tail -n 25 "${LOG_DIR}/${sid}.log" | sed "s/^/    [$sid] /" >&2 || true
+          FAILED=1
+        fi
+        return 0
+      fi
+    done
+    sleep 2
+  done
+}
+
 for ID in "${DEPLOYMENT_IDS[@]}"; do
-  echo ">>> [$ID] Starting sandbox..."
-  if ! bash -c '
-    . "$HOME/.nvm/nvm.sh"
-    nvm use 22 --silent
-    WORKSHOP_DEPLOYMENT_ID="'"$ID"'" npx ampx sandbox --identifier "'"$ID"'" --once
-  '; then
-    echo "ERROR: sandbox for $ID failed" >&2
-    FAILED=1
-  else
-    echo ">>> [$ID] Sandbox complete."
-  fi
+  while [[ ${#PIDS[@]} -ge $MAX_PARALLEL ]]; do _reap_one; done
+  echo ">>> [$ID] Starting sandbox deploy..."
+  ( _deploy_slot "$ID" ) >"${LOG_DIR}/${ID}.log" 2>&1 &
+  PIDS+=("$!")
+  PID_IDS+=("$ID")
 done
+
+# Drain the rest.
+while [[ ${#PIDS[@]} -gt 0 ]]; do _reap_one; done
 
 if [[ $FAILED -eq 0 ]]; then
   echo ">>> All sandboxes deployed. Generating deployment summary..."
   bash "$(dirname "$0")/deployment-summary.sh" "${DEPLOYMENT_IDS[@]}"
+else
+  echo ">>> One or more sandboxes failed. Full logs retained in ${LOG_DIR}" >&2
 fi
 
 exit $FAILED
