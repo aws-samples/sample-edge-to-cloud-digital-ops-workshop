@@ -42,10 +42,10 @@ flowchart TB
     subgraph platform["Platform Stack — shared 1× per account/region"]
         subgraph cloud_vpc["VPC workshop-cloud · 10.1.0.0/16"]
             msk["MSK Provisioned\nkafka.t3.small × 2 brokers\nSASL/SCRAM + IAM"]
-            flink["Managed Flink\nIceberg Sink"]
+            firehose["Amazon Data Firehose\nIceberg Destination"]
         end
         iot_vpc_dest["IoT VPC Destination\nshared across all slots"]
-        s3["S3 Bucket\nIceberg data · Athena results\nworkshop assets · Flink JAR"]
+        s3["S3 Bucket\nIceberg data · Athena results\nworkshop assets"]
         glue["Glue Database\nworkshop_telemetry"]
         athena["Athena Workgroup\nworkshop-shared · engine v3"]
         kms["KMS Key\nMSK SCRAM secrets"]
@@ -57,8 +57,8 @@ flowchart TB
     devices -->|"fleet provision"| iot_template
     iot_template --> iot_group
     rule_appsync --> bridge_fn --> appsync
-    rule_msk --> iot_vpc_dest --> msk --> flink
-    flink -->|"Iceberg table"| s3
+    rule_msk --> iot_vpc_dest --> msk --> firehose
+    firehose -->|"Iceberg table"| s3
     s3 --> athena
     athena -.->|"Glue catalog"| glue
     kms -.->|"encrypts"| msk_secret
