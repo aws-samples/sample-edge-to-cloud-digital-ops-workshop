@@ -91,7 +91,7 @@ export interface ParticipantStackProps extends StackProps {
  *    assumes to run kubectl/helm against their namespace in the shared
  *    workshop-eks cluster, with a namespace-scoped EKS access entry attached
  *
- * Shared infrastructure (S3, MSK cluster, Flink, Glue, Athena) lives in
+ * Shared infrastructure (S3, MSK cluster, Firehose, Glue, Athena) lives in
  * WorkshopPlatformStack and is imported via Fn.importValue.
  */
 export class ParticipantStack extends Stack {
@@ -993,7 +993,7 @@ exports.handler = async (event) => {
 
     // ── IoT Rule → MSK (Session 4 — native Apache Kafka rule action) ──────────
     // IoT Kafka action writes to the shared MSK cluster via SASL/SCRAM.
-    // The SQL stamps deployment_id so the Flink Iceberg sink can partition by it.
+    // The SQL stamps deployment_id so the Firehose Iceberg sink can partition by it.
     // Per-slot role for IoT kafka action — needs SCRAM secret + KMS access so IoT can
     // call get_secret() inline. EC2 VPC networking lives on the platform-stack's shared
     // IotVpcDestRole (the VPC destination is shared; only one allowed per VPC).

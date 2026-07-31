@@ -43,24 +43,13 @@ import {
   AwsCustomResourcePolicy,
   PhysicalResourceId,
 } from "aws-cdk-lib/custom-resources";
-import { CfnApplication as CfnFlinkApplication } from "aws-cdk-lib/aws-kinesisanalyticsv2";
+import { CfnDeliveryStream } from "aws-cdk-lib/aws-kinesisfirehose";
+import { CfnDatabase, CfnTable } from "aws-cdk-lib/aws-glue";
 import { CfnWorkGroup } from "aws-cdk-lib/aws-athena";
 import { StringParameter } from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 
 export interface PlatformStackProps extends StackProps {
-  /**
-   * Whether to create the Managed Flink app. Defaults to true.
-   *
-   * The Flink app reads its code JAR from the shared S3 bucket created in
-   * this same stack — on a fresh account that bucket (and JAR) don't exist
-   * yet, so the very first deploy must skip the Flink app or CloudFormation
-   * rolls back the entire stack (VPCs/EKS/MSK included) when it can't find
-   * the JAR. scripts/sandbox-all.sh sets this to false for that first pass,
-   * uploads the JAR once the bucket exists, then redeploys with it back on.
-   */
-  readonly deployFlinkApp?: boolean;
-
   /**
    * IAM principal ARNs (e.g. the CI role, a facilitator's admin role) to grant
    * cluster-scoped EKS access via an access entry — so they can run kubectl/helm
@@ -582,10 +571,80 @@ export class PlatformStack extends Stack {
       value: mskSg.securityGroupId,
     });
 
-    // ── Managed Flink (MSK → Iceberg → S3) ──────────────────────────────────
-    // Reads raw.telemetry from MSK via IAM auth, writes Apache Iceberg table
-    // to S3 via GlueCatalog so Athena sees live snapshots.
-    if (props?.deployFlinkApp !== false) {
+    // ── Glue Data Catalog Iceberg table (MSK → Firehose → Iceberg → S3) ─────
+    // Pre-provisioned so Firehose has a table to deliver into on first start —
+    // schema matches what the previous Flink sink produced, so Athena queries
+    // (workshop/01-observe/block-3-athena.md, workshop/02-control/block-5-observe.md)
+    // keep working unchanged.
+    const glueDatabase = new CfnDatabase(this, "TelemetryGlueDatabase", {
+      catalogId: this.account,
+      databaseInput: {
+        name: "workshop_telemetry",
+      },
+    });
+
+    const icebergWarehousePath = `s3://${workshopBucket.bucketName}/telemetry`;
+    const icebergSchemaFields: CfnTable.IcebergStructFieldProperty[] = [
+      { id: 1, name: "thing_name", type: "string", required: true },
+      { id: 2, name: "message_timestamp", type: "long", required: true },
+      { id: 3, name: "cpu_pct", type: "int", required: false },
+      { id: 4, name: "mem_used_pct", type: "int", required: false },
+      { id: 5, name: "disk_used_pct", type: "int", required: false },
+      { id: 6, name: "net_io_bytes_sent", type: "long", required: false },
+      { id: 7, name: "net_io_bytes_recv", type: "long", required: false },
+      { id: 8, name: "mqtt_topic", type: "string", required: false },
+      { id: 9, name: "ingest_ts", type: "long", required: false },
+      { id: 10, name: "year", type: "string", required: false },
+      { id: 11, name: "month", type: "string", required: false },
+      { id: 12, name: "day", type: "string", required: false },
+      { id: 13, name: "hour", type: "string", required: false },
+      { id: 14, name: "deployment_id", type: "string", required: false },
+    ];
+
+    const telemetryIcebergTable = new CfnTable(this, "TelemetryIcebergTable", {
+      catalogId: this.account,
+      databaseName: glueDatabase.ref,
+      openTableFormatInput: {
+        icebergInput: {
+          metadataOperation: "CREATE",
+          version: "2",
+          icebergTableInput: {
+            location: `${icebergWarehousePath}/telemetry`,
+            schema: {
+              fields: icebergSchemaFields,
+            },
+            // deployment_id first so participants can efficiently query their own data.
+            partitionSpec: {
+              fields: [
+                { sourceId: 14, name: "deployment_id", transform: "identity" },
+                { sourceId: 10, name: "year", transform: "identity" },
+                { sourceId: 11, name: "month", transform: "identity" },
+                { sourceId: 12, name: "day", transform: "identity" },
+                { sourceId: 13, name: "hour", transform: "identity" },
+              ],
+            },
+          },
+        },
+      },
+      tableInput: {
+        name: "telemetry",
+        tableType: "EXTERNAL_TABLE",
+      },
+    });
+    telemetryIcebergTable.node.addDependency(glueDatabase);
+
+    new CfnOutput(this, "TelemetryGlueDatabaseName", {
+      exportName: "workshop-platform-glue-database-name",
+      value: glueDatabase.ref,
+    });
+    new CfnOutput(this, "TelemetryGlueTableName", {
+      exportName: "workshop-platform-glue-table-name",
+      value: telemetryIcebergTable.ref,
+    });
+
+    // ── Firehose (MSK → Iceberg → S3) ────────────────────────────────────────
+    // Reads raw.telemetry from MSK via IAM auth, delivers natively to the
+    // Iceberg table above via the Glue Data Catalog — no custom code.
     // Resolve IAM bootstrap broker string (port 9098) via custom resource.
     const mskBootstrapIamLookup = new AwsCustomResource(this, "MskBootstrapIamLookup", {
       onCreate: {
@@ -608,39 +667,68 @@ export class PlatformStack extends Stack {
     });
     mskBootstrapIamLookup.node.addDependency(mskCluster);
 
-    const flinkRole = new Role(this, "FlinkRole", {
-      assumedBy: new ServicePrincipal("kinesisanalytics.amazonaws.com"),
+    const firehoseMskRole = new Role(this, "FirehoseMskRole", {
+      assumedBy: new ServicePrincipal("firehose.amazonaws.com"),
     });
+    firehoseMskRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: [
+        "kafka-cluster:Connect",
+        "kafka-cluster:DescribeCluster",
+        "kafka-cluster:DescribeClusterDynamicConfiguration",
+      ],
+      resources: [mskCluster.attrArn],
+    }));
+    firehoseMskRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: [
+        "kafka-cluster:DescribeTopic",
+        "kafka-cluster:DescribeTopicDynamicConfiguration",
+        "kafka-cluster:ReadData",
+      ],
+      resources: [`arn:aws:kafka:${this.region}:${this.account}:topic/workshop-platform-msk/*/*`],
+    }));
+    firehoseMskRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: [
+        "kafka-cluster:DescribeGroup",
+      ],
+      resources: [`arn:aws:kafka:${this.region}:${this.account}:group/workshop-platform-msk/*/*`],
+    }));
+    firehoseMskRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: [
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeNetworkInterfaces",
+      ],
+      resources: ["*"],
+    }));
 
-    flinkRole.addToPolicy(new PolicyStatement({
+    const firehoseDeliveryRole = new Role(this, "FirehoseDeliveryRole", {
+      assumedBy: new ServicePrincipal("firehose.amazonaws.com"),
+    });
+    firehoseDeliveryRole.addToPolicy(new PolicyStatement({
       effect: Effect.ALLOW,
       actions: [
         "s3:GetObject",
         "s3:PutObject",
         "s3:DeleteObject",
         "s3:ListBucket",
+        "s3:ListBucketMultipartUploads",
+        "s3:AbortMultipartUpload",
         "s3:GetBucketLocation",
       ],
       resources: [workshopBucket.bucketArn, `${workshopBucket.bucketArn}/*`],
     }));
-
-    flinkRole.addToPolicy(new PolicyStatement({
+    firehoseDeliveryRole.addToPolicy(new PolicyStatement({
       effect: Effect.ALLOW,
       actions: [
         "glue:GetDatabase",
-        "glue:CreateDatabase",
         "glue:GetTable",
         "glue:GetTables",
-        "glue:CreateTable",
         "glue:UpdateTable",
-        "glue:DeleteTable",
-        "glue:GetPartition",
-        "glue:GetPartitions",
-        "glue:CreatePartition",
-        "glue:UpdatePartition",
-        "glue:DeletePartition",
-        "glue:BatchCreatePartition",
-        "glue:BatchDeletePartition",
       ],
       resources: [
         `arn:aws:glue:${this.region}:${this.account}:catalog`,
@@ -648,165 +736,56 @@ export class PlatformStack extends Stack {
         `arn:aws:glue:${this.region}:${this.account}:table/workshop_telemetry/*`,
       ],
     }));
-
-    flinkRole.addToPolicy(new PolicyStatement({
+    firehoseDeliveryRole.addToPolicy(new PolicyStatement({
       effect: Effect.ALLOW,
       actions: [
         "logs:CreateLogGroup",
         "logs:CreateLogStream",
         "logs:PutLogEvents",
-        "logs:DescribeLogGroups",
-        "logs:DescribeLogStreams",
       ],
       resources: ["*"],
     }));
 
-    flinkRole.addToPolicy(new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: [
-        "kafka-cluster:Connect",
-        "kafka-cluster:DescribeCluster",
-        "kafka:DescribeCluster",
-        "kafka:GetBootstrapBrokers",
-      ],
-      resources: [mskCluster.attrArn],
-    }));
-
-    flinkRole.addToPolicy(new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: [
-        "kafka-cluster:DescribeTopic",
-        "kafka-cluster:ReadData",
-      ],
-      resources: [`arn:aws:kafka:${this.region}:${this.account}:topic/workshop-platform-msk/*/*`],
-    }));
-
-    flinkRole.addToPolicy(new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: [
-        "kafka-cluster:DescribeGroup",
-        "kafka-cluster:AlterGroup",
-      ],
-      resources: [`arn:aws:kafka:${this.region}:${this.account}:group/workshop-platform-msk/*/*`],
-    }));
-
-    flinkRole.addToPolicy(new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: [
-        "ec2:DescribeVpcs",
-        "ec2:DescribeSubnets",
-        "ec2:DescribeSecurityGroups",
-        "ec2:DescribeDhcpOptions",
-        "ec2:DescribeNetworkInterfaces",
-        "ec2:CreateNetworkInterface",
-        "ec2:CreateNetworkInterfacePermission",
-        "ec2:DeleteNetworkInterface",
-      ],
-      resources: ["*"],
-    }));
-
-    const flinkApp = new CfnFlinkApplication(this, "FlinkIcebergSink", {
-      applicationName: "workshop-iceberg-sink",
-      runtimeEnvironment: "FLINK-1_18",
-      serviceExecutionRole: flinkRole.roleArn,
-      applicationConfiguration: {
-        applicationCodeConfiguration: {
-          codeContent: {
-            s3ContentLocation: {
-              bucketArn: workshopBucket.bucketArn,
-              fileKey: "flink-apps/flink-iceberg-sink-1.0.0.jar",
-            },
-          },
-          codeContentType: "ZIPFILE",
+    const telemetryFirehoseStream = new CfnDeliveryStream(this, "TelemetryIcebergFirehose", {
+      deliveryStreamName: "workshop-telemetry-iceberg",
+      deliveryStreamType: "MSKAsSource",
+      mskSourceConfiguration: {
+        mskClusterArn: mskCluster.attrArn,
+        topicName: "raw.telemetry",
+        authenticationConfiguration: {
+          connectivity: "PRIVATE",
+          roleArn: firehoseMskRole.roleArn,
         },
-        environmentProperties: {
-          propertyGroups: [
-            {
-              propertyGroupId: "FlinkApplicationProperties",
-              propertyMap: {
-                BOOTSTRAP_SERVERS: mskBootstrapIamLookup.getResponseField("BootstrapBrokerStringSaslIam"),
-                S3_BASE_PATH: `s3://${workshopBucket.bucketName}/telemetry`,
-                GLUE_DB: "workshop_telemetry",
-              },
-            },
-          ],
+      },
+      icebergDestinationConfiguration: {
+        roleArn: firehoseDeliveryRole.roleArn,
+        catalogConfiguration: {
+          catalogArn: `arn:aws:glue:${this.region}:${this.account}:catalog`,
         },
-        flinkApplicationConfiguration: {
-          checkpointConfiguration: {
-            configurationType: "CUSTOM",
-            checkpointingEnabled: true,
-            checkpointInterval: 60000,
-            minPauseBetweenCheckpoints: 5000,
-          },
-          monitoringConfiguration: {
-            configurationType: "CUSTOM",
-            metricsLevel: "APPLICATION",
-            logLevel: "INFO",
-          },
-          parallelismConfiguration: {
-            configurationType: "CUSTOM",
-            parallelism: 2,
-            parallelismPerKpu: 1,
-            autoScalingEnabled: false,
-          },
+        bufferingHints: {
+          intervalInSeconds: 300,
+          sizeInMBs: 128,
         },
-        vpcConfigurations: [
+        destinationTableConfigurationList: [
           {
-            subnetIds: this.cloudVpc.selectSubnets({ subnetType: SubnetType.PRIVATE_WITH_EGRESS }).subnetIds.slice(0, 2),
-            securityGroupIds: [mskSg.securityGroupId],
+            destinationDatabaseName: glueDatabase.ref,
+            destinationTableName: telemetryIcebergTable.ref,
           },
         ],
-      },
-    });
-    flinkApp.node.addDependency(mskCluster);
-    flinkApp.node.addDependency(mskBootstrapIamLookup);
-
-    new CfnOutput(this, "FlinkAppName", {
-      exportName: "workshop-platform-flink-app-name",
-      value: flinkApp.ref,
-    });
-
-    // Managed Flink apps deploy in READY state and never run until something
-    // calls StartApplication — without this, the Iceberg sink (and the Glue
-    // catalog it populates) never starts and participants see no Athena data.
-    // Runs on both create and update so a redeploy after a manual stop
-    // resumes the app too; ResourceInUseException (already running) is
-    // expected and ignored.
-    const flinkAppAutoStart = new AwsCustomResource(this, "FlinkAppAutoStart", {
-      onCreate: {
-        service: "KinesisAnalyticsV2",
-        action: "startApplication",
-        parameters: {
-          ApplicationName: flinkApp.applicationName,
-          RunConfiguration: {
-            ApplicationRestoreConfiguration: {
-              ApplicationRestoreType: "SKIP_RESTORE_FROM_SNAPSHOT",
-            },
-          },
+        s3Configuration: {
+          bucketArn: workshopBucket.bucketArn,
+          roleArn: firehoseDeliveryRole.roleArn,
+          errorOutputPrefix: "iceberg-errors/",
         },
-        physicalResourceId: PhysicalResourceId.of("FlinkAppAutoStart"),
-        ignoreErrorCodesMatching: "ResourceInUseException",
       },
-      onUpdate: {
-        service: "KinesisAnalyticsV2",
-        action: "startApplication",
-        parameters: {
-          ApplicationName: flinkApp.applicationName,
-          RunConfiguration: {
-            ApplicationRestoreConfiguration: {
-              ApplicationRestoreType: "SKIP_RESTORE_FROM_SNAPSHOT",
-            },
-          },
-        },
-        physicalResourceId: PhysicalResourceId.of("FlinkAppAutoStart"),
-        ignoreErrorCodesMatching: "ResourceInUseException",
-      },
-      policy: AwsCustomResourcePolicy.fromSdkCalls({
-        resources: [`arn:aws:kinesisanalytics:${this.region}:${this.account}:application/workshop-iceberg-sink`],
-      }),
     });
-    flinkAppAutoStart.node.addDependency(flinkApp);
-    }
+    telemetryFirehoseStream.node.addDependency(mskBootstrapIamLookup);
+    telemetryFirehoseStream.node.addDependency(telemetryIcebergTable);
+
+    new CfnOutput(this, "TelemetryFirehoseStreamName", {
+      exportName: "workshop-platform-firehose-stream-name",
+      value: telemetryFirehoseStream.ref,
+    });
 
     // ── Athena workgroup ─────────────────────────────────────────────────────
     // Shared across all participant slots. scripts/athena-query.sh defaults to

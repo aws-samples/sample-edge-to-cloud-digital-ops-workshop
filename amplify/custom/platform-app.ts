@@ -7,11 +7,6 @@ import { PlatformStack } from "./platform-stack";
 //
 // scripts/sandbox.sh calls this automatically when the stack doesn't exist yet.
 //
-// Pass --context deployFlinkApp=false on the very first deploy of a fresh
-// account — the Flink app reads its JAR from the shared bucket this same
-// stack creates, so it can't exist until a JAR has been uploaded once.
-// See PlatformStackProps.deployFlinkApp in platform-stack.ts.
-//
 // Pass --context eksAdminPrincipalArns=arn1,arn2 (or set
 // WORKSHOP_EKS_ADMIN_PRINCIPAL_ARNS as a comma-separated env var) to grant
 // cluster-scoped EKS access to CI/facilitator roles that aren't the one that
@@ -32,7 +27,6 @@ new PlatformStack(app, "WorkshopPlatformStack", {
     account: process.env.CDK_DEFAULT_ACCOUNT,
     region: process.env.CDK_DEFAULT_REGION,
   },
-  deployFlinkApp: app.node.tryGetContext("deployFlinkApp") !== "false",
   eksAdminPrincipalArns,
 });
 
