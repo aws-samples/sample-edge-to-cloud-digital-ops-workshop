@@ -604,6 +604,11 @@ export class PlatformStack extends Stack {
     const telemetryIcebergTable = new CfnTable(this, "TelemetryIcebergTable", {
       catalogId: this.account,
       databaseName: glueDatabase.ref,
+      // Iceberg tables set the name at the top level, not via `tableInput` —
+      // `tableInput` must be entirely absent alongside `openTableFormatInput`,
+      // or Glue rejects the create with "Table metadata is expected only via
+      // TableInput or via IcebergTableInputProperties inside OpenTableFormatInput".
+      name: "telemetry",
       openTableFormatInput: {
         icebergInput: {
           metadataOperation: "CREATE",
