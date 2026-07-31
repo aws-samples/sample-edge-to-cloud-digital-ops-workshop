@@ -17,7 +17,6 @@ fi
 
 PLATFORM_APP="npx tsx amplify/custom/platform-app.ts"
 PLATFORM_STACK_NAME="WorkshopPlatformStack"
-FLINK_JAR_KEY="flink-apps/flink-iceberg-sink-1.0.0.jar"
 
 # The platform stack now manages /workshop/platform/edge-nat-gateway-id as a CFN
 # resource. On accounts first provisioned by an older platform stack the value
@@ -40,22 +39,7 @@ ensure_no_orphan_nat_ssm() {
 
 # ── Deploy platform stack (always) ───────────────────────────────────────────
 # cdk deploy is idempotent: if nothing changed it finishes in seconds.
-#
-# The Managed Flink app reads its code JAR from the shared bucket this same
-# stack creates. On a fresh account neither the bucket nor the JAR exist yet,
-# so a normal deploy fails on the Flink resource and CloudFormation rolls
-# back everything else that was just created (VPCs/EKS/MSK included). Detect
-# that case up front and deploy without the Flink app first; it gets added
-# back in a second deploy below once the JAR has been uploaded.
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-PLATFORM_BUCKET="workshop-platform-${ACCOUNT_ID}"
-NEEDS_FLINK_REDEPLOY=0
-DEPLOY_CONTEXT_ARGS=()
-if ! aws s3api head-object --bucket "$PLATFORM_BUCKET" --key "$FLINK_JAR_KEY" >/dev/null 2>&1; then
-  echo ">>> Flink JAR not found at s3://${PLATFORM_BUCKET}/${FLINK_JAR_KEY} — deploying platform stack without the Flink app first."
-  DEPLOY_CONTEXT_ARGS=(--context deployFlinkApp=false)
-  NEEDS_FLINK_REDEPLOY=1
-fi
 
 # To grant cluster-scoped EKS access (cert-manager/risingwave-operator/cnpg
 # installs in block-1-deploy.md) to CI or a second facilitator role that isn't
@@ -69,78 +53,8 @@ echo ">>> Deploying $PLATFORM_STACK_NAME..."
 npx cdk deploy \
   --app "$PLATFORM_APP" \
   --require-approval never \
-  "${DEPLOY_CONTEXT_ARGS[@]+"${DEPLOY_CONTEXT_ARGS[@]}"}" \
   "$PLATFORM_STACK_NAME"
 echo ">>> Platform stack deployed."
-
-# Starting the Flink application is now handled by a CDK custom resource in
-# PlatformStack (FlinkAppAutoStart) — it calls StartApplication on every
-# create/update, so no manual step is needed here.
-
-# ── Patch Glue Iceberg table for Lake Formation compatibility ─────────────────
-# GlueCatalog creates the Iceberg table with null InputFormat/SerdeInfo.
-# On accounts with Lake Formation fine-grained access control this causes Athena
-# to return "Relation contains no accessible columns". Fix by adding Iceberg
-# SerDe + explicit columns so LF can evaluate column-level grants.
-# Idempotent: skipped if InputFormat is already set, or if table doesn't exist yet.
-_patch_glue_iceberg_table() {
-  local glue_db="workshop_telemetry"
-  local glue_table="telemetry"
-  local meta_loc input_fmt s3_bucket_resolved
-
-  meta_loc=$(aws glue get-table \
-    --database-name "$glue_db" --name "$glue_table" \
-    --query "Table.Parameters.metadata_location" --output text 2>/dev/null) || true
-  input_fmt=$(aws glue get-table \
-    --database-name "$glue_db" --name "$glue_table" \
-    --query "Table.StorageDescriptor.InputFormat" --output text 2>/dev/null) || true
-
-  if [[ -z "$meta_loc" || "$meta_loc" == "None" ]]; then
-    echo ">>> Glue table not yet created (Flink creates it on first record) — skipping SerDe patch."
-    return 0
-  fi
-  if [[ -n "$input_fmt" && "$input_fmt" != "None" ]]; then
-    echo ">>> Glue table SerDe already set — skipping patch."
-    return 0
-  fi
-
-  echo ">>> Patching Glue Iceberg table SerDe for Lake Formation compatibility..."
-  s3_bucket_resolved=$(aws cloudformation list-exports \
-    --query "Exports[?Name=='workshop-platform-bucket-name'].Value" \
-    --output text 2>/dev/null)
-  aws glue update-table \
-    --database-name "$glue_db" \
-    --table-input "{
-      \"Name\": \"${glue_table}\",
-      \"TableType\": \"EXTERNAL_TABLE\",
-      \"Parameters\": {\"table_type\": \"ICEBERG\", \"metadata_location\": \"${meta_loc}\"},
-      \"StorageDescriptor\": {
-        \"Location\": \"s3://${s3_bucket_resolved}/telemetry/workshop_telemetry.db/telemetry\",
-        \"Columns\": [
-          {\"Name\":\"thing_name\",\"Type\":\"string\"},
-          {\"Name\":\"message_timestamp\",\"Type\":\"bigint\"},
-          {\"Name\":\"cpu_pct\",\"Type\":\"int\"},
-          {\"Name\":\"mem_used_pct\",\"Type\":\"int\"},
-          {\"Name\":\"disk_used_pct\",\"Type\":\"int\"},
-          {\"Name\":\"net_io_bytes_sent\",\"Type\":\"bigint\"},
-          {\"Name\":\"net_io_bytes_recv\",\"Type\":\"bigint\"},
-          {\"Name\":\"mqtt_topic\",\"Type\":\"string\"},
-          {\"Name\":\"ingest_ts\",\"Type\":\"bigint\"},
-          {\"Name\":\"year\",\"Type\":\"string\"},
-          {\"Name\":\"month\",\"Type\":\"string\"},
-          {\"Name\":\"day\",\"Type\":\"string\"},
-          {\"Name\":\"hour\",\"Type\":\"string\"},
-          {\"Name\":\"deployment_id\",\"Type\":\"string\"}
-        ],
-        \"InputFormat\": \"org.apache.iceberg.mr.mapred.MapredIcebergInputFormat\",
-        \"OutputFormat\": \"org.apache.iceberg.mr.hive.HiveIcebergOutputFormat\",
-        \"SerdeInfo\": {\"SerializationLibrary\": \"org.apache.iceberg.mr.hive.HiveIcebergSerDe\"}
-      }
-    }" 2>&1 \
-    && echo ">>> Glue table SerDe patched." \
-    || echo ">>> WARNING: Glue table patch failed — may need ALTER permission via Lake Formation."
-}
-_patch_glue_iceberg_table
 
 # ── Ensure raw.telemetry Kafka topic exists ───────────────────────────────────
 # IoT Kafka action can't auto-create topics. We create it idempotently via a
@@ -256,30 +170,6 @@ fi
 echo ">>> Uploading sensor simulator to s3://${S3_BUCKET}/simulator/sensor-sim.py..."
 aws s3 cp simulator/sensor-sim.py "s3://${S3_BUCKET}/simulator/sensor-sim.py"
 echo ">>> Shared uploads complete."
-
-# ── Build and upload Flink JAR to S3 ─────────────────────────────────────────
-# Managed Flink reads the JAR from S3 at app start. Build if the key doesn't
-# exist yet — rebuild is skipped on subsequent runs to avoid the 5-min Maven build.
-FLINK_JAR_EXISTS=$(aws s3 ls "s3://${S3_BUCKET}/${FLINK_JAR_KEY}" 2>/dev/null | wc -l | tr -d ' ' || true)
-if [[ "$FLINK_JAR_EXISTS" -eq 0 ]]; then
-  echo ">>> Building Flink JAR..."
-  (cd "$(dirname "$0")/../flink-hudi-sink" && mvn clean package -q -DskipTests)
-  aws s3 cp "$(dirname "$0")/../flink-hudi-sink/target/flink-iceberg-sink-1.0.0.jar" \
-    "s3://${S3_BUCKET}/${FLINK_JAR_KEY}"
-  echo ">>> Flink JAR uploaded to s3://${S3_BUCKET}/${FLINK_JAR_KEY}"
-else
-  echo ">>> Flink JAR already in s3://${S3_BUCKET}/${FLINK_JAR_KEY} — skipping build."
-fi
-
-# ── Redeploy platform stack with the Flink app now that the JAR exists ──────
-if [[ "$NEEDS_FLINK_REDEPLOY" -eq 1 ]]; then
-  echo ">>> Redeploying $PLATFORM_STACK_NAME with the Flink app enabled..."
-  npx cdk deploy \
-    --app "$PLATFORM_APP" \
-    --require-approval never \
-    "$PLATFORM_STACK_NAME"
-  echo ">>> Platform stack redeployed with Flink app."
-fi
 
 # ── Deploy one Amplify sandbox per participant (parallel) ────────────────────
 # `ampx sandbox` hardcodes its cloud-assembly dir to $PWD/.amplify/artifacts/
