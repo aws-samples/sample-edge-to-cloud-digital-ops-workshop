@@ -37,6 +37,28 @@ ensure_no_orphan_nat_ssm() {
   aws ssm delete-parameter --name "$param" >/dev/null 2>&1 || true
 }
 
+# The platform stack now manages the workshop_telemetry Glue database/table as
+# CFN resources (Firehose → Iceberg sink). On accounts that previously ran the
+# old Flink pipeline, these exist as out-of-band orphans (created at runtime by
+# the Flink app, never by CFN); CFN can't *create* a managed database on top of
+# an existing unmanaged one. Before (re)deploying the platform stack, delete the
+# orphan — but never one that is already a resource of the stack (that one
+# belongs to CFN).
+ensure_no_orphan_glue_telemetry_table() {
+  local stack_name="$1"
+  local db="workshop_telemetry"
+  local table="telemetry"
+  aws glue get-database --name "$db" >/dev/null 2>&1 || return 0  # nothing there
+  if aws cloudformation describe-stack-resources --stack-name "$stack_name" \
+      --query "StackResources[?ResourceType=='AWS::Glue::Database'].PhysicalResourceId" \
+      --output text 2>/dev/null | grep -qx "$db"; then
+    return 0  # already stack-managed — leave it for the update to reconcile
+  fi
+  echo ">>> Deleting orphaned Glue table/database $db.$table (not stack-managed) before platform deploy."
+  aws glue delete-table --database-name "$db" --name "$table" >/dev/null 2>&1 || true
+  aws glue delete-database --name "$db" >/dev/null 2>&1 || true
+}
+
 # ── Deploy platform stack (always) ───────────────────────────────────────────
 # cdk deploy is idempotent: if nothing changed it finishes in seconds.
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -48,6 +70,7 @@ ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 # script — platform-app.ts reads it directly. See platform-stack.ts.
 
 ensure_no_orphan_nat_ssm "$PLATFORM_STACK_NAME"
+ensure_no_orphan_glue_telemetry_table "$PLATFORM_STACK_NAME"
 
 echo ">>> Deploying $PLATFORM_STACK_NAME..."
 npx cdk deploy \

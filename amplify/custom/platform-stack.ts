@@ -628,7 +628,6 @@ export class PlatformStack extends Stack {
       },
       tableInput: {
         name: "telemetry",
-        tableType: "EXTERNAL_TABLE",
       },
     });
     telemetryIcebergTable.node.addDependency(glueDatabase);
