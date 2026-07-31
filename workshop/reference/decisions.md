@@ -13,8 +13,8 @@ Key technical decisions made during the design of this workshop architecture.
 | Industrial site HMI | React Flow | MIT license, 36.9k GitHub stars, custom SVG nodes, built-in mouseover interaction |
 | IoT Jobs fleet deployment timer | 45-min in-progress timer | K3s install ≈ 10–20 min; 45 min gives safe margin within 7-day max |
 | MSK type for IoT Rules Kafka action | Provisioned MSK only | MSK Serverless does not support SASL/SCRAM; IoT Kafka action requires Provisioned |
-| S3 table format | Hudi MoR | MSK Connect Hudi Sink runs directly against MSK — no Spark/Glue cluster required; MoR appends delta logs so new rows are queryable within seconds of connector flush interval |
-| Hudi over Iceberg | Hudi MoR with incremental query | Hudi's native incremental query path (`beginTime` cursor) pulls only changed rows — no full table scan at 5-second refresh; Iceberg has no equivalent primitive |
+| S3 table format | Apache Iceberg via Amazon Data Firehose | Firehose supports MSK as a source and Iceberg (Glue Data Catalog) as a destination natively — no custom connector or Spark/Glue cluster required; fully-managed, config-only Kafka→Iceberg delivery |
+| Archive-tier delivery mechanism | Amazon Data Firehose, chosen over Apache Hudi (original design) and a custom Amazon Managed Service for Apache Flink sink (interim design) | Hudi's MoR/CoW model needed a hand-maintained connector; the Flink app that replaced it existed only to bundle `iceberg-flink-runtime` + a Hadoop S3A stack for packaging, with no meaningful custom stream logic. Firehose's native MSK-source/Iceberg-destination support removes both the connector and the fat-jar maintenance burden entirely — see [`amplify/custom/platform-stack.ts`](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/amplify/custom/platform-stack.ts) |
 | Fleet Provisioning approach | By claim | Claim cert in Secrets Manager, retrieved by EC2 instance profile; fully automated CDK deployment with no human commissioning step |
 
 ---
@@ -27,5 +27,5 @@ Key technical decisions made during the design of this workshop architecture.
 - [RisingWave SUBSCRIBE](https://risingwavelabs.mintlify.app/delivery/subscription)
 - [K3s docs](https://docs.k3s.io/)
 - [React Flow](https://reactflow.dev/)
-- [Hudi incremental query](https://hudi.apache.org/docs/querying_data#incremental-query)
+- [Firehose Apache Iceberg destination](https://docs.aws.amazon.com/firehose/latest/dev/apache-iceberg-destination.html)
 - [IoT Fleet Provisioning by claim](https://docs.aws.amazon.com/iot/latest/developerguide/provision-wo-cert.html)

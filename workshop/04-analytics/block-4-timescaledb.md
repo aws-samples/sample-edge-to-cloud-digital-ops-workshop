@@ -113,7 +113,7 @@ WHERE sensor = 'cpu_pct'
 GROUP BY 1, 2;
 ```
 
-This is structurally identical to **Hudi MoR**: the materialization hypertable is the base file, the raw un-refreshed chunks are the delta log, and the query-time UNION ALL is the merge reader.
+This is structurally identical to **Iceberg's merge-on-read**: the materialization hypertable is the committed data file, the raw un-refreshed chunks are the uncommitted delta, and the query-time UNION ALL is the merge reader that reconciles them at query time.
 
 ---
 
@@ -139,13 +139,13 @@ SELECT MAX(bucket) AS latest_bucket FROM cpu_hourly;
 | Freshness | Current at query time — live scan covers gap | Current continuously — incremental update on every write |
 | Query latency (fresh data) | Higher — must scan + aggregate recent raw chunks | Low — always reading pre-computed state |
 | Write-path cost | Near-zero — appends only | Higher — every write propagates through the MV DAG |
-| Analogy | Hudi MoR (merge at read time) | Hudi CoW with no lag |
+| Analogy | Iceberg merge-on-read (merge at read time) | Iceberg copy-on-write with no lag |
 
 ---
 
 ## Wrap-Up
 
-Recap the three-tier freshness ladder: **RisingWave** (sub-second) → **TimescaleDB** (seconds) → **Hudi/Athena** (30–90 seconds).
+Recap the three-tier freshness ladder: **RisingWave** (sub-second) → **TimescaleDB** (seconds) → **Iceberg/Athena** (30–90 seconds).
 
 **Preview Sessions 5–7:** Edge Kubernetes stack, simulated industrial site, and the HMI operator interface.
 
