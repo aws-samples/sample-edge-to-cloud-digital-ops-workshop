@@ -18,6 +18,16 @@ participant copy-pastes.
 cd e2e && npx tsx doc-runner-cli.ts workshop/02-control --deployment-id ws-slot00
 ```
 
+Pass `--report-out <path>` (or set `E2E_REPORT_OUT`) to also persist the run
+summary to a markdown file — replaces the old copy-paste-the-terminal habit.
+A directory argument (default `e2e/reports/`) is named `YYYY-MM-DD-<slot>.md`;
+stdout output is unchanged either way:
+
+```bash
+cd e2e && npx tsx doc-runner-cli.ts workshop --deployment-id ws-slot06 --report-out e2e/reports/
+# => writes e2e/reports/2026-07-31-ws-slot06.md
+```
+
 ### Personas — admin vs participant
 
 The runner can execute a doc under one of two identities (`--persona` /
