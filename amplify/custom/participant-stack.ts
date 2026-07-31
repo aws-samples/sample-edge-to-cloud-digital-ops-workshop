@@ -1095,6 +1095,203 @@ exports.handler = async (event) => {
     });
     participantAccessEntry.node.addDependency(participantRole);
 
+    // ── Participant IAM policy — non-EKS workshop CLI actions ────────────────
+    // `WorkshopParticipantRole` is the participant's full identity (#123,
+    // Model 2): every AWS-CLI command a non-admin workshop doc runs must work
+    // under this role without an AccessDenied. Scoped to this slot's own
+    // resources wherever the API's IAM resource type supports it; a handful
+    // of actions have no resource-level permissions at all (noted inline) and
+    // fall back to `*`.
+
+    // IoT — this slot's own thing group and jobs (job IDs are conventionally
+    // prefixed `${deploymentId}-` by every documented `aws iot create-job`
+    // call — see 02-control/block-2, 03-state/block-2, 05-edge-infra/block-2).
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["iot:DescribeThingGroup", "iot:ListThingsInThingGroup"],
+      resources: [`arn:aws:iot:${this.region}:${this.account}:thinggroup/${deploymentId}-devices`],
+    }));
+
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["iot:CreateJob", "iot:DescribeJob", "iot:ListJobExecutionsForJob"],
+      resources: [`arn:aws:iot:${this.region}:${this.account}:job/${deploymentId}-*`],
+    }));
+
+    // Software Package Catalog: this slot's own telemetry-agent package
+    // (02-control/block-4-fleet-management.md).
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["iot:ListPackages"],
+      resources: [`arn:aws:iot:${this.region}:${this.account}:package/${deploymentId}-*`],
+    }));
+
+    // Fleet Indexing: AWS_Things is a single shared, account-wide index (not
+    // one per slot) — iot:SearchIndex/DescribeIndex only support scoping to
+    // an index name, not to the query string run against it, so slot
+    // isolation here comes from the `attributes.deploymentId:...` filter
+    // every documented query includes (02-control/block-3), not from IAM.
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["iot:SearchIndex", "iot:DescribeIndex"],
+      resources: [`arn:aws:iot:${this.region}:${this.account}:index/AWS_Things`],
+    }));
+
+    // Thing/shadow reads+writes: thing names are EC2 instance IDs, or
+    // whatever a participant names a device they register over SSH
+    // (02-control/block-1-device-client.md) — neither is slot-prefixed, and
+    // things carry no resource tags, so there's no ARN pattern that scopes
+    // this to just this slot's devices. Falls back to thing/* (still
+    // region/account-scoped).
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["iot:DescribeThing", "iot-data:GetThingShadow", "iot-data:UpdateThingShadow"],
+      resources: [`arn:aws:iot:${this.region}:${this.account}:thing/*`],
+    }));
+
+    // iot:DescribeEndpoint (register-device-ssh.sh, EC2 user data) and
+    // iot:UpdateIndexingConfiguration (02-control/block-3-fleet-indexing.md's
+    // idempotent re-run of the account's existing indexing config) are
+    // account-wide settings with no resource type to scope to.
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["iot:DescribeEndpoint", "iot:UpdateIndexingConfiguration"],
+      resources: ["*"],
+    }));
+
+    // S3 — this slot's own job-script/job-doc upload prefixes and telemetry
+    // read paths (01-observe/block-2, 02-control/block-2, 03-state/block-2,
+    // 05-edge-infra/block-2).
+    const slotS3Prefixes = [
+      `job-scripts/${deploymentId}/*`,
+      `${deploymentId}/job-docs/*`,
+      `telemetry/edge/${deploymentId}/*`,
+      `telemetry/deployment_id=${deploymentId}/*`,
+    ];
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:PutObject", "s3:GetObject"],
+      resources: slotS3Prefixes.map((prefix) => `${sharedBucketArn}/${prefix}`),
+    }));
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:ListBucket"],
+      resources: [sharedBucketArn],
+      conditions: {
+        StringLike: { "s3:prefix": [...slotS3Prefixes, "athena-results/*"] },
+      },
+    }));
+
+    // Athena's query-results location is a single shared prefix, not
+    // slot-partitioned (see the workgroup's outputLocation in
+    // platform-stack.ts) — every participant's queries land under the same
+    // athena-results/ prefix, so object-level access can't be scoped tighter
+    // than the whole prefix.
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:PutObject", "s3:GetObject"],
+      resources: [`${sharedBucketArn}/athena-results/*`],
+    }));
+
+    // This slot's own RisingWave state bucket, created by the participant in
+    // 04-analytics/block-1-deploy.md Step 5 — bucket-level actions only, no
+    // object path to scope further.
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:CreateBucket", "s3:ListBucket", "s3:GetBucketLocation"],
+      resources: [`arn:aws:s3:::workshop-${deploymentId}-${this.account}-risingwave-state`],
+    }));
+
+    // Secrets Manager — this slot's own claim cert and MSK SASL/SCRAM creds.
+    claimSecret.grantRead(participantRole);
+    mskCredSecret.grantRead(participantRole);
+
+    // SSM Parameter Store — this slot's own namespace (kubeconfig, etc — see
+    // 04-analytics/block-1, 05-edge-infra/block-3, 05-edge-infra/block-4).
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["ssm:GetParameter", "ssm:GetParameters"],
+      resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/workshop/${deploymentId}/*`],
+    }));
+
+    // SSM Session Manager port-forwarding / run-command — scoped to this
+    // slot's own EC2 instances via the WorkshopDeploymentId tag every
+    // EdgeInstance/SensorSimulatorInstance carries (see the CfnInstance
+    // definitions above), not to a specific instance ID (unknown at synth
+    // time and re-created on every deploy).
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["ssm:StartSession", "ssm:SendCommand"],
+      resources: [`arn:aws:ec2:${this.region}:${this.account}:instance/*`],
+      conditions: {
+        StringEquals: { "aws:ResourceTag/WorkshopDeploymentId": deploymentId },
+      },
+    }));
+    // ssm:SendCommand also needs permission on the SSM document itself — an
+    // AWS-owned public document (AWS-RunShellScript), not a per-slot
+    // resource, so it can't be scoped any tighter.
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["ssm:SendCommand"],
+      resources: [`arn:aws:ssm:${this.region}::document/AWS-RunShellScript`],
+    }));
+    // ssm:GetCommandInvocation does not support resource-level permissions
+    // (AWS Service Authorization Reference lists only `*` for this action).
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["ssm:GetCommandInvocation"],
+      resources: ["*"],
+    }));
+
+    // CloudFormation — cloudformation:ListExports has no resource type at
+    // all; cloudformation:DescribeStacks technically supports a stack ARN,
+    // but every documented call filters `Exports[?Name==...]` without
+    // knowing the stack name up front, so neither can be scoped tighter than
+    // the whole account/region (04-analytics/block-1, block-2; 05-edge-infra/
+    // block-3).
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["cloudformation:ListExports", "cloudformation:DescribeStacks"],
+      resources: ["*"],
+    }));
+
+    // MSK — bootstrap-broker lookup for the shared cluster (04-analytics/
+    // block-1, block-2; 05-edge-infra/block-3).
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["kafka:GetBootstrapBrokers"],
+      resources: [mskClusterArn],
+    }));
+
+    // Athena — the single shared workgroup all slots query through
+    // (01-observe/block-3, 02-control/block-5).
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults"],
+      resources: [`arn:aws:athena:${this.region}:${this.account}:workgroup/workshop-shared`],
+    }));
+
+    // Glue Data Catalog — read-only access to the shared telemetry database
+    // that both `aws glue get-tables` and every Athena SELECT need (same
+    // scoping as WorkshopPlatformStack's Flink role).
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["glue:GetDatabase", "glue:GetTable", "glue:GetTables", "glue:GetPartition", "glue:GetPartitions"],
+      resources: [
+        `arn:aws:glue:${this.region}:${this.account}:catalog`,
+        `arn:aws:glue:${this.region}:${this.account}:database/workshop_telemetry`,
+        `arn:aws:glue:${this.region}:${this.account}:table/workshop_telemetry/*`,
+      ],
+    }));
+
+    // EC2 — describe-only calls have no resource-level permissions support
+    // (05-edge-infra/block-2, block-3).
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["ec2:DescribeInstances"],
+      resources: ["*"],
+    }));
+
     // ── Outputs ──────────────────────────────────────────────────────────────
     new CfnOutput(this, "DeploymentId", {
       exportName: `workshop-${deploymentId}-deployment-id`,
