@@ -28,7 +28,7 @@ The response's `issue_dependencies_summary` (`{"blocked_by":1,...}`) confirms it
 Root uses **pnpm** (see Package Manager rule below). `frontend/`, `hmi/`, and `e2e/` are separate workspaces with their own `package.json`.
 
 ```bash
-# Deploy — shared platform stack (VPCs, EKS, MSK, Flink) + per-slot Amplify sandbox
+# Deploy — shared platform stack (VPCs, EKS, MSK, Firehose) + per-slot Amplify sandbox
 pnpm run sandbox ws-slot00                       # single slot (deploys platform first if absent)
 pnpm run sandbox:all ws-slot00 ws-slot01 ...     # platform once, then fan out slots
 pnpm run sandbox:delete-all                      # teardown all slots
@@ -63,13 +63,13 @@ cd hmi && pnpm dev                                 # edge HMI (site view, runs o
 **Two deployment tiers, built with Amplify Gen 2 wrapping raw CDK stacks:**
 
 - `amplify/backend.ts` — entry point. Requires `WORKSHOP_DEPLOYMENT_ID` (e.g. `ws-slot00`) + `CDK_DEFAULT_ACCOUNT/REGION` in env (set by `ampx sandbox` / `scripts/sandbox.sh`). Defines auth + data, then instantiates one `ParticipantStack` per slot.
-- `amplify/custom/platform-stack.ts` (+ `platform-app.ts` standalone CDK app entry) — **shared, deployed once per account**: two VPCs (`workshop-edge` 10.0/16, `workshop-cloud` 10.1/16), EKS cluster, MSK cluster, Managed Flink app, shared S3. Stack name is `WorkshopPlatformStackV2` or `WorkshopPlatformStack` (V2 wins); sandbox scripts detect which exists.
+- `amplify/custom/platform-stack.ts` (+ `platform-app.ts` standalone CDK app entry) — **shared, deployed once per account**: two VPCs (`workshop-edge` 10.0/16, `workshop-cloud` 10.1/16), EKS cluster, MSK cluster, a Firehose delivery stream (MSK → Iceberg), shared S3. Stack name is `WorkshopPlatformStackV2` or `WorkshopPlatformStack` (V2 wins); sandbox scripts detect which exists.
 - `amplify/custom/participant-stack.ts` — **per-slot, isolated**: 3× EC2 (IoT Device Client, fleet-provisioned by claim cert), IoT provisioning template + pre-provisioning Lambda, per-slot MSK topics, S3 telemetry landing, Athena workgroup, AppSync Events API, Secrets Manager claim cert. Uses `Vpc.fromLookup` (needs concrete account/region at synth — why backend.ts throws without them).
 - `amplify/data/resource.ts` — AppSync GraphQL schema (Amplify Gen 2). `publishTelemetry` mutation + `onTelemetry` subscription with JS resolvers in the same dir. Cross-stack GraphQL URL is passed by CFN export name + SSM param (`/workshop/<id>/graphql-endpoint`) to avoid CDK cross-env-stack validation.
 
 **Data pipeline (two paths from the same MQTT publish):**
 1. Device MQTT → IoT Rules → **AppSync Events API** (SigV4 HTTP action, no Lambda hop) → browser WebSocket. ~10–80 ms live push, no database.
-2. Device MQTT → IoT Rules → **S3 landing** → Redpanda Connect → **MSK** → **TimescaleDB** (continuous aggregate `pump_rate_10s`, queried on demand). Plus a **Hudi/Athena** static reference and Managed Flink → Iceberg sink (`flink-hudi-sink/`, Java/Maven).
+2. Device MQTT → IoT Rules → **S3 landing** → Redpanda Connect → **MSK** → **TimescaleDB** (continuous aggregate `pump_rate_10s`, queried on demand). Plus an **Iceberg/Athena** static reference: Amazon Data Firehose reads `raw.telemetry` from the shared MSK cluster and delivers natively to a Glue Data Catalog Iceberg table on S3 — no custom code.
 
 The **data-freshness comparison panel** (frontend) is the centrepiece: same pump-rate metric via AppSync push vs. TimescaleDB CAGG vs. Hudi/Athena. AppSync Events acts as a *clock signal* — the browser fires a stateless HTTP query for the latest CAGG on each event rather than holding a `LISTEN/NOTIFY` connection.
 

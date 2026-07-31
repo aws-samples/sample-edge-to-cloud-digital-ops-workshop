@@ -572,10 +572,10 @@ export class PlatformStack extends Stack {
     });
 
     // ── Glue Data Catalog Iceberg table (MSK → Firehose → Iceberg → S3) ─────
-    // Pre-provisioned so Firehose has a table to deliver into on first start —
-    // schema matches what the previous Flink sink produced, so Athena queries
+    // Pre-provisioned so Firehose has a table to deliver into on first start.
+    // Schema/partitioning are chosen to keep the existing Athena queries
     // (workshop/01-observe/block-3-athena.md, workshop/02-control/block-5-observe.md)
-    // keep working unchanged.
+    // working unchanged.
     const glueDatabase = new CfnDatabase(this, "TelemetryGlueDatabase", {
       catalogId: this.account,
       databaseInput: {
