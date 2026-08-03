@@ -13,7 +13,7 @@ The cloud front end uses four patterns across the tiers:
 | **Live push — raw telemetry** | Per-device raw event, no aggregation | IoT Core → IoT Rules HTTP action → AppSync Events → browser WebSocket | AppSync Events push; bypasses all databases | ~10–80 ms |
 | **Pump rate — RisingWave MV** | `SUM(pump_rate_bbl_per_min)`, incrementally maintained | AppSync Event → browser HTTP request → RisingWave MV lookup | Single MV row read per event | ~100–400 ms |
 | **Pump rate — TimescaleDB CAGG** | Same sum, CAGG + live scan | AppSync Event → browser HTTP request → TimescaleDB CAGG query | CAGG + live scan per event | ~100 ms–3 s |
-| **Hudi / Athena** | Historical only | Athena console — no front-end route | Console only | ~30–90 s floor |
+| **Iceberg / Athena** | Historical only | Athena console — no front-end route | Console only | ~300 s floor *(up to ~15 min under low throughput)* |
 
 ---
 
@@ -51,7 +51,7 @@ Cloud RisingWave ← MSK ← IoT Core ← Edge devices
 | **Live push (IoT → AppSync)** | ~10–80 ms | ~10–80 ms *(flat — per-message, independent of fleet)* |
 | **Pump rate — RisingWave MV** | ~100–400 ms | ~100–400 ms *(flat — single row read always)* |
 | **Pump rate — TimescaleDB CAGG** | ~100–600 ms | **~500 ms–3 s** *(live scan over ~25K un-materialized rows)* |
-| **Hudi / Athena** | ~30–90 s | ~30–120 s *(scan size grows with data volume)* |
+| **Iceberg / Athena** | ~300 s | ~300 s–15 min *(scan size grows with data volume)* |
 
 !!! tip "Why this matters for pump rate"
     Each wellsite may have 2–6 pumps at 1 Hz. At 500 devices the un-materialized tail the CAGG must scan reaches ~25,000 rows per query refresh. RisingWave's MV cost stays flat because it was updated incrementally on every insert — the freshness cost is paid at write time, not read time.

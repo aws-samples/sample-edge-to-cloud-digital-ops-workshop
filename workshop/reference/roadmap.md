@@ -166,7 +166,6 @@ with an e2e-asserted bash block; verified live (doc-runner 2/2).
 
 - [x] Broaden `e2e:assert` annotation coverage to every session (#67)
 - [x] Consolidate on doc-runner; remove `runner.ts` (#68 — closed, commit `2703c4e`)
-- [x] Auto-start Managed Flink Iceberg sink on platform deploy (#69)
 - [x] IAM-driven EKS access entries so participants can `helm`/`kubectl` (#70 item 1)
 - [x] Fix `set -e` session-abort masking in doc-runner (#72)
 - [x] Fix non-exported var threading between blocks (#74) — PR #76 (fleet-management 4/6 → 6/6)
