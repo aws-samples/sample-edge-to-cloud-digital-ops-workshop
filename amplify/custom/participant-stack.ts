@@ -1105,6 +1105,233 @@ exports.handler = async (event) => {
     });
     participantAccessEntry.node.addDependency(participantRole);
 
+    // ── Participant IAM policy — non-EKS workshop CLI actions ────────────────
+    // `WorkshopParticipantRole` is the participant's full identity (#123,
+    // Model 2): every AWS-CLI command a non-admin workshop doc runs must work
+    // under this role without an AccessDenied. Scoped to this slot's own
+    // resources wherever the API's IAM resource type supports it; a handful
+    // of actions have no resource-level permissions at all (noted inline) and
+    // fall back to `*`.
+
+    // IoT — grant the whole `iot:*` action namespace, account-wide.
+    //
+    // The workshop's IoT surface spans control-plane calls (CreateJob against
+    // both a job/* ARN *and* its thing-group target; DescribeJob; ListPackages,
+    // which has no resource type; SearchIndex against the shared account-wide
+    // AWS_Things index; UpdateIndexingConfiguration, an account-wide setting)
+    // AND Device Shadow *data-plane* calls (GetThingShadow/UpdateThingShadow —
+    // the `aws iot-data` CLI, which IAM authorizes under the `iot:` prefix, NOT
+    // `iot-data:`). Per-action scoping here proved both fragile and unsound:
+    //   - thing names are EC2 instance IDs / SSH-registered names (not
+    //     slot-prefixed) and things carry no tags, so shadow/DescribeThing
+    //     can't be scoped tighter than thing/* anyway;
+    //   - the shared AWS_Things index and account-wide settings force `*`;
+    //   - an earlier attempt used the invalid `iot-data:` IAM prefix for the
+    //     shadow actions, which authorizes NOTHING — every shadow call failed
+    //     `ForbiddenException` while looking correct in the policy.
+    // Since the achievable scoping is already `thing/*` + `*` for most of the
+    // IoT surface, a single `iot:*` grant is both simpler and no broader in
+    // practice (the workshop account is single-tenant per slot for IoT — thing
+    // isolation is enforced by the `attributes.deploymentId:...` fleet-index
+    // filter the docs use, not by IAM). #123.
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["iot:*"],
+      resources: ["*"],
+    }));
+
+    // S3 — this slot's own job-script/job-doc upload prefixes and telemetry
+    // read paths (01-observe/block-2, 02-control/block-2, 03-state/block-2,
+    // 05-edge-infra/block-2).
+    const slotS3Prefixes = [
+      `job-scripts/${deploymentId}/*`,
+      `${deploymentId}/job-docs/*`,
+      `telemetry/edge/${deploymentId}/*`,
+      `telemetry/deployment_id=${deploymentId}/*`,
+    ];
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:PutObject", "s3:GetObject"],
+      resources: slotS3Prefixes.map((prefix) => `${sharedBucketArn}/${prefix}`),
+    }));
+    // Read-only access to the shared Firehose→Iceberg telemetry table. Unlike
+    // the slot-owned prefixes above, this table (Glue location
+    // `telemetry/telemetry/`) co-mingles *every* slot's rows in shared data
+    // files — Firehose writes it, participants only read it, and per-slot
+    // isolation is logical (the doc queries carry `WHERE deployment_id=<slot>`),
+    // not physical per-prefix. So the read grant must cover the whole table
+    // prefix (metadata JSON + Avro manifests + Parquet data), not a per-slot
+    // subpath. Without it, Athena's StartQueryExecution succeeds but the query
+    // itself FAILS at scan time with `PERMISSION_DENIED: s3:GetObject on
+    // .../telemetry/telemetry/metadata/*.metadata.json` — surfacing only as
+    // `GetQueryResults: Query did not finish successfully` (01-observe/
+    // block-3-athena block 2, 02-control/block-5-observe block 1).
+    const icebergTablePrefix = "telemetry/telemetry/*";
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:GetObject"],
+      resources: [`${sharedBucketArn}/${icebergTablePrefix}`],
+    }));
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:ListBucket"],
+      resources: [sharedBucketArn],
+      conditions: {
+        StringLike: {
+          "s3:prefix": [...slotS3Prefixes, icebergTablePrefix, "athena-results/*"],
+        },
+      },
+    }));
+
+    // Athena's query-results location is a single shared prefix, not
+    // slot-partitioned (see the workgroup's outputLocation in
+    // platform-stack.ts) — every participant's queries land under the same
+    // athena-results/ prefix, so object-level access can't be scoped tighter
+    // than the whole prefix.
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:PutObject", "s3:GetObject"],
+      resources: [`${sharedBucketArn}/athena-results/*`],
+    }));
+
+    // Before running a query, Athena verifies its output bucket exists by
+    // calling s3:GetBucketLocation on the *bucket* (not a prefix) — without
+    // this the StartQueryExecution above fails
+    // `InvalidRequestException: Unable to verify/create output bucket`
+    // (01-observe/block-3-athena, 02-control/block-5-observe). The role's only
+    // other GetBucketLocation grant is on its RisingWave bucket, so it must be
+    // granted explicitly on the shared platform bucket here. Bucket-level,
+    // unconditioned — GetBucketLocation takes no prefix.
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:GetBucketLocation"],
+      resources: [sharedBucketArn],
+    }));
+
+    // This slot's own RisingWave state bucket, created by the participant in
+    // 04-analytics/block-1-deploy.md Step 5 — bucket-level actions only, no
+    // object path to scope further.
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:CreateBucket", "s3:ListBucket", "s3:GetBucketLocation"],
+      resources: [`arn:aws:s3:::workshop-${deploymentId}-${this.account}-risingwave-state`],
+    }));
+
+    // Secrets Manager — this slot's own claim cert and MSK SASL/SCRAM creds.
+    claimSecret.grantRead(participantRole);
+    mskCredSecret.grantRead(participantRole);
+
+    // grantRead() only adds secretsmanager:GetSecretValue/DescribeSecret —
+    // the SCRAM secret is KMS-encrypted with an imported key (mskScramKey,
+    // via KmsKey.fromKeyArn above), so CDK can't add an identity-policy
+    // decrypt grant automatically. Mirrors iotKafkaVpcRole's grant on the
+    // same key/secret above.
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["kms:Decrypt"],
+      resources: [mskScramKeyArn],
+    }));
+
+    // SSM Parameter Store — this slot's own namespace (kubeconfig, etc — see
+    // 04-analytics/block-1, 05-edge-infra/block-3, 05-edge-infra/block-4).
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["ssm:GetParameter", "ssm:GetParameters"],
+      resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/workshop/${deploymentId}/*`],
+    }));
+
+    // SSM Session Manager port-forwarding / run-command — scoped to this
+    // slot's own EC2 instances via the WorkshopDeploymentId tag every
+    // EdgeInstance/SensorSimulatorInstance carries (see the CfnInstance
+    // definitions above), not to a specific instance ID (unknown at synth
+    // time and re-created on every deploy).
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["ssm:StartSession", "ssm:SendCommand"],
+      resources: [`arn:aws:ec2:${this.region}:${this.account}:instance/*`],
+      conditions: {
+        StringEquals: { "aws:ResourceTag/WorkshopDeploymentId": deploymentId },
+      },
+    }));
+    // ssm:SendCommand and ssm:StartSession both also need permission on the
+    // SSM document resource itself — AWS-owned public documents, not
+    // per-slot resources, so they can't be scoped any tighter than the
+    // document ARN (empty account segment). AWS-RunShellScript backs
+    // SendCommand (register-device-over-ssh.md); AWS-StartPortForwardingSession
+    // backs the K3s port-forward tunnel (05-edge-infra/block-3, block-4) and
+    // AWS-StartSSHSession backs the SSH-over-SSM jump (register-device-over-
+    // ssh.md) — both via start-session.
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["ssm:SendCommand"],
+      resources: [`arn:aws:ssm:${this.region}::document/AWS-RunShellScript`],
+    }));
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["ssm:StartSession"],
+      resources: [
+        `arn:aws:ssm:${this.region}::document/AWS-StartPortForwardingSession`,
+        `arn:aws:ssm:${this.region}::document/AWS-StartSSHSession`,
+      ],
+    }));
+    // ssm:GetCommandInvocation and ssm:DescribeInstanceInformation do not
+    // support resource-level permissions (AWS Service Authorization
+    // Reference lists only `*` for these actions).
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["ssm:GetCommandInvocation", "ssm:DescribeInstanceInformation"],
+      resources: ["*"],
+    }));
+
+    // CloudFormation — cloudformation:ListExports has no resource type at
+    // all; cloudformation:DescribeStacks technically supports a stack ARN,
+    // but every documented call filters `Exports[?Name==...]` without
+    // knowing the stack name up front, so neither can be scoped tighter than
+    // the whole account/region (04-analytics/block-1, block-2; 05-edge-infra/
+    // block-3).
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["cloudformation:ListExports", "cloudformation:DescribeStacks"],
+      resources: ["*"],
+    }));
+
+    // MSK — bootstrap-broker lookup for the shared cluster (04-analytics/
+    // block-1, block-2; 05-edge-infra/block-3).
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["kafka:GetBootstrapBrokers"],
+      resources: [mskClusterArn],
+    }));
+
+    // Athena — the single shared workgroup all slots query through
+    // (01-observe/block-3, 02-control/block-5).
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults"],
+      resources: [`arn:aws:athena:${this.region}:${this.account}:workgroup/workshop-shared`],
+    }));
+
+    // Glue Data Catalog — read-only access to the shared telemetry database
+    // that both `aws glue get-tables` and every Athena SELECT need (same
+    // scoping as WorkshopPlatformStack's Flink role).
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["glue:GetDatabase", "glue:GetTable", "glue:GetTables", "glue:GetPartition", "glue:GetPartitions"],
+      resources: [
+        `arn:aws:glue:${this.region}:${this.account}:catalog`,
+        `arn:aws:glue:${this.region}:${this.account}:database/workshop_telemetry`,
+        `arn:aws:glue:${this.region}:${this.account}:table/workshop_telemetry/*`,
+      ],
+    }));
+
+    // EC2 — describe-only calls have no resource-level permissions support
+    // (05-edge-infra/block-2, block-3).
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["ec2:DescribeInstances"],
+      resources: ["*"],
+    }));
+
     // ── Outputs ──────────────────────────────────────────────────────────────
     new CfnOutput(this, "DeploymentId", {
       exportName: `workshop-${deploymentId}-deployment-id`,
