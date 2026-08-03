@@ -4,7 +4,7 @@ Maintainer-facing tracker for workshop build-out and end-to-end (doc-runner) tes
 coverage. Participant instructions live in the session docs; this page tracks the
 work *behind* them. Keep it current as issues open, land, and close.
 
-_Last updated: 2026-07-29._
+_Last updated: 2026-07-30._
 
 ## Testing model
 
@@ -17,6 +17,74 @@ participant copy-pastes.
 ```bash
 cd e2e && npx tsx doc-runner-cli.ts workshop/02-control --deployment-id ws-slot00
 ```
+
+### Personas — admin vs participant
+
+The runner can execute a doc under one of two identities (`--persona` /
+`E2E_PERSONA`), because a single doc (e.g. `04-analytics/block-1-deploy.md`)
+interleaves cluster-scoped facilitator steps with namespace-scoped attendee steps:
+
+| Persona | Credentials | Runs which blocks |
+|---|---|---|
+| _(unset, default)_ | calling principal, granted cluster access | **every** annotated block — unchanged `pnpm run e2e` |
+| `admin` (`pnpm run e2e:admin`) | calling principal; `grant-ci-access.sh` grants it cluster-scoped EKS/Cognito access first | blocks tagged `"persona":"admin"` **plus** untagged blocks |
+| `participant` (`pnpm run e2e:participant`) | **`aws` CLI → own (ambient) identity; `kubectl`/`helm` → `WorkshopParticipantRole-<slot>`** | blocks tagged `"persona":"participant"` **plus** untagged blocks |
+
+A block opts into a persona with a `"persona"` key in its `e2e:assert` JSON
+(`{"contains":"Ready","persona":"admin"}`); **omitting it means the block runs
+under both**.
+
+The participant persona models the real attendee identity split: an attendee
+runs the AWS-CLI steps (`iot`, `s3`, `secretsmanager`, `athena`, …) as their own
+workshop IAM user, and assumes `WorkshopParticipantRole-<slot>` **only for
+`kubectl`** — that role is EKS-only (`eks:DescribeCluster` + a namespace-scoped
+`AmazonEKSEditPolicy` access entry). The runner implements this by building a
+throwaway kubeconfig whose exec plugin calls `aws eks get-token --role-arn
+<participant-role>` and pointing `KUBECONFIG` at it; ambient creds stay in effect
+for every plain `aws` call. It never injects the role's creds into the process
+env. The doc's cluster-admin `update-kubeconfig` (Step 1 of block-1-deploy) is
+tagged `persona:admin`, so it's skipped in the participant run and can't clobber
+the role-scoped kubeconfig.
+
+## Latest run — 2026-07-30 on `ws-slot06`: 47/66 blocks passed
+
+Full doc-runner run against `ws-slot06` on 2026-07-30 (report:
+`e2e/reports/2026-07-30-slot06.md`). **47/66 asserted blocks passed.** The 19 reds
+fall into three buckets — two real defects and one test-runner precondition:
+
+**1. Flink Iceberg sink not running (real defect) — #117 / #118**
+- `01-observe/block-3-athena.md` block 2 **and** `02-control/block-5-observe.md`
+  block 1 both fail with `ICEBERG_MISSING_METADATA: Metadata not found in metadata
+  location for table workshop_telemetry.telemetry`. Same root cause: the Managed
+  Flink app `workshop-iceberg-sink` **crash-loops back to `READY`** and never writes
+  the Iceberg table metadata (`telemetry/` S3 prefix is empty). `FlinkAppAutoStart`
+  fired but the job doesn\'t stay RUNNING. **#117**, blocked by **#118** (app has
+  **no CloudWatch logging** attached → crash undiagnosable until logging is added).
+
+**2. Docs still say "Hudi" (real defect) — #119**
+- The archive tier was migrated MSK-Connect-Hudi → Managed-Flink-Iceberg
+  (commits `63b1a30`, `7c6853c`/PR #82) but ~10 doc files still describe it as Hudi,
+  including `reference/decisions.md`\'s now-inverted "Hudi over Iceberg" row. No Hudi
+  component is deployed (`kafkaconnect list-connectors` → `[]`). Doc-only fix.
+
+**3. EKS auth not granted to the test-runner role (precondition, NOT a defect) — FIXED**
+- All of `04-analytics` (block-1-deploy 3/15, block-2-risingwave 0/2,
+  block-4-timescaledb 0/2) failed with *"the server has asked for the client to
+  provide credentials"* / port-4567 connection-refused. Cause: the local
+  `admin/waltmayf-Isengard` role was **not** in `workshop-eks` access entries.
+  (Participant roles already get a namespace-scoped `AmazonEKSEditPolicy` entry
+  from the CDK — only a CI/facilitator role that didn\'t create the cluster is
+  affected.) **Fixed**: `doc-runner-cli.ts` now runs `scripts/grant-ci-access.sh`
+  for the calling role at startup (best-effort, skips participant roles, opt out
+  with `E2E_SKIP_EKS_GRANT=true`). Verified: the auth error is gone; a fresh
+  sequential run creates the `ws-slot06` namespace in block-1 before the later
+  blocks query it. Not a workshop bug — no issue filed.
+- `05-edge-infra/index.md` block 1 (docker build) is the **same local buildx/ECR
+  artifact** as the #37 baseline — not a product defect.
+
+> The #37 baseline (below) was on `ws-slot38` with the Flink sink healthy and CI
+> EKS access pre-granted; #117/#119 are genuine regressions/drift to fix, while the
+> 04-analytics reds here are just this run\'s missing EKS grant.
 
 ## Latest full-slot run — #37 release baseline
 
@@ -133,9 +201,16 @@ with an e2e-asserted bash block; verified live (doc-runner 2/2).
 
 ### Remaining
 
-_Board is empty — all tracked issues closed as of 2026-07-29._ The shared platform is
-**torn down** (platform teardown #41 completed); the next full-slot run will redeploy it
-via `pnpm run sandbox` (platform deploys first if absent, ~40 min).
+| # | Type | Title | Status |
+|---|---|---|---|
+| #117 | bug/e2e | Athena queries fail: `ICEBERG_MISSING_METADATA` — Flink Iceberg sink crash-loops to READY (affects block-3-athena + block-5-observe) | 🔴 Open — **blocked by #118** |
+| #118 | bug/infra | Managed Flink Iceberg sink has no CloudWatch logging — crash-loop undiagnosable | 🔴 Open — blocker for #117 |
+| #119 | docs | Docs still say Hudi; deployment migrated to Flink→Iceberg (~10 files, incl. inverted `decisions.md` row) | 🔴 Open — doc-only |
+
+Opened 2026-07-30 from the `ws-slot06` run above. #117 is blocked by #118 (native
+GitHub relationship set); the doc-wide Hudi→Iceberg wording was split out to #119.
+The shared platform is currently deployed (`ws-slot06`); the earlier note about
+teardown (#41) still holds for a from-scratch run.
 
 > GitHub's native issue-relationships feature is the source of truth for
 > blocked-by/blocking (see `CLAUDE.md`). This table is a convenience mirror —

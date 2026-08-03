@@ -427,7 +427,7 @@ exports.handler = async (event) => {
     });
 
     // --8<-- [start:provisioning-template]
-    new CfnProvisioningTemplate(this, "ProvisioningTemplate", {
+    const provisioningTemplate = new CfnProvisioningTemplate(this, "ProvisioningTemplate", {
       templateName: `${deploymentId}-provisioning`,
       description: `Fleet provisioning template for deployment ${deploymentId}`,
       enabled: true,
@@ -472,6 +472,16 @@ exports.handler = async (event) => {
         },
       }),
     });
+    // The template body references preProvisionLambda.functionArn, so CDK orders
+    // it after the *function* — but IoT validates the pre-provisioning hook at
+    // template-create time by invoking that Lambda, which requires the
+    // AllowIoTInvoke permission to already exist. That permission is a sibling
+    // resource with no reference link, so without an explicit dependency it's a
+    // race: if the template is created before the permission, IoT returns
+    // "Access denied during lambda validation" and the stack rolls back.
+    // Depend on the Lambda construct so all its children (including the
+    // permission) are created first.
+    provisioningTemplate.node.addDependency(preProvisionLambda);
     // --8<-- [end:provisioning-template]
 
     // ── Edge subnet (private-with-egress /24, network-isolated per slot) ────

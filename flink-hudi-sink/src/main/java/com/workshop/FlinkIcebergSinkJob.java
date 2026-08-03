@@ -98,7 +98,25 @@ public class FlinkIcebergSinkJob {
         catalog.initialize("glue_catalog", catalogProps);
 
         TableIdentifier tableId = TableIdentifier.of(glueDbName, "telemetry");
-        if (!catalog.tableExists(tableId)) {
+        // tableExists() only checks that a Glue row exists — it does NOT verify the
+        // metadata file the row points at is still in S3. If the S3 `telemetry/`
+        // prefix was swept (teardown / bucket lifecycle) but the Glue table entry
+        // survived, the pointer is orphaned: loading it throws NotFoundException and
+        // the job crash-loops back to READY on every start (see #117). Treat an
+        // orphaned pointer the same as a missing table — drop the stale Glue row and
+        // recreate the table fresh so the sink can start and repopulate.
+        boolean needsCreate = !catalog.tableExists(tableId);
+        if (!needsCreate) {
+            try {
+                catalog.loadTable(tableId).refresh();
+            } catch (org.apache.iceberg.exceptions.NotFoundException e) {
+                System.out.println("Glue table " + tableId + " points at missing metadata ("
+                    + e.getMessage() + ") — dropping orphaned entry and recreating.");
+                catalog.dropTable(tableId, false); // purge=false: S3 is already empty
+                needsCreate = true;
+            }
+        }
+        if (needsCreate) {
             if (!catalog.namespaceExists(Namespace.of(glueDbName))) {
                 catalog.createNamespace(Namespace.of(glueDbName));
             }

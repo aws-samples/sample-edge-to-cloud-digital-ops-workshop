@@ -75,7 +75,9 @@ You should see MQTT messages being received and written to Redpanda topics.
 ```bash
 kubectl port-forward -n edge svc/edge-stack-console 8080:8080 > /tmp/redpanda-console-pf.log 2>&1 &
 RC_PF_PID=$!
-sleep 5
+# Wait for the forward to bind — an SSM-tunnelled K3s can take longer than a
+# fixed sleep to establish; race it and curl hits a dead port.
+until grep -q "Forwarding from" /tmp/redpanda-console-pf.log 2>/dev/null; do sleep 1; done
 curl -sf http://localhost:8080 | head -c 200
 kill "$RC_PF_PID" 2>/dev/null || true
 ```
@@ -98,7 +100,7 @@ If the job failed, re-run manually — `risingwave/ddl.sql` uses `CREATE ... IF 
 ```bash
 kubectl port-forward -n edge svc/edge-stack-risingwave 4567:4567 > /tmp/rw-edge-pf.log 2>&1 &
 RW_PF_PID=$!
-sleep 5
+until grep -q "Forwarding from" /tmp/rw-edge-pf.log 2>/dev/null; do sleep 1; done
 psql -h localhost -p 4567 -U root -d dev -f risingwave/ddl.sql
 kill "$RW_PF_PID" 2>/dev/null || true
 ```
@@ -108,7 +110,7 @@ kill "$RW_PF_PID" 2>/dev/null || true
 ```bash
 kubectl port-forward -n edge svc/edge-stack-risingwave 4567:4567 > /tmp/rw-edge-pf2.log 2>&1 &
 RW_PF_PID=$!
-sleep 5
+until grep -q "Forwarding from" /tmp/rw-edge-pf2.log 2>/dev/null; do sleep 1; done
 psql -h localhost -p 4567 -U root -d dev -c "SELECT * FROM mv_sensor_latest LIMIT 5;"
 kill "$RW_PF_PID" 2>/dev/null || true
 ```

@@ -48,6 +48,14 @@ export interface RunnerSubstitutions {
   GRAPHQL_ENDPOINT?: string;
 }
 
+/** Which workshop persona a block belongs to. A cluster-scoped install
+ *  (cert-manager, an operator, a default StorageClass) is `admin`; a
+ *  namespace-scoped operation a participant runs against their own slot is
+ *  `participant`. Omitted = `any`: setup/shared blocks that both personas run
+ *  (e.g. `aws eks update-kubeconfig`, an Athena query, an IoT job). The runner's
+ *  --persona flag selects which blocks execute; see RunDocBlocksOptions.persona. */
+export type Persona = "admin" | "participant";
+
 export interface AssertSpec {
   contains?: string;
   notContains?: string;
@@ -57,6 +65,8 @@ export interface AssertSpec {
   /** Poll ceiling for jobSucceeds, in minutes. Defaults to 15. Longer-running
    *  jobs (e.g. the K3s bootstrap, which the docs allow 45 min) set this higher. */
   jobTimeoutMinutes?: number;
+  /** Restrict this block to one persona. Omitted = runs under both. */
+  persona?: Persona;
 }
 
 export interface BlockResult {
@@ -372,6 +382,9 @@ function pollJobUntilDone(
 export interface RunDocBlocksOptions {
   /** Opt-in to running blocks that would tear down the shared platform stack. Default: false. */
   allowPlatformTeardown?: boolean;
+  /** Run only blocks for this persona (plus untagged "any" blocks). Omitted =
+   *  run every annotated block regardless of persona tag (the default full run). */
+  persona?: Persona;
 }
 
 // ── Run a single .md file's blocks ───────────────────────────────────────────
@@ -385,7 +398,17 @@ export async function runDocBlocks(
 ): Promise<void> {
   const md = readFileSync(mdPath, "utf8");
   const blocks = parseBlocks(md);
-  const annotated = blocks.filter((b) => b.assert !== null);
+  // A block runs when it has an assert AND (no persona filter is active, or the
+  // block is untagged ("any"), or its tag matches the requested persona). This
+  // is applied before indexing/threading so the block numbers and the scratch
+  // env file only ever reflect blocks that actually run for this persona.
+  const annotated = blocks.filter(
+    (b) =>
+      b.assert !== null &&
+      (opts?.persona === undefined ||
+        b.assert.persona === undefined ||
+        b.assert.persona === opts.persona)
+  );
 
   if (annotated.length === 0) return;
 

@@ -25,7 +25,7 @@ Confirm nodes are Ready:
 ```bash
 kubectl get nodes
 ```
-<!-- e2e:assert {"contains": "Ready"} -->
+<!-- e2e:assert {"contains": "Ready", "persona": "admin"} -->
 
 !!! info "Default StorageClass (cluster-scoped, run once)"
     The platform stack installs the EBS CSI driver, but the cluster ships with
@@ -49,7 +49,7 @@ kubectl get nodes
       encrypted: "true"
     EOF
     ```
-    <!-- e2e:assert {"contains": "storageclass.storage.k8s.io/gp3"} -->
+    <!-- e2e:assert {"contains": "storageclass.storage.k8s.io/gp3", "persona": "admin"} -->
 
 **2. Add Helm repos**
 
@@ -179,7 +179,7 @@ kubectl wait --for=condition=Established \
   crd/certificates.cert-manager.io crd/issuers.cert-manager.io \
   --timeout=120s
 ```
-<!-- e2e:assert {"contains": "condition met"} -->
+<!-- e2e:assert {"contains": "condition met", "persona": "admin"} -->
 
 **5. Create the RisingWave S3 state bucket and service account**
 
@@ -214,7 +214,7 @@ kubectl wait --for=condition=available deployment/risingwave-operator \
 sed -e "s/\${DEPLOYMENT_ID}/ws-slot00/g" -e "s/\${ACCOUNT_ID}/000000000000/g" \
   k8s/risingwave-cloud.yaml | kubectl apply -n ws-slot00 -f -
 ```
-<!-- e2e:assert {"contains": "risingwave-cloud"} -->
+<!-- e2e:assert {"contains": "risingwave-cloud", "persona": "admin"} -->
 
 !!! warning "Service account must exist first"
     The RisingWave CR references `serviceAccountName: risingwave-cloud` (Step 5) — apply the CR only after the service account exists, or the pods will fail to schedule.
@@ -233,7 +233,7 @@ kubectl wait --for=condition=available deployment/cnpg-cloudnative-pg \
 
 kubectl apply -f k8s/timescaledb-cloud-cluster.yaml -n ws-slot00
 ```
-<!-- e2e:assert {"contains": "timescaledb-cloud"} -->
+<!-- e2e:assert {"contains": "timescaledb-cloud", "persona": "admin"} -->
 
 Wait for CNPG to initialize the cluster and generate the `timescaledb-cloud-app` credentials Secret:
 
@@ -272,7 +272,9 @@ kubectl rollout status deployment/risingwave-cloud-frontend-default -n ws-slot00
 # Port-forward — keep running in a separate terminal
 kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567 > /tmp/risingwave-cloud-pf.log 2>&1 &
 RW_PF_PID=$!
-sleep 5
+# Wait for the forward to bind (kubectl logs "Forwarding from") rather than
+# racing a fixed sleep against a slow control plane.
+until grep -q "Forwarding from" /tmp/risingwave-cloud-pf.log 2>/dev/null; do sleep 1; done
 
 # Substitute credentials and apply
 sed -e "s|__MSK_BOOTSTRAP__|$MSK_BOOTSTRAP|g" \
@@ -292,7 +294,7 @@ kubectl get pods -n ws-slot00
 kubectl get pods -n cnpg-system
 kubectl get pods -n risingwave-system
 ```
-<!-- e2e:assert {"contains": "NAME"} -->
+<!-- e2e:assert {"contains": "NAME", "persona": "admin"} -->
 
 All pods should reach `Running` within ~5 minutes of each deploy step.
 

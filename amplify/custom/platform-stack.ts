@@ -43,7 +43,8 @@ import {
   AwsCustomResourcePolicy,
   PhysicalResourceId,
 } from "aws-cdk-lib/custom-resources";
-import { CfnApplication as CfnFlinkApplication } from "aws-cdk-lib/aws-kinesisanalyticsv2";
+import { CfnApplication as CfnFlinkApplication, CfnApplicationCloudWatchLoggingOption } from "aws-cdk-lib/aws-kinesisanalyticsv2";
+import { LogGroup, LogStream, RetentionDays } from "aws-cdk-lib/aws-logs";
 import { CfnWorkGroup } from "aws-cdk-lib/aws-athena";
 import { StringParameter } from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
@@ -761,6 +762,29 @@ export class PlatformStack extends Stack {
     flinkApp.node.addDependency(mskCluster);
     flinkApp.node.addDependency(mskBootstrapIamLookup);
 
+    // CloudWatch logging for the Flink app. Without this the app's JobManager
+    // logs are invisible, so a start-time crash (e.g. an orphaned Iceberg
+    // metadata pointer) silently loops STARTING → READY with no way to diagnose
+    // it (#118). The FlinkRole already grants logs:CreateLogStream/PutLogEvents.
+    const flinkLogGroup = new LogGroup(this, "FlinkLogGroup", {
+      logGroupName: "/aws/kinesis-analytics/workshop-iceberg-sink",
+      retention: RetentionDays.TWO_WEEKS,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    const flinkLogStream = new LogStream(this, "FlinkLogStream", {
+      logGroup: flinkLogGroup,
+      logStreamName: "flink-app",
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    const flinkLogging = new CfnApplicationCloudWatchLoggingOption(this, "FlinkLoggingOption", {
+      applicationName: flinkApp.ref,
+      cloudWatchLoggingOption: {
+        logStreamArn: `arn:aws:logs:${this.region}:${this.account}:log-group:${flinkLogGroup.logGroupName}:log-stream:${flinkLogStream.logStreamName}`,
+      },
+    });
+    flinkLogging.node.addDependency(flinkApp);
+    flinkLogging.node.addDependency(flinkLogStream);
+
     new CfnOutput(this, "FlinkAppName", {
       exportName: "workshop-platform-flink-app-name",
       value: flinkApp.ref,
@@ -806,6 +830,9 @@ export class PlatformStack extends Stack {
       }),
     });
     flinkAppAutoStart.node.addDependency(flinkApp);
+    // Attach logging before the first StartApplication so a start-time crash is
+    // captured from the very first run.
+    flinkAppAutoStart.node.addDependency(flinkLogging);
     }
 
     // ── Athena workgroup ─────────────────────────────────────────────────────

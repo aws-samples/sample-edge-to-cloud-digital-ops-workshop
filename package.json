@@ -14,6 +14,8 @@
     "pipeline-deploy": "npx ampx pipeline-deploy",
     "test": "node scripts/smoke-test.mjs",
     "e2e": "pnpm --filter edge-digital-ops-e2e test",
+    "e2e:admin": "pnpm --filter edge-digital-ops-e2e test:admin",
+    "e2e:participant": "pnpm --filter edge-digital-ops-e2e test:participant",
     "e2e:delete-platform-stack": "pnpm --filter edge-digital-ops-e2e test:delete-platform-stack"
   },
   "devDependencies": {
