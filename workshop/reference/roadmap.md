@@ -38,23 +38,25 @@ interleaves cluster-scoped facilitator steps with namespace-scoped attendee step
 |---|---|---|
 | _(unset, default)_ | calling principal, granted cluster access | **every** annotated block — unchanged `pnpm run e2e` |
 | `admin` (`pnpm run e2e:admin`) | calling principal; `grant-ci-access.sh` grants it cluster-scoped EKS/Cognito access first | blocks tagged `"persona":"admin"` **plus** untagged blocks |
-| `participant` (`pnpm run e2e:participant`) | **`aws` CLI → own (ambient) identity; `kubectl`/`helm` → `WorkshopParticipantRole-<slot>`** | blocks tagged `"persona":"participant"` **plus** untagged blocks |
+| `participant` (`pnpm run e2e:participant`) | **`WorkshopParticipantRole-<slot>`, assumed via STS for both `aws` CLI and `kubectl`/`helm`** | blocks tagged `"persona":"participant"` **plus** untagged blocks |
 
 A block opts into a persona with a `"persona"` key in its `e2e:assert` JSON
 (`{"contains":"Ready","persona":"admin"}`); **omitting it means the block runs
 under both**.
 
-The participant persona models the real attendee identity split: an attendee
-runs the AWS-CLI steps (`iot`, `s3`, `secretsmanager`, `athena`, …) as their own
-workshop IAM user, and assumes `WorkshopParticipantRole-<slot>` **only for
-`kubectl`** — that role is EKS-only (`eks:DescribeCluster` + a namespace-scoped
-`AmazonEKSEditPolicy` access entry). The runner implements this by building a
-throwaway kubeconfig whose exec plugin calls `aws eks get-token --role-arn
-<participant-role>` and pointing `KUBECONFIG` at it; ambient creds stay in effect
-for every plain `aws` call. It never injects the role's creds into the process
-env. The doc's cluster-admin `update-kubeconfig` (Step 1 of block-1-deploy) is
-tagged `persona:admin`, so it's skipped in the participant run and can't clobber
-the role-scoped kubeconfig.
+The participant persona models the real attendee identity — per #123's Model 2
+decision, `WorkshopParticipantRole-<slot>` is the participant's **full**
+identity, not an EKS-only assume-role: an attendee assumes the role once and
+runs every non-admin step (`iot`, `s3`, `secretsmanager`, `athena`, `kubectl`,
+`helm`, …) as that role. The runner implements this with a single STS
+`AssumeRole` call (after SSM config resolution, which still runs on ambient
+creds — the participant role can't read `/workshop/<slot>/*`), injecting the
+returned credentials into `process.env` so every subsequent `aws` call in a
+block runs as the role. It also builds a role-scoped kubeconfig (exec plugin
+calling `aws eks get-token --role-arn <participant-role>`) and points
+`KUBECONFIG` at it, so the doc's cluster-admin `update-kubeconfig` (Step 1 of
+block-1-deploy) — tagged `persona:admin` and skipped in the participant run —
+can't clobber it.
 
 ## Latest run — 2026-07-30 on `ws-slot06`: 47/66 blocks passed
 
