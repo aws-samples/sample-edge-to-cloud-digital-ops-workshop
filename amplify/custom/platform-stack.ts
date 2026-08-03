@@ -29,6 +29,7 @@ import {
 } from "aws-cdk-lib/aws-eks";
 import {
   CfnCluster as MskCluster,
+  CfnClusterPolicy as MskClusterPolicy,
 } from "aws-cdk-lib/aws-msk";
 import {
   Bucket,
@@ -459,6 +460,24 @@ export class PlatformStack extends Stack {
             volumeSize: 50,
           },
         },
+        // Firehose reaches the cluster over PrivateLink (MSKAsSource, PRIVATE
+        // connectivity), which requires multi-VPC private connectivity enabled
+        // for the IAM auth scheme. In the AWS::MSK::Cluster schema this lives
+        // under BrokerNodeGroupInfo.connectivityInfo (NOT a top-level property).
+        // Toggling it on the existing cluster triggers a rolling broker reboot
+        // (~30 min); SASL/IAM data-plane clients are unaffected. Paired with the
+        // CfnClusterPolicy below granting Firehose CreateVpcConnection.
+        connectivityInfo: {
+          vpcConnectivity: {
+            clientAuthentication: {
+              sasl: {
+                iam: {
+                  enabled: true,
+                },
+              },
+            },
+          },
+        },
       },
       clientAuthentication: {
         sasl: {
@@ -485,6 +504,31 @@ export class PlatformStack extends Stack {
       exportName: "workshop-platform-msk-arn",
       value: mskCluster.attrArn,
     });
+
+    // Cluster resource-based policy authorizing the Firehose service principal to
+    // establish the managed VPC connection used by MSKAsSource PRIVATE
+    // connectivity. Without it, Firehose stream CREATE fails "Private Link with
+    // SASL IAM must be enabled on MSK Cluster to use PRIVATE connectivity".
+    const mskClusterPolicy = new MskClusterPolicy(this, "MskClusterPolicy", {
+      clusterArn: mskCluster.attrArn,
+      policy: {
+        Version: "2012-10-17",
+        Statement: [
+          {
+            Effect: "Allow",
+            Principal: { Service: "firehose.amazonaws.com" },
+            Action: [
+              "kafka:CreateVpcConnection",
+              "kafka:GetBootstrapBrokers",
+              "kafka:DescribeCluster",
+              "kafka:DescribeClusterV2",
+            ],
+            Resource: mskCluster.attrArn,
+          },
+        ],
+      },
+    });
+    mskClusterPolicy.node.addDependency(mskCluster);
 
     // Resolve SASL/SCRAM bootstrap broker string via a custom resource —
     // MSK's CFN resource doesn't expose it as a direct attribute.
@@ -801,6 +845,10 @@ export class PlatformStack extends Stack {
     // addDependency on the L2 Role pulls in its whole subtree, including DefaultPolicy.
     telemetryFirehoseStream.node.addDependency(firehoseMskRole);
     telemetryFirehoseStream.node.addDependency(firehoseDeliveryRole);
+    // The cluster resource-based policy (Firehose CreateVpcConnection) and the
+    // multi-VPC connectivity toggle must both be in effect before Firehose
+    // validates PRIVATE connectivity to the MSK source.
+    telemetryFirehoseStream.node.addDependency(mskClusterPolicy);
 
     new CfnOutput(this, "TelemetryFirehoseStreamName", {
       exportName: "workshop-platform-firehose-stream-name",
