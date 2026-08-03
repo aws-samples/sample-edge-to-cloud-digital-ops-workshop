@@ -40,6 +40,29 @@ ensure_no_orphan_nat_ssm() {
   aws ssm delete-parameter --name "$param" >/dev/null 2>&1 || true
 }
 
+# The platform stack now manages the workshop_telemetry Glue database/table as
+# CFN resources (Firehose → Iceberg sink). On accounts that previously ran the
+# old Flink pipeline, these exist as out-of-band orphans (created at runtime by
+# the Flink app, never by CFN); CFN can't *create* a managed database on top of
+# an existing unmanaged one. Before (re)deploying the platform stack, delete the
+# orphan — but never one that is already a resource of the stack (that one
+# belongs to CFN).
+ensure_no_orphan_glue_telemetry_table() {
+  local stack_name="$1"
+  local db="workshop_telemetry"
+  local table="telemetry"
+  aws glue get-database --name "$db" >/dev/null 2>&1 || return 0  # nothing there
+  # Is the database already a resource of the platform stack? If so, leave it.
+  if aws cloudformation describe-stack-resources --stack-name "$stack_name" \
+      --query "StackResources[?ResourceType=='AWS::Glue::Database'].PhysicalResourceId" \
+      --output text 2>/dev/null | grep -qx "$db"; then
+    return 0
+  fi
+  echo ">>> Deleting orphaned Glue table/database $db.$table (not stack-managed) before platform deploy."
+  aws glue delete-table --database-name "$db" --name "$table" >/dev/null 2>&1 || true
+  aws glue delete-database --name "$db" >/dev/null 2>&1 || true
+}
+
 echo ">>> Deployment ID: $DEPLOYMENT_ID"
 
 # ── Check whether the platform stack is fully deployed ──────────────────────
@@ -60,20 +83,6 @@ else
 fi
 
 if [[ -z "$PLATFORM_STACK" ]]; then
-  # The Managed Flink app reads its code JAR from the shared bucket this same
-  # stack creates. On a fresh account neither exists yet, so deploy without
-  # the Flink app first — scripts/sandbox-all.sh is what actually builds and
-  # uploads the JAR and redeploys with the Flink app enabled; this path just
-  # needs to not roll back everything else while waiting for that to happen.
-  ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-  DEPLOY_CONTEXT_ARGS=()
-  if ! aws s3api head-object \
-      --bucket "workshop-platform-${ACCOUNT_ID}" \
-      --key "flink-apps/flink-iceberg-sink-1.0.0.jar" >/dev/null 2>&1; then
-    echo ">>> Flink JAR not found yet — deploying platform stack without the Flink app."
-    echo ">>> Run scripts/sandbox-all.sh once to build/upload the JAR and enable it."
-    DEPLOY_CONTEXT_ARGS=(--context deployFlinkApp=false)
-  fi
   # The platform stack now owns the /workshop/platform/edge-nat-gateway-id SSM
   # parameter (see platform-stack.ts). On accounts first provisioned with an
   # older platform stack the parameter exists as an out-of-band orphan written
@@ -82,11 +91,13 @@ if [[ -z "$PLATFORM_STACK" ]]; then
   # deployed platform stack (a param that's already CFN-managed must be left for
   # the stack update to reconcile).
   ensure_no_orphan_nat_ssm "WorkshopPlatformStack"
+  # Same reconciliation, for the workshop_telemetry Glue database/table now
+  # owned by the platform stack (Firehose → Iceberg sink) — see #128.
+  ensure_no_orphan_glue_telemetry_table "WorkshopPlatformStack"
   echo ">>> Deploying WorkshopPlatformStack..."
   npx cdk deploy \
     --app "$PLATFORM_APP" \
     --require-approval never \
-    "${DEPLOY_CONTEXT_ARGS[@]+"${DEPLOY_CONTEXT_ARGS[@]}"}" \
     "WorkshopPlatformStack"
   echo ">>> Platform stack deployed."
 fi

@@ -19,14 +19,6 @@ cdk.out**
 
 workshop-site.zip
 
-# Maven build output
-**/target/
-
-# Vendored Kafka Connect plugin JARs (too large for git; rebuild with build-plugin.sh)
-local-kafka-connect/plugins/
-local-kafka-connect/.jar-cache/
-local-kafka-connect/hudi-kafka-connect-bundle-0.14.1.jar
-
 # Generated deployment artifact (contains account-specific ARNs)
 DEPLOYMENT_SUMMARY.md
 
