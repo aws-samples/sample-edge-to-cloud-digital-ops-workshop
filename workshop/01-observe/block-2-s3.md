@@ -23,7 +23,7 @@
 - Why would Firehose write batches rather than one file per message? (Hint: think about S3 object count and small-file overhead in Athena.)
 
 !!! info "The production path"
-    In a production deployment, Amazon Data Firehose reads from the MSK topic and writes Parquet files into an Iceberg table with time-based partitioning. This gives Athena faster queries, 90–95% compression, and automatic schema evolution. The Glue Data Catalog table is registered on first write — no crawler needed. Sessions 5–7 show the full path.
+    In a production deployment, Amazon Data Firehose reads from the MSK topic and writes Parquet files into an Iceberg table with time-based partitioning. This gives Athena faster queries, 90–95% compression, and automatic schema evolution. The platform stack creates the Iceberg table in the Glue Data Catalog up front — no crawler needed, and Firehose writes into that existing table rather than registering it on first write. Sessions 5–7 show the full path.
 
 ---
 

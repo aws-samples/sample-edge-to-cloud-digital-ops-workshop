@@ -41,4 +41,4 @@ Session 4 is the first session you drive from your own laptop against the shared
 | Live push (IoT → AppSync) | No database — direct WebSocket push | ~10–80 ms |
 | RisingWave MV | Incremental streaming compute (50 ms barrier) | ~300–600 ms |
 | TimescaleDB (live scan) | Redpanda Connect 1 s batch + direct query | ~1–3 s |
-| Iceberg / Athena | Firehose buffering interval + Iceberg commit | ~25–90 s |
+| Iceberg / Athena | Firehose buffering interval + Iceberg commit | ~300 s (up to ~15 min under low throughput) |

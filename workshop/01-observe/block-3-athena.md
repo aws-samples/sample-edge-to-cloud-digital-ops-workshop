@@ -63,7 +63,7 @@
         ```
         <!-- e2e:assert {"contains": "SUCCEEDED"} -->
 
-4. Observe that freshness is typically **30–90 seconds** — because data flows IoT Rule → MSK → Iceberg table in S3. Amazon Data Firehose buffers messages and commits Parquet files into the Iceberg table on a timed interval rather than writing one object per MQTT message.
+4. Observe that freshness is typically **~300 seconds** (Firehose's 5-minute buffering interval), and can run up to ~15 minutes under very low throughput — because data flows IoT Rule → MSK → Iceberg table in S3. Amazon Data Firehose buffers messages and commits Parquet files into the Iceberg table on a timed interval rather than writing one object per MQTT message.
 
 !!! info "Why not a direct IoT Rule → S3 path?"
     A direct IoT Rule → S3 action (one S3 object per message) would yield lower latency but creates millions of tiny files that make Athena scans expensive. The MSK → Firehose → Iceberg path batches writes into time-partitioned Parquet files, which trades a bit of freshness for dramatically lower scan cost.

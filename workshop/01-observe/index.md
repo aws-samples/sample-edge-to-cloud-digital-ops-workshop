@@ -26,4 +26,4 @@
 
 ## Key Takeaway
 
-By the end of this session you will have measured the **data freshness floor** of the archive tier (Iceberg/Athena: 30–90 seconds) and understood why it cannot serve a live operational dashboard. This sets up the motivation for the higher-frequency tiers introduced in Sessions 3–4.
+By the end of this session you will have measured the **data freshness floor** of the archive tier (Iceberg/Athena: ~300 seconds, up to ~15 minutes under low throughput) and understood why it cannot serve a live operational dashboard. This sets up the motivation for the higher-frequency tiers introduced in Sessions 3–4.
