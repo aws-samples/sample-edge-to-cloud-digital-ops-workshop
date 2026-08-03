@@ -229,11 +229,17 @@ const [, SHARED_BUCKET, GRAPHQL_ENDPOINT] = ssmValues as string[];
 // non-admin step (aws CLI *and* kubectl/helm) as that role. So we AssumeRole
 // via STS and inject the returned creds into process.env — every block
 // inherits process.env, so both `aws` and `kubectl`/`helm` (via the
-// `aws eks get-token` exec plugin) run as the participant role. We still
-// build a role-scoped kubeconfig (rather than relying on ambient
-// update-kubeconfig) so KUBECONFIG can't be clobbered by the doc's own
-// cluster-admin `update-kubeconfig` step, which is tagged persona:admin and
-// skipped here.
+// `aws eks get-token` exec plugin) run as the participant role. We build a
+// dedicated kubeconfig (rather than relying on ambient update-kubeconfig) so
+// KUBECONFIG can't be clobbered by the doc's own cluster-admin
+// `update-kubeconfig` step, which is tagged persona:admin and skipped here.
+//
+// The kubeconfig is built WITHOUT --role-arn: the injected process.env creds
+// already ARE the participant role, so the exec plugin's `aws eks get-token`
+// mints a token for that identity directly. Passing --role-arn would make the
+// plugin call sts:AssumeRole on the participant role FROM the participant role
+// (self-assume) — which the role can't (and a real attendee never would) do,
+// failing every kubectl block with AccessDenied on sts:AssumeRole.
 //
 // This assumption happens AFTER SSM resolution above, which must run on
 // ambient creds — the participant role can't read /workshop/<slot>/* params.
@@ -262,7 +268,9 @@ if (PERSONA === "participant") {
         "eks", "update-kubeconfig",
         "--name", "workshop-eks",
         "--region", REGION,
-        "--role-arn", participantRoleArn,
+        // No --role-arn: process.env already holds the assumed participant-role
+        // creds, so the exec plugin gets a token AS the role. Adding --role-arn
+        // would trigger a self-assume (role assuming itself) → AccessDenied.
         "--kubeconfig", kubeconfigPath,
       ],
       { stdio: "pipe", env: { ...process.env } }
