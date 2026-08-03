@@ -52,11 +52,13 @@ runs every non-admin step (`iot`, `s3`, `secretsmanager`, `athena`, `kubectl`,
 `AssumeRole` call (after SSM config resolution, which still runs on ambient
 creds — the participant role can't read `/workshop/<slot>/*`), injecting the
 returned credentials into `process.env` so every subsequent `aws` call in a
-block runs as the role. It also builds a role-scoped kubeconfig (exec plugin
-calling `aws eks get-token --role-arn <participant-role>`) and points
-`KUBECONFIG` at it, so the doc's cluster-admin `update-kubeconfig` (Step 1 of
-block-1-deploy) — tagged `persona:admin` and skipped in the participant run —
-can't clobber it.
+block runs as the role. It also builds a dedicated kubeconfig (exec plugin
+calling `aws eks get-token` with **no** `--role-arn` — the injected env creds
+already _are_ the role, so adding `--role-arn` would make the plugin assume the
+participant role _from_ the participant role, a self-assume that fails
+`AccessDenied`) and points `KUBECONFIG` at it, so the doc's cluster-admin
+`update-kubeconfig` (Step 1 of block-1-deploy) — tagged `persona:admin` and
+skipped in the participant run — can't clobber it.
 
 ## Latest run — 2026-07-30 on `ws-slot06`: 47/66 blocks passed
 
