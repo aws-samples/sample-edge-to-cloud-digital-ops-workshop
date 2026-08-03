@@ -6,12 +6,16 @@
 # and the participant stacks do NOT cover for a principal that didn't create the
 # cluster (issue #70):
 #
-#   1. An EKS access entry on `workshop-eks` (AmazonEKSAdminPolicy, cluster
-#      scope) — without it every kubectl block in 04-analytics fails with
-#      "You must be logged in to the server". This mirrors exactly what
-#      PlatformStack does for `eksAdminPrincipalArns` (platform-stack.ts), so the
-#      durable fix is to pass the role there; this script is the live/idempotent
-#      apply for a cluster that already exists.
+#   1. An EKS access entry on `workshop-eks` (AmazonEKSClusterAdminPolicy,
+#      cluster scope) — without it every kubectl block in 04-analytics fails with
+#      "You must be logged in to the server". Note it must be the *ClusterAdmin*
+#      policy, not AmazonEKSAdminPolicy: the latter maps to the built-in `admin`
+#      ClusterRole (namespace-admin only), which is Forbidden from the
+#      cluster-scoped operations 04-analytics/block-1-deploy performs — listing
+#      nodes, creating namespaces, installing CRDs, applying a StorageClass.
+#      This mirrors exactly what PlatformStack does for `eksAdminPrincipalArns`
+#      (platform-stack.ts), so the durable fix is to pass the role there; this
+#      script is the live/idempotent apply for a cluster that already exists.
 #   2. Cognito admin write (AdminCreateUser + AdminSetUserPassword) scoped to the
 #      account's user pools — needed by scripts/create-workshop-user.sh, called
 #      from 03-state/block-3-ui.md.
@@ -63,7 +67,7 @@ echo "  Region:  $REGION"
 echo "  Cluster: $EKS_CLUSTER"
 echo ""
 
-# ── 1. EKS access entry (cluster-scoped AmazonEKSAdminPolicy) ─────────────────
+# ── 1. EKS access entry (cluster-scoped AmazonEKSClusterAdminPolicy) ──────────
 echo "--- EKS access entry on $EKS_CLUSTER ---"
 if aws eks describe-access-entry --region "$REGION" --cluster-name "$EKS_CLUSTER" \
      --principal-arn "$ROLE_ARN" >/dev/null 2>&1; then
@@ -75,7 +79,7 @@ fi
 # associate-access-policy is idempotent (overwrites the scope for this policy).
 run aws eks associate-access-policy --region "$REGION" --cluster-name "$EKS_CLUSTER" \
   --principal-arn "$ROLE_ARN" \
-  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSAdminPolicy \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
   --access-scope type=cluster
 
 # ── 2. Cognito admin write (scoped to this account's user pools) ──────────────

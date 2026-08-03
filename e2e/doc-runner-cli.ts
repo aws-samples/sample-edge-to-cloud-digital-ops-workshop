@@ -16,28 +16,78 @@
  * tears down the shared platform stack: VPCs, EKS, MSK) is refused — pass
  * --delete-platform-stack to opt in.
  *
+ * Personas (--persona / E2E_PERSONA):
+ *   (unset)      run every annotated block regardless of persona tag (default)
+ *   admin        run admin + untagged blocks as a cluster-admin principal; the
+ *                calling role is granted cluster-scoped EKS/Cognito access first
+ *   participant  run participant + untagged blocks the way a real attendee does:
+ *                plain `aws` CLI uses the caller's own (ambient) identity, while
+ *                `kubectl`/`helm` assume WorkshopParticipantRole-<slot> via a
+ *                role-scoped kubeconfig (namespace-scoped EKS access). No
+ *                cluster-admin grant is performed.
+ *
+ * Pass --report-out <path> (or set E2E_REPORT_OUT) to additionally write the
+ * run summary to a markdown file. If <path> is a directory (or the flag/env
+ * var is set with no live value, defaulting to e2e/reports/), the file is
+ * named YYYY-MM-DD-<deployment-id>.md. stdout output is unchanged either way.
+ *
  * Environment variables:
  *   WORKSHOP_TEST_SLOT          deployment ID (default: ws-e2e-test)
  *   AWS_REGION                  AWS region (default: us-east-1)
  *   E2E_DELETE_PLATFORM_STACK   "true" to also allow platform-teardown blocks (default: false)
+ *   E2E_PERSONA                 "admin" | "participant" (default: unset — all blocks)
+ *   E2E_SKIP_EKS_GRANT          "true" to skip the best-effort EKS/Cognito access
+ *                               grant in the admin persona (default: false — see below)
+ *   E2E_REPORT_OUT              path to write the run report to (see --report-out above)
  */
 
 import { join, relative } from "node:path";
-import { readdirSync, statSync } from "node:fs";
+import { readdirSync, statSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-import { runDocBlocks, type BlockResult } from "./doc-runner.js";
+import { runDocBlocks, type BlockResult, type Persona } from "./doc-runner.js";
+import { resolveReportPath, renderReport } from "./report.js";
 
 const REPO_ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
+const USAGE = [
+  "Usage: doc-runner-cli.ts <path-to-workshop-md-file-or-dir> [<path> ...] [options]",
+  "",
+  "Options:",
+  "  --deployment-id <id>      Deployment slot to test against (default: $WORKSHOP_TEST_SLOT or ws-e2e-test)",
+  "  --delete-platform-stack   Also allow blocks annotated <!-- e2e:platform-teardown -->",
+  "  --persona <admin|participant>",
+  "                            Run under a specific persona's identity (env: E2E_PERSONA).",
+  "                            Default: unset — run every annotated block regardless of persona tag.",
+  "  --report-out <path>       Write the run summary to a markdown file, in addition to stdout.",
+  "                            If <path> is a directory (default: e2e/reports/), the file is named",
+  "                            YYYY-MM-DD-<deployment-id>.md. (env: E2E_REPORT_OUT)",
+  "  --help, -h                Show this help",
+].join("\n");
+
 const args = process.argv.slice(2);
+
+if (args.includes("--help") || args.includes("-h")) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+// Flags that take a value — the token after them is the value, not a path arg.
+const VALUE_FLAGS = new Set(["--deployment-id", "--persona", "--report-out"]);
 const pathArgs = args.filter(
-  (a, i) => !a.startsWith("--") && args[i - 1] !== "--deployment-id"
+  (a, i) => !a.startsWith("--") && !VALUE_FLAGS.has(args[i - 1])
 );
 if (pathArgs.length === 0) {
-  console.error("Usage: doc-runner-cli.ts <path-to-workshop-md-file-or-dir> [<path> ...] [--deployment-id <id>]");
+  console.error(USAGE);
   process.exit(1);
 }
+
+// Directories that never contain workshop source docs — skip them when walking
+// a tree so vendored/build artefacts (e.g. a local `.venv` of MkDocs deps, or
+// the built site) don't get scanned for e2e:assert blocks.
+const SKIP_DIRS = new Set([".venv", "node_modules", "site", ".git"]);
 
 function collectMdFiles(path: string): string[] {
   const stat = statSync(path);
@@ -48,6 +98,7 @@ function collectMdFiles(path: string): string[] {
   for (const entry of readdirSync(path, { withFileTypes: true })) {
     const full = join(path, entry.name);
     if (entry.isDirectory()) {
+      if (SKIP_DIRS.has(entry.name)) continue;
       out.push(...collectMdFiles(full));
     } else if (entry.isFile() && entry.name.endsWith(".md")) {
       out.push(full);
@@ -78,10 +129,72 @@ const REGION = process.env.AWS_REGION ?? "us-east-1";
 const ALLOW_PLATFORM_TEARDOWN =
   process.env.E2E_DELETE_PLATFORM_STACK === "true" || args.includes("--delete-platform-stack");
 
+const personaIdx = args.indexOf("--persona");
+const PERSONA_RAW = personaIdx !== -1 ? args[personaIdx + 1] : process.env.E2E_PERSONA;
+if (PERSONA_RAW !== undefined && PERSONA_RAW !== "admin" && PERSONA_RAW !== "participant") {
+  console.error(`Invalid --persona "${PERSONA_RAW}" — expected "admin" or "participant".`);
+  process.exit(1);
+}
+const PERSONA = PERSONA_RAW as Persona | undefined;
+
+const reportOutIdx = args.indexOf("--report-out");
+const REPORT_OUT_RAW =
+  reportOutIdx !== -1 ? args[reportOutIdx + 1] : process.env.E2E_REPORT_OUT;
+
 const ssm = new SSMClient({ region: REGION });
 const sts = new STSClient({ region: REGION });
 
-const ACCOUNT_ID = (await sts.send(new GetCallerIdentityCommand({}))).Account!;
+const callerIdentity = await sts.send(new GetCallerIdentityCommand({}));
+const ACCOUNT_ID = callerIdentity.Account!;
+
+// Persona setup — two mutually exclusive credential paths (participant
+// assumption happens later, after SSM config is resolved with ambient creds,
+// since the participant role can't read SSM):
+//
+//   admin (or unset) — the calling principal acts as cluster-admin. Best-effort
+//     grant it the cluster-scoped EKS access (and Cognito admin write) that the
+//     cluster-scoped installs (cert-manager, operators, default StorageClass)
+//     and create-workshop-user need. A CI/facilitator role that didn't create
+//     the cluster is otherwise invisible to the cluster's RBAC and every kubectl
+//     block fails "the server has asked for the client to provide credentials".
+//     grant-ci-access.sh is idempotent; the grant is never fatal (a grant
+//     problem shouldn't masquerade as a doc defect).
+//
+//   participant — handled after SSM resolution below: ASSUME
+//     WorkshopParticipantRole-<slot> so the run exercises exactly the
+//     namespace-scoped access a real attendee has. No cluster-admin grant.
+if (PERSONA !== "participant" && process.env.E2E_SKIP_EKS_GRANT !== "true") {
+  // admin (or unset default): grant the calling role cluster access.
+  // The caller is an assumed-role session ARN
+  // (arn:aws:sts::ACCT:assumed-role/<RoleName>/<session>); EKS access entries key
+  // on the underlying IAM role ARN (arn:aws:iam::ACCT:role/<RoleName>). Convert.
+  const callerArn = callerIdentity.Arn ?? "";
+  const assumedRole = callerArn.match(/^arn:aws:sts::(\d+):assumed-role\/([^/]+)\//);
+  const roleArn = assumedRole
+    ? `arn:aws:iam::${assumedRole[1]}:role/${assumedRole[2]}`
+    : callerArn.includes(":role/")
+    ? callerArn
+    : "";
+  const roleName = roleArn ? roleArn.split("/").pop()! : "";
+  // Participant roles are already namespace-scoped by CDK and lack the IAM perms
+  // to grant themselves anything — don't attempt (and don't warn).
+  if (roleArn && !roleName.startsWith("WorkshopParticipantRole")) {
+    try {
+      execFileSync(
+        join(REPO_ROOT, "scripts/grant-ci-access.sh"),
+        ["--role-arn", roleArn],
+        { stdio: "pipe", env: { ...process.env, AWS_REGION: REGION } }
+      );
+      console.log(`  EKS/Cognito access     : granted to ${roleName}`);
+    } catch (err) {
+      // Non-fatal: the role may already have access, or lack eks:CreateAccessEntry.
+      const msg = err instanceof Error && "stderr" in err ? String((err as { stderr?: Buffer }).stderr ?? err.message) : String(err);
+      console.warn(`  EKS/Cognito access     : grant skipped (${msg.trim().split("\n").pop()})`);
+      console.warn("    Set E2E_SKIP_EKS_GRANT=true to silence, or grant manually:");
+      console.warn(`    scripts/grant-ci-access.sh --role-arn ${roleArn}`);
+    }
+  }
+}
 
 // Resolve deployment config from SSM (published by the CDK stacks themselves)
 // rather than deriving it by naming convention — this fails fast with a clear
@@ -109,6 +222,54 @@ if (missing.length > 0) {
 }
 const [, SHARED_BUCKET, GRAPHQL_ENDPOINT] = ssmValues as string[];
 
+// participant persona: model the real attendee's identity split.
+//
+//   AWS CLI calls  → the participant's OWN (ambient) identity. A real attendee
+//     runs the `aws iot/s3/secretsmanager/athena/...` commands as their normal
+//     workshop IAM user; they do NOT route those through WorkshopParticipantRole
+//     (which is EKS-only, holding just eks:DescribeCluster).
+//   kubectl / helm → assume WorkshopParticipantRole-<slot>. We build a throwaway
+//     kubeconfig whose exec plugin calls `aws eks get-token --role-arn <role>`,
+//     so only the in-cluster identity is the namespace-scoped role, exactly the
+//     access an attendee gets from `update-kubeconfig --role-arn`.
+//
+// We do NOT inject the role's creds into the process env — that would force every
+// `aws` call through the EKS-only role and fail. KUBECONFIG points kubectl at the
+// role-scoped config; ambient creds stay in effect for everything else. The doc's
+// own plain `update-kubeconfig` (cluster-admin form) is tagged persona:admin so
+// it's skipped here and can't clobber this config.
+let personaLabel = "any (all blocks)";
+if (PERSONA === "participant") {
+  const participantRoleArn = `arn:aws:iam::${ACCOUNT_ID}:role/WorkshopParticipantRole-${DEPLOYMENT_ID}`;
+  const kubeconfigPath = join(tmpdir(), `e2e-participant-kubeconfig-${DEPLOYMENT_ID}`);
+  try {
+    execFileSync(
+      "aws",
+      [
+        "eks", "update-kubeconfig",
+        "--name", "workshop-eks",
+        "--region", REGION,
+        "--role-arn", participantRoleArn,
+        "--kubeconfig", kubeconfigPath,
+      ],
+      { stdio: "pipe", env: { ...process.env } }
+    );
+    // Every block inherits process.env, so kubectl/helm/aws-eks-get-token in the
+    // blocks read this KUBECONFIG and assume the participant role for tokens.
+    process.env.KUBECONFIG = kubeconfigPath;
+    personaLabel = `participant (kubectl→${participantRoleArn.split("/").pop()}, aws→ambient)`;
+  } catch (err) {
+    const msg = err instanceof Error && "stderr" in err ? String((err as { stderr?: Buffer }).stderr ?? err.message) : String(err);
+    console.error(`Persona participant — FAILED to build role-scoped kubeconfig for ${participantRoleArn}`);
+    console.error(`  ${msg.trim().split("\n").pop()}`);
+    console.error("  Ensure the slot is deployed and your identity has sts:AssumeRole on that role.");
+    process.exit(1);
+  }
+} else if (PERSONA === "admin") {
+  personaLabel = "admin (cluster-scoped)";
+}
+
+console.log(`  Persona                : ${personaLabel}`);
 console.log(`  Doc files              : ${mdPaths.length}`);
 console.log(`  Deployment ID          : ${DEPLOYMENT_ID}`);
 console.log(`  Region                 : ${REGION}`);
@@ -143,7 +304,7 @@ for (const mdPath of mdPaths) {
           console.error(`       ${r.error}`);
         }
       },
-      { allowPlatformTeardown: ALLOW_PLATFORM_TEARDOWN }
+      { allowPlatformTeardown: ALLOW_PLATFORM_TEARDOWN, persona: PERSONA }
     );
   } catch (err) {
     console.error(`  ✗  ${err instanceof Error ? err.message : String(err)}`);
@@ -183,6 +344,19 @@ for (const { file, results } of fileSummaries) {
 
 console.log("");
 console.log(`  ${totalPassed}/${totalBlocks} blocks passed across ${mdPaths.length} file(s)`);
+
+if (REPORT_OUT_RAW !== undefined) {
+  const runDate = new Date().toISOString().slice(0, 10);
+  const reportPath = resolveReportPath(REPORT_OUT_RAW || "e2e/reports/", REPO_ROOT, DEPLOYMENT_ID, runDate);
+  const report = renderReport(
+    fileSummaries.map(({ file, results }) => ({ file: relative(REPO_ROOT, file), results })),
+    { deploymentId: DEPLOYMENT_ID, region: REGION, accountId: ACCOUNT_ID, runDate }
+  );
+
+  mkdirSync(join(reportPath, ".."), { recursive: true });
+  writeFileSync(reportPath, report);
+  console.log(`  Report written to      : ${relative(REPO_ROOT, reportPath)}`);
+}
 
 const anyFailed = fileSummaries.some(({ results }) => results.some((r) => !r.passed));
 process.exit(anyFailed ? 1 : 0);

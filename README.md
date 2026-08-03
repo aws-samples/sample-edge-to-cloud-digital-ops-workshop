@@ -69,6 +69,23 @@ WORKSHOP_TEST_SLOT=ws-slot00 node scripts/smoke-test.mjs
 
 Verifies: `amplify_outputs.json`, Cognito user pool, IoT provisioning template, S3 bucket, Athena workgroup, IoT topic rule, and 3 running EC2 instances.
 
+### End-to-end tests
+
+The e2e suite is a doc-runner: it extracts every bash block annotated with `<!-- e2e:assert {...} -->` in `workshop/*.md` and runs it against a live slot, so the published docs are themselves the test suite.
+
+```bash
+# Run every workshop doc against a slot (defaults to ws-e2e-test)
+WORKSHOP_TEST_SLOT=ws-slot00 pnpm run e2e
+
+# Run a single doc file against a slot
+cd e2e && pnpm test:doc-runner -- workshop/02-control/block-2-iot-job.md
+
+# Target a specific slot explicitly
+cd e2e && pnpm test:doc-runner -- workshop --deployment-id ws-slot00
+```
+
+The slot must already be deployed (`pnpm run sandbox ws-slot00`). Blocks that would tear down shared platform infrastructure are annotated `<!-- e2e:platform-teardown -->` and are refused unless you pass `pnpm run e2e:delete-platform-stack` (or `E2E_DELETE_PLATFORM_STACK=true`) — a normal run never destroys the shared VPC/EKS/MSK.
+
 ### Create a participant Cognito user
 
 ```bash

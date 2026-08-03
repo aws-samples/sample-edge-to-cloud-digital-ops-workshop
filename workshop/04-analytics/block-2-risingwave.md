@@ -11,7 +11,8 @@ RisingWave's PostgreSQL wire protocol listens on **port 4567** (not 4566, which 
 ```bash
 kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567 > /tmp/rw-cloud-pf.log 2>&1 &
 RW_PF_PID=$!
-sleep 5
+# Wait for the forward to bind rather than racing a fixed sleep.
+until grep -q "Forwarding from" /tmp/rw-cloud-pf.log 2>/dev/null; do sleep 1; done
 psql -h localhost -p 4567 -U root -d dev -c "SELECT 1;"
 kill "$RW_PF_PID" 2>/dev/null || true
 ```
@@ -43,7 +44,7 @@ MSK_PASS=$(aws secretsmanager get-secret-value \
 # CREATE ... IF NOT EXISTS, so this is safe to re-run.
 kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567 > /tmp/rw-cloud-pf2.log 2>&1 &
 RW_PF_PID=$!
-sleep 5
+until grep -q "Forwarding from" /tmp/rw-cloud-pf2.log 2>/dev/null; do sleep 1; done
 sed -e "s|__MSK_BOOTSTRAP__|$MSK_BOOTSTRAP|g" \
     -e "s|__MSK_USER__|$MSK_USER|g" \
     -e "s|__MSK_PASS__|$MSK_PASS|g" \

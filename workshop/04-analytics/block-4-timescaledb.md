@@ -13,7 +13,9 @@ TSDB_PASS=$(kubectl get secret timescaledb-cloud-app -n ws-slot00 \
   -o jsonpath='{.data.password}' | base64 -d)
 kubectl port-forward -n ws-slot00 svc/timescaledb-cloud-rw 5432:5432 > /tmp/tsdb-cloud-pf.log 2>&1 &
 TSDB_PF_PID=$!
-sleep 5
+# Wait until the forward is actually bound — kubectl logs "Forwarding from" once
+# the local port is listening. A fixed `sleep` races a slow control plane.
+until grep -q "Forwarding from" /tmp/tsdb-cloud-pf.log 2>/dev/null; do sleep 1; done
 PGPASSWORD="$TSDB_PASS" psql -h localhost -p 5432 -U workshop -d edge -c "SELECT 1;"
 kill "$TSDB_PF_PID" 2>/dev/null || true
 ```
@@ -66,7 +68,8 @@ TSDB_PASS=$(kubectl get secret timescaledb-cloud-app -n ws-slot00 \
   -o jsonpath='{.data.password}' | base64 -d)
 kubectl port-forward -n ws-slot00 svc/timescaledb-cloud-rw 5432:5432 > /tmp/tsdb-cagg-pf.log 2>&1 &
 TSDB_PF_PID=$!
-sleep 5
+# Wait for the forward to bind rather than racing it with a fixed sleep.
+until grep -q "Forwarding from" /tmp/tsdb-cagg-pf.log 2>/dev/null; do sleep 1; done
 PGPASSWORD="$TSDB_PASS" psql -h localhost -p 5432 -U workshop -d edge -v ON_ERROR_STOP=1 <<'SQL'
 CREATE MATERIALIZED VIEW IF NOT EXISTS cpu_hourly
 WITH (timescaledb.continuous) AS

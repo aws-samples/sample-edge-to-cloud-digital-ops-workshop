@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "test": "tsx doc-runner-cli.ts workshop",
+    "test:admin": "tsx doc-runner-cli.ts workshop --persona admin",
+    "test:participant": "tsx doc-runner-cli.ts workshop --persona participant",
     "test:delete-platform-stack": "tsx doc-runner-cli.ts workshop --delete-platform-stack",
     "test:doc-runner": "tsx doc-runner-cli.ts"
   },

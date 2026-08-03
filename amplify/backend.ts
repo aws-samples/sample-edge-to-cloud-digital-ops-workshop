@@ -53,8 +53,19 @@ const customResources = backend.createStack("WorkshopCustomResources");
 
 // ParticipantStack has a concrete env, so Vpc.fromLookup resolves correctly
 // inside it. The VPC IDs are looked up there, not here.
-new ParticipantStack(customResources, `Participant-${deploymentId}`, {
+const participantStack = new ParticipantStack(customResources, `Participant-${deploymentId}`, {
   deploymentId,
   graphqlEndpoint: `workshop-${deploymentId}-graphql-endpoint`,
   env: { account, region },
 });
+
+// ParticipantStack resolves the GraphQL endpoint via Fn.importValue on the
+// export created above (in the data stack). Because that link is a string
+// export name rather than a CDK token reference (deliberate — it dodges CDK's
+// cross-env-stack reference validation), CDK has no implicit dependency edge
+// and would otherwise deploy Participant first. On a fresh slot the export
+// doesn't exist yet, so the import fails and the stack rolls back. Declare the
+// ordering explicitly so the data stack (which creates the export) deploys
+// first. addDependency only orders deployment; it introduces no token
+// reference, so the cross-env validation stays clear.
+participantStack.addDependency(backend.data.stack);

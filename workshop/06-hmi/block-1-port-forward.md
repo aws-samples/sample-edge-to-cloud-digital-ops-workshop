@@ -9,7 +9,8 @@
 ```bash
 kubectl port-forward -n edge svc/hmi 3000:3000 > /tmp/hmi-pf.log 2>&1 &
 HMI_PF_PID=$!
-sleep 5
+# Wait for the forward to bind rather than racing a fixed sleep.
+until grep -q "Forwarding from" /tmp/hmi-pf.log 2>/dev/null; do sleep 1; done
 curl -sf http://localhost:3000 | head -c 200
 kill "$HMI_PF_PID" 2>/dev/null || true
 ```
