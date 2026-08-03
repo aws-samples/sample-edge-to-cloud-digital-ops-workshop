@@ -1114,16 +1114,33 @@ exports.handler = async (event) => {
 
     participantRole.addToPolicy(new PolicyStatement({
       effect: Effect.ALLOW,
-      actions: ["iot:CreateJob", "iot:DescribeJob", "iot:ListJobExecutionsForJob"],
+      actions: ["iot:DescribeJob", "iot:ListJobExecutionsForJob"],
       resources: [`arn:aws:iot:${this.region}:${this.account}:job/${deploymentId}-*`],
     }));
 
+    // CreateJob is authorized against BOTH the job ARN and the job's target
+    // ARN (the thing group it's deployed to) — grant it here alongside the
+    // job/* resource rather than in the DescribeJob statement above, since
+    // DescribeJob/ListJobExecutionsForJob don't take a target ARN at all.
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["iot:CreateJob"],
+      resources: [
+        `arn:aws:iot:${this.region}:${this.account}:job/${deploymentId}-*`,
+        `arn:aws:iot:${this.region}:${this.account}:thinggroup/${deploymentId}-devices`,
+      ],
+    }));
+
     // Software Package Catalog: this slot's own telemetry-agent package
-    // (02-control/block-4-fleet-management.md).
+    // (02-control/block-4-fleet-management.md). ListPackages is an
+    // account-wide list operation with no per-package resource type, so it
+    // can't be scoped to this slot's package name — falls back to `*` like
+    // the SearchIndex/DescribeInstances grants below; the docs filter to the
+    // slot's own package by name in the query, not via IAM.
     participantRole.addToPolicy(new PolicyStatement({
       effect: Effect.ALLOW,
       actions: ["iot:ListPackages"],
-      resources: [`arn:aws:iot:${this.region}:${this.account}:package/${deploymentId}-*`],
+      resources: ["*"],
     }));
 
     // Fleet Indexing: AWS_Things is a single shared, account-wide index (not
