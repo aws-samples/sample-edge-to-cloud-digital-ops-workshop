@@ -1153,6 +1153,14 @@ exports.handler = async (event) => {
     // iot:UpdateIndexingConfiguration (02-control/block-3-fleet-indexing.md's
     // idempotent re-run of the account's existing indexing config) are
     // account-wide settings with no resource type to scope to.
+    //
+    // iot:UpdateIndexingConfiguration writes shared account-wide state every
+    // participant could mutate. Kept as a participant grant (not moved to
+    // the platform stack) because the documented call
+    // (block-3-fleet-indexing.md line 19) passes the exact same config the
+    // platform stack already applies on deploy, so a participant re-running
+    // it is idempotent, not drift. Revisit if that payload ever diverges
+    // from the platform's applied config.
     participantRole.addToPolicy(new PolicyStatement({
       effect: Effect.ALLOW,
       actions: ["iot:DescribeEndpoint", "iot:UpdateIndexingConfiguration"],
@@ -1227,19 +1235,33 @@ exports.handler = async (event) => {
         StringEquals: { "aws:ResourceTag/WorkshopDeploymentId": deploymentId },
       },
     }));
-    // ssm:SendCommand also needs permission on the SSM document itself — an
-    // AWS-owned public document (AWS-RunShellScript), not a per-slot
-    // resource, so it can't be scoped any tighter.
+    // ssm:SendCommand and ssm:StartSession both also need permission on the
+    // SSM document resource itself — AWS-owned public documents, not
+    // per-slot resources, so they can't be scoped any tighter than the
+    // document ARN (empty account segment). AWS-RunShellScript backs
+    // SendCommand (register-device-over-ssh.md); AWS-StartPortForwardingSession
+    // backs the K3s port-forward tunnel (05-edge-infra/block-3, block-4) and
+    // AWS-StartSSHSession backs the SSH-over-SSM jump (register-device-over-
+    // ssh.md) — both via start-session.
     participantRole.addToPolicy(new PolicyStatement({
       effect: Effect.ALLOW,
       actions: ["ssm:SendCommand"],
       resources: [`arn:aws:ssm:${this.region}::document/AWS-RunShellScript`],
     }));
-    // ssm:GetCommandInvocation does not support resource-level permissions
-    // (AWS Service Authorization Reference lists only `*` for this action).
     participantRole.addToPolicy(new PolicyStatement({
       effect: Effect.ALLOW,
-      actions: ["ssm:GetCommandInvocation"],
+      actions: ["ssm:StartSession"],
+      resources: [
+        `arn:aws:ssm:${this.region}::document/AWS-StartPortForwardingSession`,
+        `arn:aws:ssm:${this.region}::document/AWS-StartSSHSession`,
+      ],
+    }));
+    // ssm:GetCommandInvocation and ssm:DescribeInstanceInformation do not
+    // support resource-level permissions (AWS Service Authorization
+    // Reference lists only `*` for these actions).
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["ssm:GetCommandInvocation", "ssm:DescribeInstanceInformation"],
       resources: ["*"],
     }));
 
