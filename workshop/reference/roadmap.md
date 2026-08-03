@@ -207,18 +207,21 @@ with an e2e-asserted bash block; verified live (doc-runner 2/2).
 | ~~#93~~ | block-4-verify names/ports | ✅ Closed (PR #101) |
 | ~~#106~~ | block-4-verify EKS fall-through | ✅ Closed (PR #107) |
 | ~~#111~~ | Platform teardown fails (Athena workgroup + S3 auto-delete) | ✅ Closed (PR #112) — Athena `recursiveDeleteOption`, S3 lifecycle rules, bucket pre-empty in `sandbox-delete-all.sh` |
+| ~~#117~~ | Athena queries fail: `ICEBERG_MISSING_METADATA` — Flink Iceberg sink crash-loops to READY | ✅ Closed — obsoleted by the archive-tier rearchitecture (#124/PR #126): the crash-looping Managed Flink app was removed entirely in favour of Amazon Data Firehose writing Iceberg directly, so there is no Flink job left to crash-loop |
+| ~~#118~~ | Managed Flink Iceberg sink has no CloudWatch logging — crash-loop undiagnosable | ✅ Closed — moot after #124/PR #126 removed the Flink app (the app it was meant to make diagnosable no longer exists) |
+| ~~#119~~ | Docs still say Hudi; deployment migrated off Hudi (~10 files, incl. inverted `decisions.md` row) | ✅ Closed — the full archive-tier prose sweep to Firehose + Iceberg shipped in #125/PR #129 |
 
 ### Remaining
 
 | # | Type | Title | Status |
 |---|---|---|---|
-| #117 | bug/e2e | Athena queries fail: `ICEBERG_MISSING_METADATA` — Flink Iceberg sink crash-loops to READY (affects block-3-athena + block-5-observe) | 🔴 Open — **blocked by #118** |
-| #118 | bug/infra | Managed Flink Iceberg sink has no CloudWatch logging — crash-loop undiagnosable | 🔴 Open — blocker for #117 |
-| #119 | docs | Docs still say Hudi; deployment migrated to Flink→Iceberg (~10 files, incl. inverted `decisions.md` row) | 🔴 Open — doc-only |
+| #122 | bug | `grant-ci-access.sh` uses `AmazonEKSAdminPolicy` (namespace-admin) — cluster-scoped installs Forbidden; needs `AmazonEKSClusterAdminPolicy` | 🔴 Open |
+| #123 | bug/iam | `WorkshopParticipantRole` too narrow for the AWS-CLI workshop steps (participant-persona e2e 7/60) | 🟡 In progress — PR #131 |
 
-Opened 2026-07-30 from the `ws-slot06` run above. #117 is blocked by #118 (native
-GitHub relationship set); the doc-wide Hudi→Iceberg wording was split out to #119.
-The shared platform is currently deployed (`ws-slot06`); the earlier note about
+The archive-tier defects opened 2026-07-30 from the `ws-slot06` run (#117/#118
+Flink crash-loop, #119 Hudi prose) are all resolved: #124/PR #126 replaced the
+Managed Flink sink with Amazon Data Firehose → Iceberg (removing the crash-loop
+root cause), and #125/PR #129 completed the doc sweep. The earlier note about
 teardown (#41) still holds for a from-scratch run.
 
 > GitHub's native issue-relationships feature is the source of truth for
