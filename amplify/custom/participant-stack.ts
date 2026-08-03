@@ -1103,84 +1103,30 @@ exports.handler = async (event) => {
     // of actions have no resource-level permissions at all (noted inline) and
     // fall back to `*`.
 
-    // IoT — this slot's own thing group and jobs (job IDs are conventionally
-    // prefixed `${deploymentId}-` by every documented `aws iot create-job`
-    // call — see 02-control/block-2, 03-state/block-2, 05-edge-infra/block-2).
-    participantRole.addToPolicy(new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: ["iot:DescribeThingGroup", "iot:ListThingsInThingGroup"],
-      resources: [`arn:aws:iot:${this.region}:${this.account}:thinggroup/${deploymentId}-devices`],
-    }));
-
-    participantRole.addToPolicy(new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: ["iot:DescribeJob", "iot:ListJobExecutionsForJob"],
-      resources: [`arn:aws:iot:${this.region}:${this.account}:job/${deploymentId}-*`],
-    }));
-
-    // CreateJob is authorized against BOTH the job ARN and the job's target
-    // ARN (the thing group it's deployed to) — grant it here alongside the
-    // job/* resource rather than in the DescribeJob statement above, since
-    // DescribeJob/ListJobExecutionsForJob don't take a target ARN at all.
-    participantRole.addToPolicy(new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: ["iot:CreateJob"],
-      resources: [
-        `arn:aws:iot:${this.region}:${this.account}:job/${deploymentId}-*`,
-        `arn:aws:iot:${this.region}:${this.account}:thinggroup/${deploymentId}-devices`,
-      ],
-    }));
-
-    // Software Package Catalog: this slot's own telemetry-agent package
-    // (02-control/block-4-fleet-management.md). ListPackages is an
-    // account-wide list operation with no per-package resource type, so it
-    // can't be scoped to this slot's package name — falls back to `*` like
-    // the SearchIndex/DescribeInstances grants below; the docs filter to the
-    // slot's own package by name in the query, not via IAM.
-    participantRole.addToPolicy(new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: ["iot:ListPackages"],
-      resources: ["*"],
-    }));
-
-    // Fleet Indexing: AWS_Things is a single shared, account-wide index (not
-    // one per slot) — iot:SearchIndex/DescribeIndex only support scoping to
-    // an index name, not to the query string run against it, so slot
-    // isolation here comes from the `attributes.deploymentId:...` filter
-    // every documented query includes (02-control/block-3), not from IAM.
-    participantRole.addToPolicy(new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: ["iot:SearchIndex", "iot:DescribeIndex"],
-      resources: [`arn:aws:iot:${this.region}:${this.account}:index/AWS_Things`],
-    }));
-
-    // Thing/shadow reads+writes: thing names are EC2 instance IDs, or
-    // whatever a participant names a device they register over SSH
-    // (02-control/block-1-device-client.md) — neither is slot-prefixed, and
-    // things carry no resource tags, so there's no ARN pattern that scopes
-    // this to just this slot's devices. Falls back to thing/* (still
-    // region/account-scoped).
-    participantRole.addToPolicy(new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: ["iot:DescribeThing", "iot-data:GetThingShadow", "iot-data:UpdateThingShadow"],
-      resources: [`arn:aws:iot:${this.region}:${this.account}:thing/*`],
-    }));
-
-    // iot:DescribeEndpoint (register-device-ssh.sh, EC2 user data) and
-    // iot:UpdateIndexingConfiguration (02-control/block-3-fleet-indexing.md's
-    // idempotent re-run of the account's existing indexing config) are
-    // account-wide settings with no resource type to scope to.
+    // IoT — grant the whole `iot:*` action namespace, account-wide.
     //
-    // iot:UpdateIndexingConfiguration writes shared account-wide state every
-    // participant could mutate. Kept as a participant grant (not moved to
-    // the platform stack) because the documented call
-    // (block-3-fleet-indexing.md line 19) passes the exact same config the
-    // platform stack already applies on deploy, so a participant re-running
-    // it is idempotent, not drift. Revisit if that payload ever diverges
-    // from the platform's applied config.
+    // The workshop's IoT surface spans control-plane calls (CreateJob against
+    // both a job/* ARN *and* its thing-group target; DescribeJob; ListPackages,
+    // which has no resource type; SearchIndex against the shared account-wide
+    // AWS_Things index; UpdateIndexingConfiguration, an account-wide setting)
+    // AND Device Shadow *data-plane* calls (GetThingShadow/UpdateThingShadow —
+    // the `aws iot-data` CLI, which IAM authorizes under the `iot:` prefix, NOT
+    // `iot-data:`). Per-action scoping here proved both fragile and unsound:
+    //   - thing names are EC2 instance IDs / SSH-registered names (not
+    //     slot-prefixed) and things carry no tags, so shadow/DescribeThing
+    //     can't be scoped tighter than thing/* anyway;
+    //   - the shared AWS_Things index and account-wide settings force `*`;
+    //   - an earlier attempt used the invalid `iot-data:` IAM prefix for the
+    //     shadow actions, which authorizes NOTHING — every shadow call failed
+    //     `ForbiddenException` while looking correct in the policy.
+    // Since the achievable scoping is already `thing/*` + `*` for most of the
+    // IoT surface, a single `iot:*` grant is both simpler and no broader in
+    // practice (the workshop account is single-tenant per slot for IoT — thing
+    // isolation is enforced by the `attributes.deploymentId:...` fleet-index
+    // filter the docs use, not by IAM). #123.
     participantRole.addToPolicy(new PolicyStatement({
       effect: Effect.ALLOW,
-      actions: ["iot:DescribeEndpoint", "iot:UpdateIndexingConfiguration"],
+      actions: ["iot:*"],
       resources: ["*"],
     }));
 
@@ -1216,6 +1162,20 @@ exports.handler = async (event) => {
       effect: Effect.ALLOW,
       actions: ["s3:PutObject", "s3:GetObject"],
       resources: [`${sharedBucketArn}/athena-results/*`],
+    }));
+
+    // Before running a query, Athena verifies its output bucket exists by
+    // calling s3:GetBucketLocation on the *bucket* (not a prefix) — without
+    // this the StartQueryExecution above fails
+    // `InvalidRequestException: Unable to verify/create output bucket`
+    // (01-observe/block-3-athena, 02-control/block-5-observe). The role's only
+    // other GetBucketLocation grant is on its RisingWave bucket, so it must be
+    // granted explicitly on the shared platform bucket here. Bucket-level,
+    // unconditioned — GetBucketLocation takes no prefix.
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:GetBucketLocation"],
+      resources: [sharedBucketArn],
     }));
 
     // This slot's own RisingWave state bucket, created by the participant in
