@@ -26,6 +26,11 @@
  *                role-scoped kubeconfig (namespace-scoped EKS access). No
  *                cluster-admin grant is performed.
  *
+ * Pass --report-out <path> (or set E2E_REPORT_OUT) to additionally write the
+ * run summary to a markdown file. If <path> is a directory (or the flag/env
+ * var is set with no live value, defaulting to e2e/reports/), the file is
+ * named YYYY-MM-DD-<deployment-id>.md. stdout output is unchanged either way.
+ *
  * Environment variables:
  *   WORKSHOP_TEST_SLOT          deployment ID (default: ws-e2e-test)
  *   AWS_REGION                  AWS region (default: us-east-1)
@@ -33,26 +38,49 @@
  *   E2E_PERSONA                 "admin" | "participant" (default: unset — all blocks)
  *   E2E_SKIP_EKS_GRANT          "true" to skip the best-effort EKS/Cognito access
  *                               grant in the admin persona (default: false — see below)
+ *   E2E_REPORT_OUT              path to write the run report to (see --report-out above)
  */
 
 import { join, relative } from "node:path";
-import { readdirSync, statSync } from "node:fs";
+import { readdirSync, statSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { runDocBlocks, type BlockResult, type Persona } from "./doc-runner.js";
+import { resolveReportPath, renderReport } from "./report.js";
 
 const REPO_ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
+const USAGE = [
+  "Usage: doc-runner-cli.ts <path-to-workshop-md-file-or-dir> [<path> ...] [options]",
+  "",
+  "Options:",
+  "  --deployment-id <id>      Deployment slot to test against (default: $WORKSHOP_TEST_SLOT or ws-e2e-test)",
+  "  --delete-platform-stack   Also allow blocks annotated <!-- e2e:platform-teardown -->",
+  "  --persona <admin|participant>",
+  "                            Run under a specific persona's identity (env: E2E_PERSONA).",
+  "                            Default: unset — run every annotated block regardless of persona tag.",
+  "  --report-out <path>       Write the run summary to a markdown file, in addition to stdout.",
+  "                            If <path> is a directory (default: e2e/reports/), the file is named",
+  "                            YYYY-MM-DD-<deployment-id>.md. (env: E2E_REPORT_OUT)",
+  "  --help, -h                Show this help",
+].join("\n");
+
 const args = process.argv.slice(2);
+
+if (args.includes("--help") || args.includes("-h")) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
 // Flags that take a value — the token after them is the value, not a path arg.
-const VALUE_FLAGS = new Set(["--deployment-id", "--persona"]);
+const VALUE_FLAGS = new Set(["--deployment-id", "--persona", "--report-out"]);
 const pathArgs = args.filter(
   (a, i) => !a.startsWith("--") && !VALUE_FLAGS.has(args[i - 1])
 );
 if (pathArgs.length === 0) {
-  console.error("Usage: doc-runner-cli.ts <path-to-workshop-md-file-or-dir> [<path> ...] [--deployment-id <id>]");
+  console.error(USAGE);
   process.exit(1);
 }
 
@@ -108,6 +136,10 @@ if (PERSONA_RAW !== undefined && PERSONA_RAW !== "admin" && PERSONA_RAW !== "par
   process.exit(1);
 }
 const PERSONA = PERSONA_RAW as Persona | undefined;
+
+const reportOutIdx = args.indexOf("--report-out");
+const REPORT_OUT_RAW =
+  reportOutIdx !== -1 ? args[reportOutIdx + 1] : process.env.E2E_REPORT_OUT;
 
 const ssm = new SSMClient({ region: REGION });
 const sts = new STSClient({ region: REGION });
@@ -312,6 +344,19 @@ for (const { file, results } of fileSummaries) {
 
 console.log("");
 console.log(`  ${totalPassed}/${totalBlocks} blocks passed across ${mdPaths.length} file(s)`);
+
+if (REPORT_OUT_RAW !== undefined) {
+  const runDate = new Date().toISOString().slice(0, 10);
+  const reportPath = resolveReportPath(REPORT_OUT_RAW || "e2e/reports/", REPO_ROOT, DEPLOYMENT_ID, runDate);
+  const report = renderReport(
+    fileSummaries.map(({ file, results }) => ({ file: relative(REPO_ROOT, file), results })),
+    { deploymentId: DEPLOYMENT_ID, region: REGION, accountId: ACCOUNT_ID, runDate }
+  );
+
+  mkdirSync(join(reportPath, ".."), { recursive: true });
+  writeFileSync(reportPath, report);
+  console.log(`  Report written to      : ${relative(REPO_ROOT, reportPath)}`);
+}
 
 const anyFailed = fileSummaries.some(({ results }) => results.some((r) => !r.passed));
 process.exit(anyFailed ? 1 : 0);
