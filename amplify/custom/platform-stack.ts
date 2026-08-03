@@ -616,6 +616,10 @@ export class PlatformStack extends Stack {
           icebergTableInput: {
             location: `${icebergWarehousePath}/telemetry`,
             schema: {
+              // Iceberg's REST CreateTableRequest parser requires the top-level
+              // struct discriminator; without `type: "struct"` Glue rejects the
+              // create with "Cannot parse type from json ... CreateTableRequest[schema]".
+              type: "struct",
               fields: icebergSchemaFields,
             },
             // deployment_id first so participants can efficiently query their own data.
@@ -674,6 +678,13 @@ export class PlatformStack extends Stack {
     firehoseMskRole.addToPolicy(new PolicyStatement({
       effect: Effect.ALLOW,
       actions: [
+        // Control-plane (kafka:) — Firehose validates the MSK source at
+        // stream-create time via these APIs; without them the delivery-stream
+        // CREATE fails with "not authorized to perform: kafka:DescribeClusterV2".
+        "kafka:GetBootstrapBrokers",
+        "kafka:DescribeCluster",
+        "kafka:DescribeClusterV2",
+        // Data-plane (kafka-cluster:) — used once connected to read from the topic.
         "kafka-cluster:Connect",
         "kafka-cluster:DescribeCluster",
         "kafka-cluster:DescribeClusterDynamicConfiguration",
