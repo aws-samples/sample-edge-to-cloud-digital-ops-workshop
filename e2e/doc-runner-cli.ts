@@ -21,10 +21,9 @@
  *   admin        run admin + untagged blocks as a cluster-admin principal; the
  *                calling role is granted cluster-scoped EKS/Cognito access first
  *   participant  run participant + untagged blocks the way a real attendee does:
- *                plain `aws` CLI uses the caller's own (ambient) identity, while
- *                `kubectl`/`helm` assume WorkshopParticipantRole-<slot> via a
- *                role-scoped kubeconfig (namespace-scoped EKS access). No
- *                cluster-admin grant is performed.
+ *                the runner assumes WorkshopParticipantRole-<slot> via STS and
+ *                runs both `aws` CLI and `kubectl`/`helm` as that role (its
+ *                full scoped identity). No cluster-admin grant is performed.
  *
  * Pass --report-out <path> (or set E2E_REPORT_OUT) to additionally write the
  * run summary to a markdown file. If <path> is a directory (or the flag/env
@@ -46,7 +45,7 @@ import { readdirSync, statSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
-import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
+import { STSClient, GetCallerIdentityCommand, AssumeRoleCommand } from "@aws-sdk/client-sts";
 import { runDocBlocks, type BlockResult, type Persona } from "./doc-runner.js";
 import { resolveReportPath, renderReport } from "./report.js";
 
@@ -162,7 +161,8 @@ const ACCOUNT_ID = callerIdentity.Account!;
 //
 //   participant — handled after SSM resolution below: ASSUME
 //     WorkshopParticipantRole-<slot> so the run exercises exactly the
-//     namespace-scoped access a real attendee has. No cluster-admin grant.
+//     scoped access a real attendee has for both `aws` CLI and
+//     `kubectl`/`helm`. No cluster-admin grant.
 if (PERSONA !== "participant" && process.env.E2E_SKIP_EKS_GRANT !== "true") {
   // admin (or unset default): grant the calling role cluster access.
   // The caller is an assumed-role session ARN
@@ -222,27 +222,40 @@ if (missing.length > 0) {
 }
 const [, SHARED_BUCKET, GRAPHQL_ENDPOINT] = ssmValues as string[];
 
-// participant persona: model the real attendee's identity split.
+// participant persona: model the real attendee's identity — Model 2.
 //
-//   AWS CLI calls  → the participant's OWN (ambient) identity. A real attendee
-//     runs the `aws iot/s3/secretsmanager/athena/...` commands as their normal
-//     workshop IAM user; they do NOT route those through WorkshopParticipantRole
-//     (which is EKS-only, holding just eks:DescribeCluster).
-//   kubectl / helm → assume WorkshopParticipantRole-<slot>. We build a throwaway
-//     kubeconfig whose exec plugin calls `aws eks get-token --role-arn <role>`,
-//     so only the in-cluster identity is the namespace-scoped role, exactly the
-//     access an attendee gets from `update-kubeconfig --role-arn`.
+// WorkshopParticipantRole-<slot> is the participant's FULL identity, not an
+// EKS-only assume-role: a real attendee assumes the role once and runs every
+// non-admin step (aws CLI *and* kubectl/helm) as that role. So we AssumeRole
+// via STS and inject the returned creds into process.env — every block
+// inherits process.env, so both `aws` and `kubectl`/`helm` (via the
+// `aws eks get-token` exec plugin) run as the participant role. We still
+// build a role-scoped kubeconfig (rather than relying on ambient
+// update-kubeconfig) so KUBECONFIG can't be clobbered by the doc's own
+// cluster-admin `update-kubeconfig` step, which is tagged persona:admin and
+// skipped here.
 //
-// We do NOT inject the role's creds into the process env — that would force every
-// `aws` call through the EKS-only role and fail. KUBECONFIG points kubectl at the
-// role-scoped config; ambient creds stay in effect for everything else. The doc's
-// own plain `update-kubeconfig` (cluster-admin form) is tagged persona:admin so
-// it's skipped here and can't clobber this config.
+// This assumption happens AFTER SSM resolution above, which must run on
+// ambient creds — the participant role can't read /workshop/<slot>/* params.
 let personaLabel = "any (all blocks)";
 if (PERSONA === "participant") {
   const participantRoleArn = `arn:aws:iam::${ACCOUNT_ID}:role/WorkshopParticipantRole-${DEPLOYMENT_ID}`;
   const kubeconfigPath = join(tmpdir(), `e2e-participant-kubeconfig-${DEPLOYMENT_ID}`);
   try {
+    const assumed = await sts.send(
+      new AssumeRoleCommand({
+        RoleArn: participantRoleArn,
+        RoleSessionName: `doc-runner-participant-${DEPLOYMENT_ID}`,
+      })
+    );
+    const creds = assumed.Credentials;
+    if (!creds?.AccessKeyId || !creds.SecretAccessKey || !creds.SessionToken) {
+      throw new Error("AssumeRole returned no usable credentials");
+    }
+    process.env.AWS_ACCESS_KEY_ID = creds.AccessKeyId;
+    process.env.AWS_SECRET_ACCESS_KEY = creds.SecretAccessKey;
+    process.env.AWS_SESSION_TOKEN = creds.SessionToken;
+
     execFileSync(
       "aws",
       [
@@ -257,10 +270,10 @@ if (PERSONA === "participant") {
     // Every block inherits process.env, so kubectl/helm/aws-eks-get-token in the
     // blocks read this KUBECONFIG and assume the participant role for tokens.
     process.env.KUBECONFIG = kubeconfigPath;
-    personaLabel = `participant (kubectl→${participantRoleArn.split("/").pop()}, aws→ambient)`;
+    personaLabel = `participant (aws+kubectl→${participantRoleArn.split("/").pop()})`;
   } catch (err) {
     const msg = err instanceof Error && "stderr" in err ? String((err as { stderr?: Buffer }).stderr ?? err.message) : String(err);
-    console.error(`Persona participant — FAILED to build role-scoped kubeconfig for ${participantRoleArn}`);
+    console.error(`Persona participant — FAILED to assume/configure ${participantRoleArn}`);
     console.error(`  ${msg.trim().split("\n").pop()}`);
     console.error("  Ensure the slot is deployed and your identity has sts:AssumeRole on that role.");
     process.exit(1);
