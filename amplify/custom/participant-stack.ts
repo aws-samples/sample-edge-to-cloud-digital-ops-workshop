@@ -1231,6 +1231,17 @@ exports.handler = async (event) => {
     claimSecret.grantRead(participantRole);
     mskCredSecret.grantRead(participantRole);
 
+    // grantRead() only adds secretsmanager:GetSecretValue/DescribeSecret —
+    // the SCRAM secret is KMS-encrypted with an imported key (mskScramKey,
+    // via KmsKey.fromKeyArn above), so CDK can't add an identity-policy
+    // decrypt grant automatically. Mirrors iotKafkaVpcRole's grant on the
+    // same key/secret above.
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["kms:Decrypt"],
+      resources: [mskScramKeyArn],
+    }));
+
     // SSM Parameter Store — this slot's own namespace (kubeconfig, etc — see
     // 04-analytics/block-1, 05-edge-infra/block-3, 05-edge-infra/block-4).
     participantRole.addToPolicy(new PolicyStatement({
