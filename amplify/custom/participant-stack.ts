@@ -1144,12 +1144,32 @@ exports.handler = async (event) => {
       actions: ["s3:PutObject", "s3:GetObject"],
       resources: slotS3Prefixes.map((prefix) => `${sharedBucketArn}/${prefix}`),
     }));
+    // Read-only access to the shared Firehose→Iceberg telemetry table. Unlike
+    // the slot-owned prefixes above, this table (Glue location
+    // `telemetry/telemetry/`) co-mingles *every* slot's rows in shared data
+    // files — Firehose writes it, participants only read it, and per-slot
+    // isolation is logical (the doc queries carry `WHERE deployment_id=<slot>`),
+    // not physical per-prefix. So the read grant must cover the whole table
+    // prefix (metadata JSON + Avro manifests + Parquet data), not a per-slot
+    // subpath. Without it, Athena's StartQueryExecution succeeds but the query
+    // itself FAILS at scan time with `PERMISSION_DENIED: s3:GetObject on
+    // .../telemetry/telemetry/metadata/*.metadata.json` — surfacing only as
+    // `GetQueryResults: Query did not finish successfully` (01-observe/
+    // block-3-athena block 2, 02-control/block-5-observe block 1).
+    const icebergTablePrefix = "telemetry/telemetry/*";
+    participantRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:GetObject"],
+      resources: [`${sharedBucketArn}/${icebergTablePrefix}`],
+    }));
     participantRole.addToPolicy(new PolicyStatement({
       effect: Effect.ALLOW,
       actions: ["s3:ListBucket"],
       resources: [sharedBucketArn],
       conditions: {
-        StringLike: { "s3:prefix": [...slotS3Prefixes, "athena-results/*"] },
+        StringLike: {
+          "s3:prefix": [...slotS3Prefixes, icebergTablePrefix, "athena-results/*"],
+        },
       },
     }));
 
