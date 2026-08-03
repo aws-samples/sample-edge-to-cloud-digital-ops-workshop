@@ -793,6 +793,14 @@ export class PlatformStack extends Stack {
     });
     telemetryFirehoseStream.node.addDependency(mskBootstrapIamLookup);
     telemetryFirehoseStream.node.addDependency(telemetryIcebergTable);
+    // Firehose validates the MSK source (kafka:DescribeClusterV2 etc.) the moment
+    // the stream is created. Referencing `firehoseMskRole.roleArn` only makes CFN
+    // wait for the Role, NOT for its separate AWS::IAM::Policy (DefaultPolicy) that
+    // carries the grants — so without these explicit deps the stream CREATE races
+    // ahead of the policy attach and fails "not authorized: kafka:DescribeClusterV2".
+    // addDependency on the L2 Role pulls in its whole subtree, including DefaultPolicy.
+    telemetryFirehoseStream.node.addDependency(firehoseMskRole);
+    telemetryFirehoseStream.node.addDependency(firehoseDeliveryRole);
 
     new CfnOutput(this, "TelemetryFirehoseStreamName", {
       exportName: "workshop-platform-firehose-stream-name",
