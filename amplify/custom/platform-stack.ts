@@ -29,7 +29,6 @@ import {
 } from "aws-cdk-lib/aws-eks";
 import {
   CfnCluster as MskCluster,
-  CfnClusterPolicy as MskClusterPolicy,
 } from "aws-cdk-lib/aws-msk";
 import {
   Bucket,
@@ -45,6 +44,7 @@ import {
   PhysicalResourceId,
 } from "aws-cdk-lib/custom-resources";
 import { CfnDeliveryStream } from "aws-cdk-lib/aws-kinesisfirehose";
+import { LogGroup, LogStream, RetentionDays } from "aws-cdk-lib/aws-logs";
 import { CfnDatabase, CfnTable } from "aws-cdk-lib/aws-glue";
 import { CfnWorkGroup } from "aws-cdk-lib/aws-athena";
 import { StringParameter } from "aws-cdk-lib/aws-ssm";
@@ -505,31 +505,6 @@ export class PlatformStack extends Stack {
       value: mskCluster.attrArn,
     });
 
-    // Cluster resource-based policy authorizing the Firehose service principal to
-    // establish the managed VPC connection used by MSKAsSource PRIVATE
-    // connectivity. Without it, Firehose stream CREATE fails "Private Link with
-    // SASL IAM must be enabled on MSK Cluster to use PRIVATE connectivity".
-    const mskClusterPolicy = new MskClusterPolicy(this, "MskClusterPolicy", {
-      clusterArn: mskCluster.attrArn,
-      policy: {
-        Version: "2012-10-17",
-        Statement: [
-          {
-            Effect: "Allow",
-            Principal: { Service: "firehose.amazonaws.com" },
-            Action: [
-              "kafka:CreateVpcConnection",
-              "kafka:GetBootstrapBrokers",
-              "kafka:DescribeCluster",
-              "kafka:DescribeClusterV2",
-            ],
-            Resource: mskCluster.attrArn,
-          },
-        ],
-      },
-    });
-    mskClusterPolicy.node.addDependency(mskCluster);
-
     // Resolve SASL/SCRAM bootstrap broker string via a custom resource —
     // MSK's CFN resource doesn't expose it as a direct attribute.
     const mskBootstrapLookup = new AwsCustomResource(this, "MskBootstrapScramLookup", {
@@ -691,77 +666,10 @@ export class PlatformStack extends Stack {
       value: telemetryIcebergTable.ref,
     });
 
-    // ── Firehose (MSK → Iceberg → S3) ────────────────────────────────────────
-    // Reads raw.telemetry from MSK via IAM auth, delivers natively to the
-    // Iceberg table above via the Glue Data Catalog — no custom code.
-    // Resolve IAM bootstrap broker string (port 9098) via custom resource.
-    const mskBootstrapIamLookup = new AwsCustomResource(this, "MskBootstrapIamLookup", {
-      onCreate: {
-        service: "Kafka",
-        action: "getBootstrapBrokers",
-        parameters: { ClusterArn: mskCluster.attrArn },
-        physicalResourceId: PhysicalResourceId.of("MskBootstrapIamLookup"),
-        outputPaths: ["BootstrapBrokerStringSaslIam"],
-      },
-      onUpdate: {
-        service: "Kafka",
-        action: "getBootstrapBrokers",
-        parameters: { ClusterArn: mskCluster.attrArn },
-        physicalResourceId: PhysicalResourceId.of("MskBootstrapIamLookup"),
-        outputPaths: ["BootstrapBrokerStringSaslIam"],
-      },
-      policy: AwsCustomResourcePolicy.fromSdkCalls({
-        resources: [mskCluster.attrArn],
-      }),
-    });
-    mskBootstrapIamLookup.node.addDependency(mskCluster);
-
-    const firehoseMskRole = new Role(this, "FirehoseMskRole", {
-      assumedBy: new ServicePrincipal("firehose.amazonaws.com"),
-    });
-    firehoseMskRole.addToPolicy(new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: [
-        // Control-plane (kafka:) — Firehose validates the MSK source at
-        // stream-create time via these APIs; without them the delivery-stream
-        // CREATE fails with "not authorized to perform: kafka:DescribeClusterV2".
-        "kafka:GetBootstrapBrokers",
-        "kafka:DescribeCluster",
-        "kafka:DescribeClusterV2",
-        // Data-plane (kafka-cluster:) — used once connected to read from the topic.
-        "kafka-cluster:Connect",
-        "kafka-cluster:DescribeCluster",
-        "kafka-cluster:DescribeClusterDynamicConfiguration",
-      ],
-      resources: [mskCluster.attrArn],
-    }));
-    firehoseMskRole.addToPolicy(new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: [
-        "kafka-cluster:DescribeTopic",
-        "kafka-cluster:DescribeTopicDynamicConfiguration",
-        "kafka-cluster:ReadData",
-      ],
-      resources: [`arn:aws:kafka:${this.region}:${this.account}:topic/workshop-platform-msk/*/*`],
-    }));
-    firehoseMskRole.addToPolicy(new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: [
-        "kafka-cluster:DescribeGroup",
-      ],
-      resources: [`arn:aws:kafka:${this.region}:${this.account}:group/workshop-platform-msk/*/*`],
-    }));
-    firehoseMskRole.addToPolicy(new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: [
-        "ec2:DescribeVpcs",
-        "ec2:DescribeSubnets",
-        "ec2:DescribeSecurityGroups",
-        "ec2:DescribeNetworkInterfaces",
-      ],
-      resources: ["*"],
-    }));
-
+    // ── Firehose (DirectPut → Iceberg → S3) ──────────────────────────────────
+    // Records are written to the stream via the Firehose PutRecord/PutRecordBatch
+    // API and delivered natively to the Iceberg table above via the Glue Data
+    // Catalog — no custom code.
     const firehoseDeliveryRole = new Role(this, "FirehoseDeliveryRole", {
       assumedBy: new ServicePrincipal("firehose.amazonaws.com"),
     });
@@ -802,17 +710,27 @@ export class PlatformStack extends Stack {
       resources: ["*"],
     }));
 
+    // CloudWatch logging for the delivery stream — surfaces per-record Iceberg
+    // delivery errors (e.g. schema/parse failures) that are otherwise invisible:
+    // Firehose can drop records that never reach the S3 error prefix and emit no
+    // failure metric. The log group/stream names are the shape Firehose expects.
+    const firehoseLogGroup = new LogGroup(this, "TelemetryFirehoseLogGroup", {
+      logGroupName: "/aws/kinesisfirehose/workshop-telemetry-iceberg-direct",
+      retention: RetentionDays.ONE_WEEK,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    const firehoseLogStream = new LogStream(this, "TelemetryFirehoseLogStream", {
+      logGroup: firehoseLogGroup,
+      logStreamName: "IcebergDelivery",
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
     const telemetryFirehoseStream = new CfnDeliveryStream(this, "TelemetryIcebergFirehose", {
-      deliveryStreamName: "workshop-telemetry-iceberg",
-      deliveryStreamType: "MSKAsSource",
-      mskSourceConfiguration: {
-        mskClusterArn: mskCluster.attrArn,
-        topicName: "raw.telemetry",
-        authenticationConfiguration: {
-          connectivity: "PRIVATE",
-          roleArn: firehoseMskRole.roleArn,
-        },
-      },
+      // Renamed from the retired MSKAsSource stream (workshop-telemetry-iceberg):
+      // switching deliveryStreamType forces a replacement, and CFN refuses to
+      // replace a custom-named resource in place unless the name also changes.
+      deliveryStreamName: "workshop-telemetry-iceberg-direct",
+      deliveryStreamType: "DirectPut",
       icebergDestinationConfiguration: {
         roleArn: firehoseDeliveryRole.roleArn,
         catalogConfiguration: {
@@ -821,6 +739,11 @@ export class PlatformStack extends Stack {
         bufferingHints: {
           intervalInSeconds: 300,
           sizeInMBs: 128,
+        },
+        cloudWatchLoggingOptions: {
+          enabled: true,
+          logGroupName: firehoseLogGroup.logGroupName,
+          logStreamName: firehoseLogStream.logStreamName,
         },
         destinationTableConfigurationList: [
           {
@@ -835,20 +758,10 @@ export class PlatformStack extends Stack {
         },
       },
     });
-    telemetryFirehoseStream.node.addDependency(mskBootstrapIamLookup);
+    telemetryFirehoseStream.node.addDependency(firehoseLogStream);
+    // The Iceberg table must exist before the delivery stream targets it.
     telemetryFirehoseStream.node.addDependency(telemetryIcebergTable);
-    // Firehose validates the MSK source (kafka:DescribeClusterV2 etc.) the moment
-    // the stream is created. Referencing `firehoseMskRole.roleArn` only makes CFN
-    // wait for the Role, NOT for its separate AWS::IAM::Policy (DefaultPolicy) that
-    // carries the grants — so without these explicit deps the stream CREATE races
-    // ahead of the policy attach and fails "not authorized: kafka:DescribeClusterV2".
-    // addDependency on the L2 Role pulls in its whole subtree, including DefaultPolicy.
-    telemetryFirehoseStream.node.addDependency(firehoseMskRole);
     telemetryFirehoseStream.node.addDependency(firehoseDeliveryRole);
-    // The cluster resource-based policy (Firehose CreateVpcConnection) and the
-    // multi-VPC connectivity toggle must both be in effect before Firehose
-    // validates PRIVATE connectivity to the MSK source.
-    telemetryFirehoseStream.node.addDependency(mskClusterPolicy);
 
     new CfnOutput(this, "TelemetryFirehoseStreamName", {
       exportName: "workshop-platform-firehose-stream-name",

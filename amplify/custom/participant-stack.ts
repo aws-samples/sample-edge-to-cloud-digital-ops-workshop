@@ -1065,6 +1065,53 @@ exports.handler = async (event) => {
       },
     });
 
+    // ── IoT Rule → Firehose → Iceberg (direct hydration path) ────────────────
+    // Native Firehose rule action delivers telemetry straight into the shared
+    // `workshop-telemetry-iceberg-direct` delivery stream, which lands in the Glue
+    // Iceberg table — no MSK hop. Replaces the old MSK→Firehose path; the
+    // IotToMskRule above stays because TimescaleDB still consumes from MSK.
+    const iotFirehoseRole = new Role(this, "IotFirehoseRole", {
+      assumedBy: new ServicePrincipal("iot.amazonaws.com"),
+    });
+    iotFirehoseRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["firehose:PutRecord", "firehose:PutRecordBatch"],
+      resources: [`arn:aws:firehose:${this.region}:${this.account}:deliverystream/workshop-telemetry-iceberg-direct`],
+    }));
+    // Allow IoT to write delivery errors to the shared S3 bucket for debugging.
+    iotFirehoseRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:PutObject"],
+      resources: [`${sharedBucketArn}/iot-errors/${deploymentId}/*`],
+    }));
+
+    new CfnTopicRule(this, "IotToFirehoseRule", {
+      ruleName: `workshop_${deploymentId.replace(/-/g, "_")}_to_firehose`,
+      topicRulePayload: {
+        // Same enrichment as IotToMskRule so Iceberg columns populate identically.
+        sql: `SELECT *, topic(3) AS thing_name, topic() AS mqtt_topic, timestamp() AS ingest_ts, '${deploymentId}' AS deployment_id FROM 'edge/${deploymentId}/+/telemetry'`,
+        actions: [
+          {
+            firehose: {
+              deliveryStreamName: "workshop-telemetry-iceberg-direct",
+              roleArn: iotFirehoseRole.roleArn,
+              // One JSON record per message (no delimiter) — Firehose Iceberg parses each record.
+              batchMode: false,
+            },
+          },
+        ],
+        errorAction: {
+          s3: {
+            bucketName: sharedBucketName,
+            key: `iot-errors/${deploymentId}/firehose/\${timestamp()}/\${newuuid()}`,
+            roleArn: iotFirehoseRole.roleArn,
+            cannedAcl: "private",
+          },
+        },
+        ruleDisabled: false,
+      },
+    });
+
     // ── Participant IAM role + namespace-scoped EKS access ──────────────────
     // Lets AWS IAM be the thing that decides who can run kubectl/helm in this
     // slot's namespace: whoever the account admin grants sts:AssumeRole on
