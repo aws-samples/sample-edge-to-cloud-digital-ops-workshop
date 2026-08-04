@@ -1088,8 +1088,12 @@ exports.handler = async (event) => {
     new CfnTopicRule(this, "IotToFirehoseRule", {
       ruleName: `workshop_${deploymentId.replace(/-/g, "_")}_to_firehose`,
       topicRulePayload: {
-        // Same enrichment as IotToMskRule so Iceberg columns populate identically.
-        sql: `SELECT *, topic(3) AS thing_name, topic() AS mqtt_topic, timestamp() AS ingest_ts, '${deploymentId}' AS deployment_id FROM 'edge/${deploymentId}/+/telemetry'`,
+        // Same enrichment as IotToMskRule so Iceberg columns populate identically,
+        // plus year/month/day/hour derived from the ingest time. The Iceberg table
+        // partitions on deployment_id + year/month/day/hour as identity columns, so
+        // these must be emitted as actual record fields — otherwise every row lands
+        // in the literal year=null/month=null/day=null/hour=null partition (UTC).
+        sql: `SELECT *, topic(3) AS thing_name, topic() AS mqtt_topic, timestamp() AS ingest_ts, '${deploymentId}' AS deployment_id, parse_time('yyyy', timestamp(), 'UTC') AS year, parse_time('MM', timestamp(), 'UTC') AS month, parse_time('dd', timestamp(), 'UTC') AS day, parse_time('HH', timestamp(), 'UTC') AS hour FROM 'edge/${deploymentId}/+/telemetry'`,
         actions: [
           {
             firehose: {

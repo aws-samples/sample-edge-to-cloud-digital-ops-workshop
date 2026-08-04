@@ -8,6 +8,38 @@ Launch both steps simultaneously — they run independently and must both comple
 
 ## Step 5A: IoT Job → K3s Cluster
 
+!!! success "Your K3s cluster is already running"
+    The facilitator pre-deploy (`scripts/sandbox.sh`) pre-warms the edge K3s
+    cluster for every slot by launching this exact IoT Job during setup — so you
+    don't burn ~20 min of session time watching K3s install. **This step is an
+    inspection/demo of the fleet-execution mechanism**, not a wait. Confirm the
+    cluster is up, then look at how it got there. (The commands below are still
+    safe to re-run: `deploy-k3s.sh` is idempotent and no-ops on an existing
+    install.)
+
+Confirm the cluster server wrote its kubeconfig to Parameter Store:
+
+```bash
+aws ssm get-parameter \
+  --name /workshop/ws-slot00/kubeconfig \
+  --query "Parameter.Type" --output text
+```
+<!-- e2e:assert {"contains": "SecureString"} -->
+
+Inspect the K3s bootstrap job the pre-deploy created and how each device fared:
+
+```bash
+aws iot list-jobs \
+  --query "jobs[?starts_with(jobId,'ws-slot00-deploy-k3s')].[jobId,status]" \
+  --output text
+```
+<!-- e2e:assert {"contains": "ws-slot00-deploy-k3s"} -->
+
+### How the pre-warm launched it (reference)
+
+The steps below are what `scripts/launch-k3s.sh` runs on your behalf — walk
+through them to understand the IoT fleet-execution pattern.
+
 1. Upload the job script to S3:
 
 ```bash

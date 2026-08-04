@@ -228,6 +228,18 @@ for THING in "${THING_NAMES[@]+"${THING_NAMES[@]}"}"; do
 done
 echo ">>> Shadow seeding complete."
 
+# ── Pre-warm the edge K3s cluster ────────────────────────────────────────────
+# Launch the K3s bootstrap IoT Job now, during the facilitator pre-deploy, so the
+# cluster is already up when attendees reach session 05 — instead of costing
+# ~20 min of live session wall-clock. Idempotent: skips if the kubeconfig already
+# exists in SSM. See scripts/launch-k3s.sh and workshop/05-edge-infra/block-2.
+if [[ "${#THING_NAMES[@]}" -ge 3 ]]; then
+  echo ">>> Pre-warming edge K3s cluster via IoT Job (runs during pre-deploy)…"
+  bash "$(dirname "$0")/launch-k3s.sh" "$DEPLOYMENT_ID"
+else
+  echo ">>> Skipping K3s pre-warm — fewer than 3 devices registered."
+fi
+
 # ── Write deployment summary ──────────────────────────────────────────────────
 echo ">>> Generating deployment summary..."
 bash "$(dirname "$0")/deployment-summary.sh" "$DEPLOYMENT_ID"

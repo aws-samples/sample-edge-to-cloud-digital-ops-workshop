@@ -36,4 +36,24 @@ __pycache__
 .Python
 site/
 
+# Legacy pre-migration build artifacts (replaced by Firehose → Iceberg; ~2GB of
+# local JARs/Maven output, never committed). See #124 for the migration.
+flink-hudi-local/
+flink-hudi-sink/
+local-kafka-connect/
+
+# Java / Maven build output
+target/
+*.jar
+*.class
+
+# HMI / container build artifacts
+hmi/*.tar.gz
+workshop-hmi.tar.gz
+*.tar.gz
+
+# Editor / OS cruft
+*.swp
+*~
+.idea/
 
