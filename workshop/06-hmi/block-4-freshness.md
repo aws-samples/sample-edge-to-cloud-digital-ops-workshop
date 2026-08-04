@@ -10,7 +10,7 @@ Port-forward simultaneously and open each dashboard in a browser tab:
 
 ```bash
 # Edge HMI (already running from Block 1)
-kubectl port-forward -n edge svc/hmi 3000:3000 > /tmp/hmi-pf2.log 2>&1 &
+kubectl port-forward -n edge svc/edge-stack-hmi 3000:3000 > /tmp/hmi-pf2.log 2>&1 &
 HMI_PF_PID=$!
 # Wait for the forward to bind rather than racing a fixed sleep.
 until grep -q "Forwarding from" /tmp/hmi-pf2.log 2>/dev/null; do sleep 1; done
