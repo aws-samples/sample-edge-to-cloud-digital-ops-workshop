@@ -148,7 +148,7 @@ SELECT MAX(bucket) AS latest_bucket FROM cpu_hourly;
 
 ## Wrap-Up
 
-Recap the three-tier freshness ladder: **RisingWave** (sub-second) → **TimescaleDB** (seconds) → **Iceberg/Athena** (~300 seconds, up to ~15 minutes under low throughput).
+Recap the three-tier freshness ladder: **RisingWave** (sub-second) → **TimescaleDB** (seconds) → **Iceberg/Athena** (tens of seconds up to ~300 seconds, set by Firehose's buffering interval).
 
 **Preview Sessions 5–7:** Edge Kubernetes stack, simulated industrial site, and the HMI operator interface.
 

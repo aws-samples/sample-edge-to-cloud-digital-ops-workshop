@@ -47,16 +47,16 @@ The rest of this workshop maps real AWS and open-source components onto each box
 The layers solve distinct problems that no single system handles well:
 
 - **Broker** (IoT Core, EMQX) — accepts MQTT connections from thousands of devices, handles TLS termination, fan-out to subscribers. Not durable: messages that miss their subscriber window are gone.
-- **Streaming service** (MSK, Redpanda) — fills the durability gap. Multiple independent consumers (RisingWave, TimescaleDB, S3 connector) each maintain their own read offset and can fall behind or replay without affecting each other. The broker feeds this layer; the streaming service is what makes the downstream consumers decoupled.
+- **Streaming service** (MSK, Redpanda) — fills the durability gap. Multiple independent consumers (RisingWave, TimescaleDB) each maintain their own read offset and can fall behind or replay without affecting each other. The broker feeds this layer; the streaming service is what makes the downstream consumers decoupled.
 - **In-memory store** (RisingWave) — continuously maintains pre-computed aggregations *in RAM*. Queries hit pre-computed state — no row scan, no disk I/O. Freshness is ~100–300 ms from the stream. The cost is that raw history isn't stored here — only the views you defined.
 - **Disk-based store** (TimescaleDB) — accepts high-throughput appends from the stream and compresses them aggressively (90–95% on regular sensor data). Serves ad-hoc queries, time-range drilldowns, and joins against business data. Freshness lags slightly (seconds) because it materializes aggregates on a schedule rather than on every write.
-- **Object storage** (S3) — writes the raw stream once, forever. No query engine of its own; Athena bridges the gap. Cost-effective for compliance, ML training, and long-horizon analytics. Data freshness floor is ~300 s (Firehose's 5-minute buffering interval), up to ~15 min under very low throughput.
+- **Object storage** (S3) — writes the raw stream once, forever. No query engine of its own; Athena bridges the gap. Cost-effective for compliance, ML training, and long-horizon analytics. Data freshness is governed by Firehose's buffering (128 MB or 300 s, whichever fires first) — tens of seconds up to ~300 s at workshop-scale throughput.
 
 ---
 
 ## Full Architecture
 
-This workshop builds the following pipeline. The two paths (edge cluster and direct cloud ingest) both land in the same MSK cluster and the same downstream consumers.
+This workshop builds the following pipeline. The two ingest paths (edge cluster and direct cloud ingest) both land in the same MSK cluster feeding the streaming/relational consumers, while a separate IoT Rule delivers telemetry directly to Amazon Data Firehose for the Iceberg archive tier.
 
 ```mermaid
 flowchart TD
@@ -80,13 +80,14 @@ flowchart TD
 
     subgraph cloud["Cloud — AWS"]
         IoTCore["AWS IoT Core<br>(managed MQTT broker)"]
+        IoTRuleFH["IoT Rules Engine<br>(Firehose action)"]
+        Firehose["Amazon Data Firehose<br>(Iceberg destination)"]
+        S3["S3 / Iceberg"]
+        Athena["Amazon Athena"]
         IoTRule["IoT Rules Engine<br>(Kafka action)"]
         MSK["Amazon MSK<br>(Multi-AZ, Provisioned)"]
         RW_cloud["Cloud RisingWave<br>(fleet analytics)"]
         TSDB_cloud["Cloud TimescaleDB<br>(hot history, business joins)"]
-        Firehose["Amazon Data Firehose<br>(Iceberg destination)"]
-        S3["S3 / Iceberg"]
-        Athena["Amazon Athena"]
     end
 
     Sensor -->|MQTT publish| MQTTBroker
@@ -99,14 +100,15 @@ flowchart TD
     RPC_relay -->|zstd compressed| MSK
 
     IoTDevice -->|"MQTT / TLS"| IoTCore
+    IoTCore --> IoTRuleFH
     IoTCore --> IoTRule
+    IoTRuleFH -->|"Firehose action"| Firehose
+    Firehose -->|"Iceberg commits"| S3
+    S3 --> Athena
     IoTRule -->|"Kafka action (VPC destination)"| MSK
 
     MSK --> RW_cloud
     MSK --> TSDB_cloud
-    MSK -->|"IAM / SASL"| Firehose
-    Firehose -->|"Iceberg commits"| S3
-    S3 --> Athena
 
     classDef sensor fill:#FED7AA,stroke:#C2410C,color:#1a1a1a
     classDef broker fill:#FEF08A,stroke:#A16207,color:#1a1a1a
@@ -116,7 +118,7 @@ flowchart TD
     classDef object fill:#E5E7EB,stroke:#374151,color:#1a1a1a
 
     class Sensor,IoTDevice sensor
-    class MQTTBroker,IoTCore,IoTRule broker
+    class MQTTBroker,IoTCore,IoTRule,IoTRuleFH broker
     class RPC_relay,RP,MSK,Firehose streaming
     class RW_edge,RW_cloud inmem
     class TSDB,TSDB_cloud tsdb
@@ -128,10 +130,10 @@ flowchart TD
 | Component | Role | Where in workshop |
 |---|---|---|
 | **AWS IoT Core** | Managed MQTT broker for cloud-connected devices; fleet provisioning; device shadows; IoT Jobs | Sessions 1–4 |
-| **IoT Rules Engine** | Routes MQTT messages directly to MSK via a VPC Kafka action — no Lambda hop needed | Sessions 1–4 |
-| **Amazon MSK** | Cloud-side stream buffer; raw stream written to S3; feeds RisingWave and TimescaleDB | Sessions 1–4 |
-| **Amazon Data Firehose** | Writes raw telemetry from MSK into the pre-created Iceberg table in the Glue Data Catalog | Session 1 |
-| **Amazon Athena** | Query engine over the Iceberg table; measures the archive-tier freshness floor | Session 1 |
+| **IoT Rules Engine** | Two rules per slot: a VPC Kafka action to MSK (streaming/relational consumers) and a Firehose action to the Iceberg archive tier — no Lambda hop needed | Sessions 1–4 |
+| **Amazon MSK** | Cloud-side stream buffer; feeds RisingWave and TimescaleDB | Sessions 1–4 |
+| **Amazon Data Firehose** | Receives telemetry directly from an IoT Rule (Firehose action) and writes it into the pre-created Iceberg table in the Glue Data Catalog | Session 1 |
+| **Amazon Athena** | Query engine over the Iceberg table; measures the archive-tier freshness | Session 1 |
 | **Cloud RisingWave** | Fleet analytics; continuously maintained materialized views; sub-100 ms query latency | Session 4 |
 | **Cloud TimescaleDB** | Hot-tier history (days–weeks); continuous aggregates; ad-hoc SQL; business data joins | Session 4 |
 | **Redpanda @ Edge** | Durable stream buffer at the edge; offline replay when WAN is down | Sessions 5–7 |
@@ -203,7 +205,7 @@ The workshop makes this ladder directly observable — each tier is wired to a p
 | Cloud RisingWave MV | SSE via ALB → Next.js SUBSCRIBE cursor | ~300–650 ms | Flat — incremental MV update |
 | Edge TimescaleDB CAGG | AppSync Event triggers HTTP request → Next.js Route Handler → Edge TimescaleDB CAGG | ~100–400 ms (LAN) | Flat — edge fleet is fixed at 3 devices |
 | Cloud TimescaleDB CAGG | AppSync Event triggers HTTP query → CAGG + live scan | ~100 ms–3 s | Grows: live scan over un-materialized tail |
-| Iceberg / Athena | Firehose buffering interval + Iceberg commit | ~300 s (up to ~15 min under low throughput) | Grows with data volume |
+| Iceberg / Athena | Firehose buffering interval + Iceberg commit | tens of s up to ~300 s | Grows with data volume |
 
 !!! tip "Why does TimescaleDB freshness grow with fleet size?"
     At 3 devices the CAGG live scan touches ~30 un-materialized rows per query. At 500 devices (5,000 rows/second) the same query scans ~25,000 un-materialized rows — pushing freshness to 500 ms–3 s. RisingWave's MV cost stays flat because it was updated incrementally on every insert: the freshness cost is paid at write time, not read time.
@@ -215,7 +217,7 @@ The workshop makes this ladder directly observable — each tier is wired to a p
 | # | Session | Goal |
 |---|---------|------|
 | Pre | [Admin Setup](00-prerequisites/index.md) | Deploy the platform stack |
-| 1 | [Observe — The Data in Motion](01-observe/index.md) | IoT Core → MSK → S3 → Athena |
+| 1 | [Observe — The Data in Motion](01-observe/index.md) | IoT Core → Firehose → S3 → Athena |
 | 2 | [Control — Fleet Management](02-control/index.md) | IoT Jobs, device update, fleet indexing |
 | 3 | [State — Device Shadows & UI](03-state/index.md) | Named shadows, Amplify front end, failure detection |
 | 4 | [Analytics — Cloud Telemetry](04-analytics/index.md) | RisingWave MVs, TimescaleDB CAGGs, freshness comparison |

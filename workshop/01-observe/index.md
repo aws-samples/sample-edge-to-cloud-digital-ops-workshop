@@ -1,7 +1,7 @@
 # Session 1 — Observe: The Data in Motion
 
 **Duration:** 4 hours  
-**Goal:** Understand how devices register into IoT Core, then trace the full data path from EC2 → IoT Core → MSK → S3 → Athena and measure data freshness.
+**Goal:** Understand how devices register into IoT Core, then trace the full data path from EC2 → IoT Core → Firehose → S3 → Athena and measure data freshness.
 
 ---
 
@@ -26,4 +26,4 @@
 
 ## Key Takeaway
 
-By the end of this session you will have measured the **data freshness floor** of the archive tier (Iceberg/Athena: ~300 seconds, up to ~15 minutes under low throughput) and understood why it cannot serve a live operational dashboard. This sets up the motivation for the higher-frequency tiers introduced in Sessions 3–4.
+By the end of this session you will have measured the **data freshness** of the archive tier (Iceberg/Athena: tens of seconds up to ~300 seconds, governed by Firehose's buffering interval) and understood why it cannot serve a live operational dashboard. This sets up the motivation for the higher-frequency tiers introduced in Sessions 3–4.

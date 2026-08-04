@@ -34,7 +34,7 @@ The Y axis uses a **log₁₀ scale** because the three tiers span four orders o
 |---|---|
 | RisingWave MV | 100–600 ms |
 | TimescaleDB (live scan) | 1–3 s |
-| Athena/S3 | ~300 s (up to ~15 min under low throughput) |
+| Athena/S3 | tens of s up to ~300 s |
 
 A linear axis would make RisingWave and TimescaleDB indistinguishable — the log scale makes all three tiers clearly visible at once.
 

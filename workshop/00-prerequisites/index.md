@@ -31,6 +31,7 @@ flowchart TB
         iot_pkg["IoT Software Package Catalog\ntelemetry-agent v1 / v2"]
         rule_appsync["IoT Rule\nedge/{id}/+/telemetry → AppSync"]
         rule_msk["IoT Rule\nedge/{id}/+/telemetry → MSK"]
+        rule_firehose["IoT Rule\nedge/{id}/+/telemetry → Firehose"]
         bridge_fn["λ AppSync Bridge"]
     end
 
@@ -54,10 +55,12 @@ flowchart TB
     claim_secret -->|"claim cert on boot"| devices
     devices -->|"MQTT\nedge/{id}/{thing}/telemetry"| rule_appsync
     devices -->|"MQTT\nedge/{id}/{thing}/telemetry"| rule_msk
+    devices -->|"MQTT\nedge/{id}/{thing}/telemetry"| rule_firehose
     devices -->|"fleet provision"| iot_template
     iot_template --> iot_group
     rule_appsync --> bridge_fn --> appsync
-    rule_msk --> iot_vpc_dest --> msk --> firehose
+    rule_msk --> iot_vpc_dest --> msk
+    rule_firehose --> firehose
     firehose -->|"Iceberg table"| s3
     s3 --> athena
     athena -.->|"Glue catalog"| glue

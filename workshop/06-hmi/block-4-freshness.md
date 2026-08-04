@@ -30,7 +30,7 @@ kill "$HMI_PF_PID" 2>/dev/null || true
 | **Edge HMI — Frac Site** | Edge RisingWave MV | SSE via Next.js `SUBSCRIBE` cursor | ~100–300 ms (LAN) |
 | **Cloud UI — RisingWave panel** | Cloud RisingWave MV (`fleet_disk`) | SSE via ALB → Next.js `SUBSCRIBE` cursor | ~300–650 ms (low-latency WAN) |
 | **Cloud UI — TimescaleDB panel** | Cloud TimescaleDB CAGG | SSE via ALB + LISTEN/NOTIFY + 60 s window query | ~200–500 ms (WAN) |
-| **Cloud UI — Iceberg reference tile** | Static label | Athena console only | ~300 s floor *(Firehose 5-min buffering interval; up to ~15 min under low throughput)* |
+| **Cloud UI — Iceberg reference tile** | Static label | Athena console only | tens of s up to ~300 s *(Firehose buffering interval — 128 MB or 300 s, whichever fires first)* |
 
 ---
 

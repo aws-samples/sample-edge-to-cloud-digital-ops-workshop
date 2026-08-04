@@ -40,16 +40,18 @@ Edge — K3s / K3s
 Cloud — AWS
   Amazon MSK (Provisioned, SASL/SCRAM)
     │
-    ├─► Amazon Data Firehose (Iceberg destination) ──► S3 (Apache Iceberg) ──► Athena
-    │
     ├─► Cloud RisingWave (EKS) ──► ALB SSE ──► Cloud UI
     │
     └─► Cloud TimescaleDB (EKS) ──► ALB SSE ──► Cloud UI
 
+  Amazon Data Firehose (Iceberg destination) ──► S3 (Apache Iceberg) ──► Athena
+    ▲ (fed directly by an IoT Rule Firehose action — no MSK hop)
+
 AWS IoT Core
   ← EC2 (IoT Device Client, MQTT)
-  → IoT Rules Engine → Kafka action → MSK
-  → IoT Rules Engine → HTTP action → AppSync Events → Cloud UI (WebSocket)
+  → IoT Rules Engine → Kafka action    → MSK
+  → IoT Rules Engine → Firehose action → Amazon Data Firehose (Iceberg)
+  → IoT Rules Engine → HTTP action     → AppSync Events → Cloud UI (WebSocket)
 
 Amplify (hosted cloud UI)
   ← AppSync Events (WebSocket — device shadows, live push)
