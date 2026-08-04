@@ -110,6 +110,7 @@ export class ParticipantStack extends Stack {
     const mskClusterArn     = Fn.importValue("workshop-platform-msk-arn");
     const mskBootstrapScram = Fn.importValue("workshop-platform-msk-bootstrap-scram");
     const mskScramKeyArn    = Fn.importValue("workshop-platform-msk-scram-key-arn");
+    const icebergFirehoseArn = Fn.importValue("workshop-platform-firehose-stream-arn");
 
     // IoT VPC destination ARN and edge NAT gateway ID are written to SSM by the
     // sandbox scripts after the platform stack deploys (CfnTopicRuleDestination
@@ -1058,6 +1059,51 @@ exports.handler = async (event) => {
             bucketName: sharedBucketName,
             key: `iot-errors/${deploymentId}/\${timestamp()}/\${newuuid()}`,
             roleArn: iotKafkaVpcRole.roleArn,
+            cannedAcl: "private",
+          },
+        },
+        ruleDisabled: false,
+      },
+    });
+
+    // ── IoT Rule → Firehose → Iceberg (#139 — direct, no MSK hop) ────────────
+    // Same SQL enrichment as IotToMskRule above so the Iceberg columns
+    // (thing_name, mqtt_topic, ingest_ts, deployment_id) still populate.
+    // IotToMskRule stays as-is; Timescale still consumes it via MSK.
+    const iotFirehoseRole = new Role(this, "IotFirehoseRole", {
+      assumedBy: new ServicePrincipal("iot.amazonaws.com"),
+    });
+    iotFirehoseRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["firehose:PutRecord", "firehose:PutRecordBatch"],
+      resources: [icebergFirehoseArn],
+    }));
+    // Allow IoT to write delivery errors to the shared S3 bucket for debugging.
+    iotFirehoseRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:PutObject"],
+      resources: [`${sharedBucketArn}/iot-errors/${deploymentId}/*`],
+    }));
+
+    new CfnTopicRule(this, "IotToFirehoseRule", {
+      ruleName: `workshop_${deploymentId.replace(/-/g, "_")}_to_iceberg`,
+      topicRulePayload: {
+        sql: `SELECT *, topic(3) AS thing_name, topic() AS mqtt_topic, timestamp() AS ingest_ts, '${deploymentId}' AS deployment_id FROM 'edge/${deploymentId}/+/telemetry'`,
+        actions: [
+          {
+            firehose: {
+              deliveryStreamName: "workshop-telemetry-iceberg",
+              roleArn: iotFirehoseRole.roleArn,
+              batchMode: false,
+            },
+          },
+        ],
+        // Errors written to S3 for debugging — inspect at s3://…/iot-errors/<deploymentId>/
+        errorAction: {
+          s3: {
+            bucketName: sharedBucketName,
+            key: `iot-errors/${deploymentId}/\${timestamp()}/\${newuuid()}`,
+            roleArn: iotFirehoseRole.roleArn,
             cannedAcl: "private",
           },
         },
