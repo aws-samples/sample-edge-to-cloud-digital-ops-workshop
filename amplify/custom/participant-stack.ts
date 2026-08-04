@@ -1088,6 +1088,10 @@ exports.handler = async (event) => {
     new CfnTopicRule(this, "IotToFirehoseRule", {
       ruleName: `workshop_${deploymentId.replace(/-/g, "_")}_to_firehose`,
       topicRulePayload: {
+        // parse_time() requires SQL version 2016-03-23 or later; on the default
+        // 2015-10-08 it's unrecognized and silently returns null (which is why
+        // year/month/day/hour landed as null partitions). Pin the version.
+        awsIotSqlVersion: "2016-03-23",
         // Same enrichment as IotToMskRule so Iceberg columns populate identically,
         // plus year/month/day/hour derived from the ingest time. The Iceberg table
         // partitions on deployment_id + year/month/day/hour as identity columns, so
