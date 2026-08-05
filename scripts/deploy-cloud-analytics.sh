@@ -178,7 +178,10 @@ kubectl create serviceaccount risingwave-cloud \
   kubectl apply -f - >/dev/null
 
 # ── 5. helm upgrade --install the per-slot analytics stack ──────────────────
-DASHBOARD_IMAGE="${DASHBOARD_IMAGE:-workshop-cloud-dashboard:latest}"
+# The dashboard image is shared across all slots (one push per code change,
+# not per slot) — default to this account's ECR repo, built/pushed via
+# scripts/build-cloud-dashboard.sh.
+DASHBOARD_IMAGE="${DASHBOARD_IMAGE:-${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/workshop-cloud-dashboard:latest}"
 DASHBOARD_REPO="${DASHBOARD_IMAGE%%:*}"
 DASHBOARD_TAG="${DASHBOARD_IMAGE##*:}"
 
