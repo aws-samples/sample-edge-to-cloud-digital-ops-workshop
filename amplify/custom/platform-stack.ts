@@ -811,6 +811,16 @@ export class PlatformStack extends Stack {
       actions: ["iot:UpdateThingShadow", "iot:GetThingShadow"],
       resources: [`arn:aws:iot:${this.region}:${this.account}:thing/*`],
     }));
+    // The IoT Jobs service resolves the data-plane endpoint via DescribeEndpoint
+    // before writing the shadow; without it the $package write silently no-ops
+    // (the job still reports SUCCEEDED, but the shadow is never created). This
+    // mirrors the console-generated `aws-iot-role-update-shadows` role, which
+    // grants iot:DescribeEndpoint on "*" alongside the shadow permissions.
+    iotJobsShadowUpdateRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["iot:DescribeEndpoint"],
+      resources: ["*"],
+    }));
 
     // Enable IoT Jobs → $package shadow reporting account-wide. Once enabled, a
     // job whose destinationPackageVersions is set updates the thing's reserved
