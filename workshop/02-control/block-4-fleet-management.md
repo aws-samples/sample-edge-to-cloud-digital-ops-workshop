@@ -6,7 +6,7 @@
 
 ## Steps
 
-**1. Navigate to [IoT Core → Software Package Catalog](https://console.aws.amazon.com/iot/home#/softwarepackagecatalog)**
+**1. Navigate to [IoT Core → Software Package Catalog](https://console.aws.amazon.com/iot/home#/devicePackages)**
 
 - Observe the pre-registered package `ws-slot00-telemetry-agent` with published versions `1.0.0`–`4.0.0` (created by the platform/participant stacks — no manual registration needed)
 - Because the Session-2 job deployed version `4.0.0` with `--destination-package-versions`, IoT Jobs updated each device's reserved `$package` shadow to `telemetry-agent.version: 4.0.0` automatically on success — the catalog is the source of truth for what each device runs

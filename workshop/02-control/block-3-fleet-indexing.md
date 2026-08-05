@@ -54,23 +54,39 @@
 
     > **Note:** Thing names are EC2 instance IDs, not slot-prefixed — `attributes.deploymentId` is the right field to scope to your slot. Combine it with any other filter using `AND`, e.g. `attributes.deploymentId:ws-slot00 AND connectivity.connected:true`.
 
-6. Query by shadow state — confirm current config version:
+6. Query by shadow state — print the reported `config_version` (from the
+   `device-config` shadow) and `telemetry-agent` version (from the reserved
+   `$package` shadow) for each device, side by side:
 
-    [Open in console](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=attributes.deploymentId%3Aws-slot00%20AND%20shadow.name.device-config.reported.config_version%3A3.0.0){ .md-button target=_blank }
+    ```bash
+    aws iot search-index --index-name AWS_Things \
+      --query-string 'attributes.deploymentId:ws-slot00' \
+    | jq -r '["THING","CONFIG_VERSION","TELEMETRY_AGENT"],
+             (.things[] | [
+               .thingName,
+               (.shadow | fromjson | .name["device-config"].reported.config_version),
+               (.shadow | fromjson | .name["$package"].reported["telemetry-agent"].version)
+             ]) | @tsv' | column -t
+    ```
+    <!-- e2e:assert {"contains": "TELEMETRY_AGENT"} -->
 
-    ??? example "AWS CLI equivalent"
-        ```bash
-        aws iot search-index --index-name AWS_Things \
-          --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.device\-config.reported.config_version:*'
-        ```
-        <!-- e2e:assert {"jsonPath": "things[0].thingName", "matches": ".+"} -->
+    Output — one row per device:
 
-    > **Note:** The example above queries for any reported `config_version` rather than
-    > pinning `3.0.0` — later sessions push newer job versions to the same shared slot,
-    > so a fixed version would drift out of date. Swap in a specific version (e.g.
-    > `3.0.0`) to confirm a job rollout completed on your own deployment.
+    ```
+    THING                CONFIG_VERSION  TELEMETRY_AGENT
+    i-012cb542a8cd2ad6b  4.0.0           4.0.0
+    i-0a661fd3a5c46da02  4.0.0           4.0.0
+    i-0233f0350a555411c  4.0.0           4.0.0
+    ```
 
-    > **Note:** The backslash before the hyphen (`device\-config`) is required because `-` is a reserved character in the Lucene query language. Without it the query parser rejects the field name with `InvalidQueryException`. The same escaping applies to any shadow name that contains a hyphen.
+    > **Note:** Fleet-indexing search is a *filter*, not a *projection* — a Lucene
+    > query like `config_version:*` only decides which Things match; it can't make
+    > the search *return* a field value. Both versions ride along inside each
+    > matched Thing's shadow document, so we pull them out with `jq` client-side.
+    > In the console you'd instead open a single Thing → **Device Shadows** and read
+    > the `device-config` and `$package` shadows one at a time. To do a yes/no
+    > rollout check on the fleet instead, add the version to the query itself, e.g.
+    > `... AND shadow.name.device-config.reported.config_version:3.0.0`.
 
 7. Query connectivity status:
 
@@ -83,34 +99,13 @@
         ```
         <!-- e2e:assert {"jsonPath": "things[0].thingName", "matches": ".+"} -->
 
-8. Query by software package version — confirm all devices are on `telemetry-agent` v3.0.0:
-
-    [Open in console](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=attributes.deploymentId%3Aws-slot00%20AND%20shadow.name.%24package.reported.telemetry\-agent.version%3A3.0.0){ .md-button target=_blank }
-
-    ??? example "AWS CLI equivalent"
-        ```bash
-        aws iot search-index --index-name AWS_Things \
-          --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.$package.reported.telemetry\-agent.version:*'
-        ```
-        <!-- e2e:assert {"jsonPath": "things[0].thingName", "matches": ".+"} -->
-
-    > **Note:** As above, the example queries for any reported version rather than
-    > pinning `3.0.0` — later sessions push newer `telemetry-agent` jobs to the same
-    > shared slot. Swap in a specific version to confirm your own rollout.
-
-    > **Note:** The backslash before the hyphen (`telemetry\-agent`) is required —
-    > `-` is a reserved character in the Lucene query language, same as the
-    > `device\-config` escaping in step 6. Package version fields keep their
-    > original hyphenated name (`telemetry-agent`), they are **not** rewritten to
-    > underscores — verified against a live index.
-
 
 ---
 
 ## Discussion Questions
 
 - What is the difference between a static Thing Group and a Dynamic Thing Group?
-- How would you target a job at "all devices still on `telemetry-agent` v1.0.0"? (Hint: use the `$package` shadow query from step 7 as the Dynamic Thing Group filter.)
+- How would you target a job at "all devices still on `telemetry-agent` v1.0.0"? (Hint: use the reserved `$package` shadow as the Dynamic Thing Group filter — `attributes.deploymentId:ws-slot00 AND shadow.name.$package.reported.telemetry-agent.version:1.0.0`.)
 - What's the eventual-consistency caveat with Dynamic Thing Groups? (Group membership evaluates asynchronously — newly registered devices may take seconds to appear.)
 - What does socket indexing let you do that plain connectivity indexing doesn't? (Answer: pinpoint which source IPs/ports are connecting — useful for diagnosing NAT traversal issues or spotting devices connecting from unexpected networks.)
 
