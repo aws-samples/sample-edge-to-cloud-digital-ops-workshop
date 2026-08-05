@@ -1,17 +1,15 @@
 -- RisingWave DDL — cloud EKS instance
--- Run once after deploying risingwave-operator + risingwave-cloud.yaml and
--- applying the MSK credentials Secret.
 --
--- Connect (substitute your deployment ID and MSK broker addresses):
+-- Applied automatically by the post-install/post-upgrade Job in
+-- helm/cloud-analytics/templates/risingwave-ddl-job.yaml (mirrors the pattern
+-- in helm/edge-stack/templates/risingwave-ddl-job.yaml) — the Job reads the
+-- __MSK_BOOTSTRAP__/__MSK_USER__/__MSK_PASS__ placeholders below from the
+-- in-cluster `msk-credentials` Secret and substitutes them itself, then pipes
+-- the result through psql. No manual sed/psql step (see #159).
+--
+-- To re-apply by hand for debugging, port-forward the frontend service and
+-- substitute the same three placeholders yourself:
 --   kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567
---   # Then in another terminal, substitute and run:
---   MSK_BOOTSTRAP="<your-bootstrap-servers>"
---   MSK_USER="workshop-ws-slot00"
---   MSK_PASS="$(aws secretsmanager get-secret-value --secret-id /workshop/ws-slot00/msk-credentials --query SecretString --output text | python3 -c 'import sys,json; print(json.load(sys.stdin)["password"])')"
---   sed -e "s|__MSK_BOOTSTRAP__|$MSK_BOOTSTRAP|g" \
---       -e "s|__MSK_USER__|$MSK_USER|g" \
---       -e "s|__MSK_PASS__|$MSK_PASS|g" \
---       risingwave/ddl-cloud.sql | psql -h localhost -p 4567 -U root -d dev
 --
 -- Notes on topic naming:
 --   MSK topics are named sensors.raw.<site-id> where site-id matches the edge node.
@@ -121,3 +119,14 @@ FROM (
     SELECT 'net_io_bytes_recv' AS sensor, thing_name AS site_id, net_io_bytes_recv::DOUBLE AS value, ingest_ts AS ts_ms FROM sensors_raw_telemetry
 ) combined
 GROUP BY sensor, site_id, (ts_ms / 60000);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Subscription: change feed on mv_sensor_fleet_latest for the cloud dashboard's
+-- push path (#160). A server-side consumer (cloud-dashboard's
+-- /api/stream/risingwave route) declares a SUBSCRIPTION CURSOR against this
+-- and relays each change event to the browser over SSE — no client polling.
+-- Retention window bounds how far a newly-connected cursor can look back.
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE SUBSCRIPTION IF NOT EXISTS dashboard_freshness_sub
+FROM mv_sensor_fleet_latest
+WITH (retention = '1D');
