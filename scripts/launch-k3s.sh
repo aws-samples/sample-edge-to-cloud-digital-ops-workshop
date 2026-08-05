@@ -87,6 +87,38 @@ aws iot create-job \
   --timeout-config '{"inProgressTimeoutInMinutes":45}' \
   --output json >/dev/null
 
+# ── Nudge the device clients to pick the job up immediately ──────────────────
+# aws-iot-device-client v1.10.x has a notify-next race: once a device has gone
+# idle ("waiting for the next incoming job") it does NOT reliably act on the
+# MQTT notify for a job created afterwards, so executions can sit QUEUED
+# indefinitely (observed twice during ws-slot05 pre-warm). Restarting the
+# service forces an immediate re-scan for pending jobs, which reliably drains
+# the queue. Best-effort: a restart failure must not abort the pre-warm — the
+# 30-min poll below still gives the job time to run. See #146.
+echo ">>> Nudging aws-iot-device-client on edge devices to pick up $JOB_ID (notify-next race workaround)…"
+DEVICE_INSTANCE_IDS=$(aws ec2 describe-instances \
+  --filters \
+    "Name=tag:WorkshopDeploymentId,Values=${DEPLOYMENT_ID}" \
+    "Name=tag:Name,Values=*edge-?" \
+    "Name=instance-state-name,Values=running" \
+  --query "Reservations[].Instances[].InstanceId" \
+  --output text 2>/dev/null || true)
+if [[ -n "${DEVICE_INSTANCE_IDS// }" ]]; then
+  # shellcheck disable=SC2086 — intentional word-splitting of the id list
+  if aws ssm send-command \
+      --instance-ids $DEVICE_INSTANCE_IDS \
+      --document-name "AWS-RunShellScript" \
+      --comment "Restart aws-iot-device-client for K3s job pickup (#146)" \
+      --parameters 'commands=["systemctl restart aws-iot-device-client"]' \
+      --query "Command.CommandId" --output text >/dev/null 2>&1; then
+    echo ">>> Sent device-client restart to: $DEVICE_INSTANCE_IDS"
+  else
+    echo ">>> WARN: could not send device-client restart (continuing; job may still run)." >&2
+  fi
+else
+  echo ">>> WARN: no running edge instances found to nudge (continuing)." >&2
+fi
+
 # ── Poll for the kubeconfig to appear in SSM (server node wrote it) ──────────
 # The server (lowest instance-id) installs K3s (~10-20 min) then writes the
 # kubeconfig; agents join afterwards. We gate on the kubeconfig param rather
