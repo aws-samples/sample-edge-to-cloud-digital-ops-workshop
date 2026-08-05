@@ -794,6 +794,71 @@ export class PlatformStack extends Stack {
       value: athenaWorkGroup.name,
     });
 
+    // ── IoT Jobs → reserved $package shadow auto-update ──────────────────────
+    // Role IoT Jobs assumes to write the reserved named shadow ($package) when a
+    // job with destinationPackageVersions completes successfully. Enabled
+    // account-wide via the PackageConfig custom resource below. Account-wide, so
+    // it lives in PlatformStack (one role covers all slots), mirroring
+    // FleetIndexingConfig. Thing names are EC2 instance IDs (not slot-prefixed)
+    // and carry no tags, so the shadow resource can't be scoped tighter than
+    // thing/* — consistent with the participant role's IoT scoping rationale.
+    const iotJobsShadowUpdateRole = new Role(this, "IotJobsShadowUpdateRole", {
+      assumedBy: new ServicePrincipal("iot.amazonaws.com"),
+      description: "Lets IoT Jobs update the reserved $package named shadow on job success",
+    });
+    iotJobsShadowUpdateRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["iot:UpdateThingShadow", "iot:GetThingShadow"],
+      resources: [`arn:aws:iot:${this.region}:${this.account}:thing/*`],
+    }));
+
+    // Enable IoT Jobs → $package shadow reporting account-wide. Once enabled, a
+    // job whose destinationPackageVersions is set updates the thing's reserved
+    // $package shadow automatically on success — so job handlers must NOT also
+    // hand-write $package (AWS warns this causes version inconsistencies).
+    // Account-wide setting, one custom resource for all slots (like
+    // FleetIndexingConfig below).
+    const packageConfig = new AwsCustomResource(this, "PackageConfig", {
+      onCreate: {
+        service: "Iot",
+        action: "updatePackageConfiguration",
+        parameters: {
+          versionUpdateByJobsConfig: {
+            enabled: true,
+            roleArn: iotJobsShadowUpdateRole.roleArn,
+          },
+        },
+        physicalResourceId: PhysicalResourceId.of("PackageConfig"),
+      },
+      onUpdate: {
+        service: "Iot",
+        action: "updatePackageConfiguration",
+        parameters: {
+          versionUpdateByJobsConfig: {
+            enabled: true,
+            roleArn: iotJobsShadowUpdateRole.roleArn,
+          },
+        },
+        physicalResourceId: PhysicalResourceId.of("PackageConfig"),
+      },
+      // No onDelete: versionUpdateByJobsConfig is account-wide and not part of
+      // routine slot teardown; leaving it enabled is harmless (no effect until a
+      // job sets destinationPackageVersions).
+      policy: AwsCustomResourcePolicy.fromSdkCalls({
+        resources: AwsCustomResourcePolicy.ANY_RESOURCE,
+      }),
+    });
+    // updatePackageConfiguration validates the role can be assumed by IoT →
+    // ensure the role exists first.
+    packageConfig.node.addDependency(iotJobsShadowUpdateRole);
+    // fromSdkCalls(ANY_RESOURCE) covers iot:updatePackageConfiguration, but
+    // passing a role to a service additionally requires iam:PassRole.
+    packageConfig.grantPrincipal.addToPrincipalPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["iam:PassRole"],
+      resources: [iotJobsShadowUpdateRole.roleArn],
+    }));
+
     // Fleet Indexing: enable REGISTRY_AND_SHADOW with named shadow indexing.
     // Required for Session 3 shadow-based fleet queries
     // (e.g. shadow.name.device-health.reported.cpu_pct).

@@ -412,19 +412,59 @@ exports.handler = async (event) => {
     });
 
     // ── Software Package Catalog ─────────────────────────────────────────────
+    // The telemetry-agent package is the source of truth for what version each
+    // device runs. Versions carry a `version` attribute; a job with
+    // destinationPackageVersions pointed at one of these publishes it into the
+    // device's reserved $package shadow automatically (see PackageConfig in the
+    // platform stack). Only 4.0.0 is deployed by a workshop doc today
+    // (02-control/block-2 → telemetry-v4.sh); the lower versions give the
+    // catalog a realistic version history for the fleet-management block.
     const softwarePackage = new CfnSoftwarePackage(this, "TelemetryAgentPackage", {
       packageName: `${deploymentId}-telemetry-agent`,
     });
 
-    new CfnSoftwarePackageVersion(this, "TelemetryAgentV1", {
-      packageName: softwarePackage.ref,
-      versionName: "1.0.0",
-    });
+    const telemetryAgentVersions = ["1.0.0", "2.0.0", "3.0.0", "4.0.0"];
+    for (const versionName of telemetryAgentVersions) {
+      const logicalId = `TelemetryAgentV${versionName.split(".")[0]}`;
+      const version = new CfnSoftwarePackageVersion(this, logicalId, {
+        packageName: softwarePackage.ref,
+        versionName,
+        attributes: { version: versionName },
+      });
+      version.addDependency(softwarePackage);
 
-    new CfnSoftwarePackageVersion(this, "TelemetryAgentV2", {
-      packageName: softwarePackage.ref,
-      versionName: "2.0.0",
-    });
+      // CFN creates package versions in DRAFT and exposes no publish/status
+      // property. A version must be PUBLISHED to be deployable via
+      // destinationPackageVersions, so publish it with UpdatePackageVersion.
+      const publish = new AwsCustomResource(this, `${logicalId}Publish`, {
+        onCreate: {
+          service: "Iot",
+          action: "updatePackageVersion",
+          parameters: {
+            packageName: `${deploymentId}-telemetry-agent`,
+            versionName,
+            action: "PUBLISH",
+          },
+          physicalResourceId: PhysicalResourceId.of(`${logicalId}Publish`),
+        },
+        onUpdate: {
+          service: "Iot",
+          action: "updatePackageVersion",
+          parameters: {
+            packageName: `${deploymentId}-telemetry-agent`,
+            versionName,
+            action: "PUBLISH",
+          },
+          physicalResourceId: PhysicalResourceId.of(`${logicalId}Publish`),
+        },
+        policy: AwsCustomResourcePolicy.fromSdkCalls({
+          resources: [
+            `arn:aws:iot:${this.region}:${this.account}:package/${deploymentId}-telemetry-agent/version/${versionName}`,
+          ],
+        }),
+      });
+      publish.node.addDependency(version);
+    }
 
     // --8<-- [start:provisioning-template]
     const provisioningTemplate = new CfnProvisioningTemplate(this, "ProvisioningTemplate", {
