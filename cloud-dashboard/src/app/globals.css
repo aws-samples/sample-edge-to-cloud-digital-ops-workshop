@@ -1,0 +1,6 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; }
+.page { padding: 2rem 1.5rem; }
+.page-title { font-size: 1.4rem; font-weight: 700; margin-bottom: 1.5rem; }
+.card { background: #1e293b; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+        padding: 1.25rem; margin-bottom: 1rem; }
