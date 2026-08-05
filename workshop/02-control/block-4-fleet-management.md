@@ -8,8 +8,8 @@
 
 **1. Navigate to [IoT Core → Software Package Catalog](https://console.aws.amazon.com/iot/home#/softwarepackagecatalog)**
 
-- Observe the pre-registered package `ws-slot00-telemetry-agent` with versions `1.0.0` and `2.0.0` (deployed by the platform stack — no manual registration needed)
-- The `telemetry-v2.sh` job handler will update each device's `$package` shadow with `version: 2.0.0` after it runs successfully
+- Observe the pre-registered package `ws-slot00-telemetry-agent` with published versions `1.0.0`–`4.0.0` (created by the platform/participant stacks — no manual registration needed)
+- Because the Session-2 job deployed version `4.0.0` with `--destination-package-versions`, IoT Jobs updated each device's reserved `$package` shadow to `telemetry-agent.version: 4.0.0` automatically on success — the catalog is the source of truth for what each device runs
 
 ??? example "AWS CLI equivalent"
     ```bash
@@ -19,9 +19,9 @@
     ```
     <!-- e2e:assert {"contains": "ws-slot00"} -->
 
-**2. Run a Fleet Indexing query to confirm all devices report `2.0.0`:**
+**2. Run a Fleet Indexing query to confirm all devices report a `config_version`:**
 
-[Open in console](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=attributes.deploymentId%3Aws-slot00%20AND%20shadow.name.device-config.reported.config_version%3A2.0.0){ .md-button target=_blank }
+[Open in console](https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=attributes.deploymentId%3Aws-slot00%20AND%20shadow.name.device-config.reported.config_version%3A*){ .md-button target=_blank }
 
 ??? example "AWS CLI equivalent"
     ```bash

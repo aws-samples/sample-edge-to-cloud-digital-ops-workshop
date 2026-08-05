@@ -103,6 +103,7 @@ aws s3 cp /tmp/telemetry-v4-job-doc.json \
     s3://workshop-platform-000000000000/ws-slot00/job-docs/telemetry-v4-job-doc.json
     ```
 
+- **Software package version (Deployment):** select `ws-slot00-telemetry-agent` version `4.0.0` — this associates the deployment with the catalog so IoT updates the device's `$package` shadow automatically on success.
 - **Rollout:** Max rate **1 device/minute**
 - **Abort criteria:** abort if **>33%** of devices fail
 
@@ -116,6 +117,8 @@ aws s3 cp /tmp/telemetry-v4-job-doc.json \
           --query thingGroupArn --output text)" \
       --document-source \
           s3://workshop-platform-000000000000/ws-slot00/job-docs/telemetry-v4-job-doc.json \
+      --destination-package-versions \
+          "arn:aws:iot:us-east-1:000000000000:package/ws-slot00-telemetry-agent/version/4.0.0" \
       --job-executions-rollout-config \
           '{"maximumPerMinute":1}' \
       --abort-config \
@@ -124,6 +127,13 @@ aws s3 cp /tmp/telemetry-v4-job-doc.json \
       --output json
     ```
     <!-- e2e:assert {"jsonPath": "jobId", "matches": "telemetry-v4-\\d+$", "jobSucceeds": true} -->
+
+    > **Note:** `--destination-package-versions` links this job to the published
+    > `telemetry-agent` catalog version. On `SUCCEEDED`, IoT Jobs writes the reserved
+    > `$package` shadow (`telemetry-agent.version: 4.0.0`) for you — the handler no
+    > longer writes it by hand. The handler still writes the app-level
+    > `device-config.reported.config_version` shadow, which package deployment does
+    > not manage.
 
 **4. Observe job status** per device: `IN_PROGRESS` → `SUCCEEDED`
 
