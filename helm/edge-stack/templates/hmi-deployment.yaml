@@ -17,6 +17,24 @@ spec:
         {{- include "edge-stack.labels" . | nindent 8 }}
         app.kubernetes.io/component: hmi
     spec:
+      serviceAccountName: {{ include "edge-stack.fullname" . }}-hmi
+      initContainers:
+        # Block startup until the CloudNativePG-managed timescaledb-app secret
+        # exists. On a cold deploy the HMI schedules before TimescaleDB has
+        # bootstrapped; without this wait the pod would surface a noisy
+        # CreateContainerConfigError until the secret appears. Mirrors the wait
+        # pattern in timescaledb-dsn-secret.yaml. See #145.
+        - name: wait-for-timescale-secret
+          image: bitnami/kubectl:latest
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for timescaledb-app secret in namespace {{ .Release.Namespace }}..."
+              until kubectl get secret timescaledb-app -n {{ .Release.Namespace }} >/dev/null 2>&1; do
+                sleep 5
+              done
+              echo "timescaledb-app secret present — starting HMI."
       containers:
         - name: hmi
           image: "{{ .Values.hmi.image.repository }}:{{ .Values.hmi.image.tag }}"
@@ -53,6 +71,52 @@ spec:
                 secretKeyRef:
                   name: timescaledb-app
                   key: password
-                  optional: true
+                  # NOT optional: the initContainer above guarantees the secret
+                  # exists before the HMI container starts. Marking it optional
+                  # would silently drop the var and fall back to the default
+                  # password, breaking /api/digital-ops permanently. See #145.
           resources:
             {{- toYaml .Values.hmi.resources | nindent 12 }}
+---
+# ServiceAccount + RBAC for the wait-for-timescale-secret initContainer above.
+# Long-lived (not a Helm hook, unlike the tsdb-dsn SA) because the Deployment
+# may reschedule the pod at any time and must always be able to poll for the
+# secret. Read-only: get on secrets only. See #145.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "edge-stack.fullname" . }}-hmi
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hmi
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "edge-stack.fullname" . }}-hmi-secret-reader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hmi
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "edge-stack.fullname" . }}-hmi-secret-reader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hmi
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "edge-stack.fullname" . }}-hmi-secret-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "edge-stack.fullname" . }}-hmi
+    namespace: {{ .Release.Namespace }}
