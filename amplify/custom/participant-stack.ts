@@ -457,11 +457,34 @@ exports.handler = async (event) => {
           },
           physicalResourceId: PhysicalResourceId.of(`${logicalId}Publish`),
         },
-        policy: AwsCustomResourcePolicy.fromSdkCalls({
-          resources: [
-            `arn:aws:iot:${this.region}:${this.account}:package/${deploymentId}-telemetry-agent/version/${versionName}`,
-          ],
-        }),
+        // updatePackageVersion needs two grants that fromSdkCalls can't derive
+        // correctly on its own:
+        //   1. iot:UpdatePackageVersion authorizes against BOTH the package ARN
+        //      and the version ARN — a single-ARN grant returns AccessDenied
+        //      naming whichever ARN is absent.
+        //   2. it additionally requires iot:GetIndexingConfiguration (an
+        //      account-level, unscopable read).
+        // Both go in ONE fromStatements policy (not fromSdkCalls + a separate
+        // addToPrincipalPolicy) so they land in the CustomResourcePolicy the
+        // custom resource explicitly depends on. Adding GetIndexingConfiguration
+        // to the shared provider role's *default* policy instead races the four
+        // parallel publishers — some run before the grant propagates. All
+        // verified live: each missing grant reproduces its own AccessDenied.
+        policy: AwsCustomResourcePolicy.fromStatements([
+          new PolicyStatement({
+            effect: Effect.ALLOW,
+            actions: ["iot:UpdatePackageVersion"],
+            resources: [
+              `arn:aws:iot:${this.region}:${this.account}:package/${deploymentId}-telemetry-agent`,
+              `arn:aws:iot:${this.region}:${this.account}:package/${deploymentId}-telemetry-agent/version/${versionName}`,
+            ],
+          }),
+          new PolicyStatement({
+            effect: Effect.ALLOW,
+            actions: ["iot:GetIndexingConfiguration"],
+            resources: ["*"],
+          }),
+        ]),
       });
       publish.node.addDependency(version);
     }
