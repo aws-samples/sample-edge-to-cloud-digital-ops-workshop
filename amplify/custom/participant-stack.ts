@@ -26,7 +26,6 @@ import {
   CfnPolicy as IotPolicy,
   CfnThingGroup,
   CfnSoftwarePackage,
-  CfnSoftwarePackageVersion,
 } from "aws-cdk-lib/aws-iot";
 import {
   Secret,
@@ -424,18 +423,82 @@ exports.handler = async (event) => {
     });
 
     const telemetryAgentVersions = ["1.0.0", "2.0.0", "3.0.0", "4.0.0"];
+    // Common ARNs for a version's grants: UpdatePackageVersion/CreatePackageVersion
+    // authorize against BOTH the package ARN and the version ARN — granting only
+    // one yields AccessDenied naming whichever is absent. GetIndexingConfiguration
+    // is an account-level read that can't be scoped. Both SDK calls also require
+    // GetIndexingConfiguration (per the IoT API reference), and fromSdkCalls can't
+    // derive that second action, so every version's policy is built explicitly.
+    const packageArn = `arn:aws:iot:${this.region}:${this.account}:package/${deploymentId}-telemetry-agent`;
     for (const versionName of telemetryAgentVersions) {
       const logicalId = `TelemetryAgentV${versionName.split(".")[0]}`;
-      const version = new CfnSoftwarePackageVersion(this, logicalId, {
-        packageName: softwarePackage.ref,
-        versionName,
-        attributes: { version: versionName },
-      });
-      version.addDependency(softwarePackage);
+      const versionArn = `${packageArn}/version/${versionName}`;
 
-      // CFN creates package versions in DRAFT and exposes no publish/status
-      // property. A version must be PUBLISHED to be deployable via
-      // destinationPackageVersions, so publish it with UpdatePackageVersion.
+      // The full version lifecycle is custom-resource-driven rather than using
+      // the L1 CfnSoftwarePackageVersion. The L1 resource stores the version's
+      // `attributes` in CloudFormation state; because a version must be PUBLISHED
+      // to be deployable (see the publish resource below) and IoT forbids ANY
+      // attribute change on a PUBLISHED version, any later stack operation that
+      // re-touches the L1 resource — including a rollback restoring prior
+      // attribute values — issues an UpdatePackageVersion that hard-fails with
+      // "Attributes cannot be updated for a version in PUBLISHED status",
+      // permanently wedging the slot. Managing create/publish/delete as
+      // idempotent SDK calls keeps redeploys and rollbacks safe.
+      const create = new AwsCustomResource(this, logicalId, {
+        onCreate: {
+          service: "Iot",
+          action: "createPackageVersion",
+          parameters: {
+            packageName: `${deploymentId}-telemetry-agent`,
+            versionName,
+            attributes: { version: versionName },
+          },
+          physicalResourceId: PhysicalResourceId.of(`${logicalId}Create`),
+          // A redeploy re-runs onCreate/onUpdate; an existing version returns
+          // ConflictException, which is the intended no-op (attributes are never
+          // updated on an already-created version — that would fail once PUBLISHED).
+          ignoreErrorCodesMatching: "ConflictException",
+        },
+        onUpdate: {
+          service: "Iot",
+          action: "createPackageVersion",
+          parameters: {
+            packageName: `${deploymentId}-telemetry-agent`,
+            versionName,
+            attributes: { version: versionName },
+          },
+          physicalResourceId: PhysicalResourceId.of(`${logicalId}Create`),
+          ignoreErrorCodesMatching: "ConflictException",
+        },
+        onDelete: {
+          service: "Iot",
+          action: "deletePackageVersion",
+          parameters: {
+            packageName: `${deploymentId}-telemetry-agent`,
+            versionName,
+          },
+          // Tolerate a version already removed out-of-band (e.g. manual cleanup).
+          ignoreErrorCodesMatching: "ResourceNotFoundException",
+        },
+        policy: AwsCustomResourcePolicy.fromStatements([
+          new PolicyStatement({
+            effect: Effect.ALLOW,
+            actions: ["iot:CreatePackageVersion", "iot:DeletePackageVersion"],
+            resources: [packageArn, versionArn],
+          }),
+          new PolicyStatement({
+            effect: Effect.ALLOW,
+            actions: ["iot:GetIndexingConfiguration"],
+            resources: ["*"],
+          }),
+        ]),
+      });
+      create.node.addDependency(softwarePackage);
+
+      // Versions are created in DRAFT; a version must be PUBLISHED to be
+      // deployable via destinationPackageVersions (see PackageConfig in the
+      // platform stack). PUBLISH is idempotent — re-publishing a PUBLISHED
+      // version is a no-op, so redeploys are safe.
       const publish = new AwsCustomResource(this, `${logicalId}Publish`, {
         onCreate: {
           service: "Iot",
@@ -457,27 +520,11 @@ exports.handler = async (event) => {
           },
           physicalResourceId: PhysicalResourceId.of(`${logicalId}Publish`),
         },
-        // updatePackageVersion needs two grants that fromSdkCalls can't derive
-        // correctly on its own:
-        //   1. iot:UpdatePackageVersion authorizes against BOTH the package ARN
-        //      and the version ARN — a single-ARN grant returns AccessDenied
-        //      naming whichever ARN is absent.
-        //   2. it additionally requires iot:GetIndexingConfiguration (an
-        //      account-level, unscopable read).
-        // Both go in ONE fromStatements policy (not fromSdkCalls + a separate
-        // addToPrincipalPolicy) so they land in the CustomResourcePolicy the
-        // custom resource explicitly depends on. Adding GetIndexingConfiguration
-        // to the shared provider role's *default* policy instead races the four
-        // parallel publishers — some run before the grant propagates. All
-        // verified live: each missing grant reproduces its own AccessDenied.
         policy: AwsCustomResourcePolicy.fromStatements([
           new PolicyStatement({
             effect: Effect.ALLOW,
             actions: ["iot:UpdatePackageVersion"],
-            resources: [
-              `arn:aws:iot:${this.region}:${this.account}:package/${deploymentId}-telemetry-agent`,
-              `arn:aws:iot:${this.region}:${this.account}:package/${deploymentId}-telemetry-agent/version/${versionName}`,
-            ],
+            resources: [packageArn, versionArn],
           }),
           new PolicyStatement({
             effect: Effect.ALLOW,
@@ -486,7 +533,7 @@ exports.handler = async (event) => {
           }),
         ]),
       });
-      publish.node.addDependency(version);
+      publish.node.addDependency(create);
     }
 
     // --8<-- [start:provisioning-template]
