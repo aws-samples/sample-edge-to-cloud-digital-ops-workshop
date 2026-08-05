@@ -67,14 +67,7 @@ aws iot-data update-thing-shadow \
   --payload '{"state":{"reported":{"telemetry_interval_ms":1000,"metrics":["cpu_pct","mem_used_pct","disk_used_pct","net_io_bytes_sent","net_io_bytes_recv"],"config_version":"2.0.0"}}}' \
   /dev/null
 
-aws iot-data update-thing-shadow \
-  --region "$REGION" \
-  --endpoint-url "https://$IOT_ENDPOINT" \
-  --thing-name "$INSTANCE_ID" \
-  --shadow-name '$package' \
-  --cli-binary-format raw-in-base64-out \
-  --payload '{"state":{"reported":{"telemetry-agent":{"version":"2.0.0"}}}}' \
-  /dev/null
+# NOTE: $package shadow is updated automatically by IoT Jobs (destinationPackageVersions) — do not write it here.
 
 echo "telemetry-v2 applied successfully"
 exit 0

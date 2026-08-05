@@ -68,9 +68,9 @@ PREV_RECV=0
 
 while true; do
   # Collect measurements; top -bn1 takes ~100ms to sample CPU
-  CPU=$(top -bn1 | grep "Cpu(s)" | awk '{printf "%d", $2+0}')
-  MEM=$(free | awk '/Mem:/ {printf "%d", $3/$2*100}')
-  DISK=$(df / | awk 'NR==2 {printf "%d", $5+0}')
+  CPU=$(top -bn1 | grep "Cpu(s)" | awk '{printf "%.3f", $2+0}')
+  MEM=$(free | awk '/Mem:/ {printf "%.3f", $3/$2*100}')
+  DISK=$(df / | awk 'NR==2 {printf "%.3f", $5+0}')
 
   # Network I/O delta
   NET_LINE=$(grep -E 'eth0|ens5' /proc/net/dev | head -1)
@@ -116,7 +116,7 @@ systemctl restart workshop-telemetry
 # ── Update shadows: report new version ────────────────────────────────────────
 sleep 2
 REPORTED_PAYLOAD=$(printf \
-  '{"state":{"reported":{"telemetry_interval_ms":%s,"metrics":%s,"config_version":"3.0.0"}}}' \
+  '{"state":{"reported":{"telemetry_interval_ms":%s,"metrics":%s,"config_version":"4.0.0"}}}' \
   "$DESIRED_INTERVAL_MS" "$DESIRED_METRICS")
 aws iot-data update-thing-shadow \
   --region "$REGION" \
@@ -129,6 +129,6 @@ aws iot-data update-thing-shadow \
 
 # NOTE: $package shadow is updated automatically by IoT Jobs (destinationPackageVersions) — do not write it here.
 
-echo "telemetry-v3 applied successfully"
+echo "telemetry-v4 applied successfully"
 exit 0
 # --8<-- [end:job-handler]
