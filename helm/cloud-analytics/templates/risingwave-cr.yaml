@@ -1,0 +1,95 @@
+apiVersion: risingwave.risingwavelabs.com/v1alpha1
+kind: RisingWave
+metadata:
+  name: {{ .Values.risingwave.crName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloud-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: risingwave
+spec:
+  image: {{ .Values.risingwave.image | quote }}
+
+  # ── State store: S3 via IRSA — one bucket per slot, no static credentials.
+  stateStore:
+    s3:
+      bucket: {{ printf "workshop-%s-%s-risingwave-state" .Values.deploymentId .Values.accountId }}
+      region: {{ .Values.risingwave.stateBucketRegion }}
+      credentials:
+        useServiceAccount: true
+
+  # ── Meta store: in-memory (sufficient for workshop; resets on pod restart)
+  metaStore:
+    memory: true
+
+  # ── Component node groups — v2 schema: resources/envFrom at template.spec level
+  components:
+    meta:
+      nodeGroups:
+        - name: default
+          replicas: 1
+          template:
+            spec:
+              serviceAccountName: {{ .Values.risingwave.serviceAccountName }}
+              envFrom:
+                - secretRef:
+                    name: msk-credentials
+              env:
+                - name: RW_BARRIER_INTERVAL_MS
+                  value: "50"
+              resources:
+                {{- toYaml .Values.risingwave.resources.meta | nindent 16 }}
+
+    frontend:
+      nodeGroups:
+        - name: default
+          replicas: 1
+          template:
+            spec:
+              serviceAccountName: {{ .Values.risingwave.serviceAccountName }}
+              envFrom:
+                - secretRef:
+                    name: msk-credentials
+              resources:
+                {{- toYaml .Values.risingwave.resources.frontend | nindent 16 }}
+
+    compute:
+      nodeGroups:
+        - name: default
+          replicas: 1
+          template:
+            spec:
+              serviceAccountName: {{ .Values.risingwave.serviceAccountName }}
+              envFrom:
+                - secretRef:
+                    name: msk-credentials
+              env:
+                - name: RW_BARRIER_INTERVAL_MS
+                  value: "50"
+              resources:
+                {{- toYaml .Values.risingwave.resources.compute | nindent 16 }}
+
+    compactor:
+      nodeGroups:
+        - name: default
+          replicas: 1
+          template:
+            spec:
+              serviceAccountName: {{ .Values.risingwave.serviceAccountName }}
+              envFrom:
+                - secretRef:
+                    name: msk-credentials
+              resources:
+                {{- toYaml .Values.risingwave.resources.compactor | nindent 16 }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.risingwave.serviceAccountName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloud-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: risingwave
+  {{- if .Values.risingwave.serviceAccountRoleArn }}
+  annotations:
+    eks.amazonaws.com/role-arn: {{ .Values.risingwave.serviceAccountRoleArn }}
+  {{- end }}

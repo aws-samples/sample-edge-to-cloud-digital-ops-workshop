@@ -1,0 +1,135 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# cloud-analytics default values
+# Overridden per slot by scripts/deploy-cloud-analytics.sh via --set.
+#
+# Assumes the following are already in place before `helm install` (all
+# handled by scripts/deploy-cloud-analytics.sh, not this chart — they are
+# either cluster-scoped one-time admin actions or AWS-side calls a Helm chart
+# has no business making):
+#   - risingwave-operator installed cluster-wide (risingwave-system ns)
+#   - cloudnative-pg operator installed cluster-wide (cnpg-system ns)
+#   - cert-manager installed cluster-wide (risingwave-operator's CRDs need it)
+#   - a default gp3 StorageClass
+#   - this namespace exists
+#   - a `msk-credentials` Secret in this namespace with MSK_BOOTSTRAP_SERVERS,
+#     MSK_USERNAME, MSK_PASSWORD
+#   - the RisingWave state S3 bucket (workshop-<id>-<account>-risingwave-state)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Workshop slot identifier — used as a label on all resources and to derive
+# per-slot names (S3 bucket, IRSA role trust, etc.)
+deploymentId: ws-slot00
+
+# AWS account ID — needed to build the RisingWave state bucket name and the
+# IRSA role ARN.
+accountId: "000000000000"
+
+awsRegion: us-east-1
+
+# risingwave/ddl-cloud.sql, supplied via `--set-file risingwaveDdl=...` by
+# scripts/deploy-cloud-analytics.sh — see risingwave-ddl-job.yaml.
+risingwaveDdl: ""
+
+# ──────────────────────────────────────────────────────────────────────────────
+# RisingWave
+# ──────────────────────────────────────────────────────────────────────────────
+risingwave:
+  crName: risingwave-cloud
+  image: "docker.risingwave.com/risingwavelabs/risingwave:v2.8.4"
+  serviceAccountName: risingwave-cloud
+  # IAM role trusted for IRSA — created once by WorkshopPlatformStack, trusts
+  # any `risingwave-cloud` service account cluster-wide (see
+  # amplify/custom/platform-stack.ts).
+  serviceAccountRoleArn: ""
+  stateBucketRegion: us-east-1
+
+  resources:
+    meta:
+      requests: { cpu: 100m, memory: 512Mi }
+      limits: { cpu: 500m, memory: 1Gi }
+    frontend:
+      requests: { cpu: 100m, memory: 512Mi }
+      limits: { cpu: 500m, memory: 1Gi }
+    compute:
+      requests: { cpu: 500m, memory: 1Gi }
+      limits: { cpu: 1000m, memory: 2Gi }
+    compactor:
+      requests: { cpu: 100m, memory: 512Mi }
+      limits: { cpu: 500m, memory: 1Gi }
+
+# ──────────────────────────────────────────────────────────────────────────────
+# TimescaleDB (via the cluster-scoped CNPG operator)
+# ──────────────────────────────────────────────────────────────────────────────
+timescaledb:
+  enabled: true
+  crName: timescaledb-cloud
+  imageName: ghcr.io/clevyr/cloudnativepg-timescale:16.4-ts2.16
+  instances: 2
+  storageSize: 50Gi
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits: { cpu: 2000m, memory: 2Gi }
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Redpanda Connect — MSK → TimescaleDB sink pipeline
+# ──────────────────────────────────────────────────────────────────────────────
+rpConnectTimescaledb:
+  enabled: true
+
+rp-connect-timescaledb:
+  replicaCount: 1
+
+  image:
+    repository: docker.redpanda.com/redpandadata/connect
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+
+  envFrom:
+    - secretRef:
+        name: msk-credentials
+    - secretRef:
+        name: timescaledb-credentials
+
+  extraVolumes:
+    - name: pipeline-config
+      configMap:
+        name: rp-connect-timescaledb-config
+
+  extraVolumeMounts:
+    - name: pipeline-config
+      mountPath: /connect/config.yaml
+      subPath: config.yaml
+
+  args:
+    - run
+    - /connect/config.yaml
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Dashboard app (cloud-dashboard/) — Deployment + ClusterIP Service only,
+# reached via `kubectl port-forward` (no ingress/LoadBalancer, see #159).
+# ──────────────────────────────────────────────────────────────────────────────
+dashboard:
+  enabled: true
+  image:
+    repository: workshop-cloud-dashboard
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  service:
+    port: 3000
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+  # Athena tier — optional. The dashboard falls back to mock data for this
+  # tier (same as local dev) unless ATHENA_DATABASE is set AND the pod's IAM
+  # role grants athena:StartQueryExecution/GetQueryExecution/GetQueryResults +
+  # Glue read on workshop_telemetry + S3 read/write on the workgroup's results
+  # location. Wiring that IAM role (e.g. via IRSA) is left to the deployer —
+  # RisingWave and TimescaleDB are the two tiers this chart guarantees live.
+  athenaDatabase: ""
+  athenaWorkgroup: workshop-shared
+  athenaTable: telemetry

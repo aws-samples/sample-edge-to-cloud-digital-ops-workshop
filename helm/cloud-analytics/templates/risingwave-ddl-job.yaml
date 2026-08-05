@@ -1,0 +1,72 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "cloud-analytics.fullname" . }}-rw-ddl
+  labels:
+    {{- include "cloud-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: risingwave-ddl
+  annotations:
+    # Run after all resources are installed; delete on next upgrade so the
+    # DDL (all CREATE ... IF NOT EXISTS) safely re-applies on every upgrade —
+    # mirrors helm/edge-stack/templates/risingwave-ddl-job.yaml.
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/hook-weight": "10"
+spec:
+  backoffLimit: 5
+  template:
+    metadata:
+      labels:
+        {{- include "cloud-analytics.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: risingwave-ddl
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: ddl
+          image: postgres:16-alpine
+          envFrom:
+            - secretRef:
+                name: msk-credentials
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              echo "Waiting for RisingWave to be ready..."
+              until pg_isready -h {{ .Values.risingwave.crName }}-frontend -p 4567 -U root; do
+                sleep 3
+              done
+              echo "Substituting MSK credentials into DDL (no manual sed step — read from msk-credentials Secret env)..."
+              sed -e "s|__MSK_BOOTSTRAP__|${MSK_BOOTSTRAP_SERVERS}|g" \
+                  -e "s|__MSK_USER__|${MSK_USERNAME}|g" \
+                  -e "s|__MSK_PASS__|${MSK_PASSWORD}|g" \
+                  /ddl/ddl-cloud.sql > /tmp/ddl-cloud.sql
+              echo "Running DDL..."
+              psql -h {{ .Values.risingwave.crName }}-frontend -p 4567 -U root -d dev -f /tmp/ddl-cloud.sql
+              echo "DDL complete."
+          volumeMounts:
+            - name: ddl
+              mountPath: /ddl
+      volumes:
+        - name: ddl
+          configMap:
+            name: {{ include "cloud-analytics.fullname" . }}-rw-ddl
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cloud-analytics.fullname" . }}-rw-ddl
+  labels:
+    {{- include "cloud-analytics.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/hook-weight": "5"
+data:
+  # Populated via `helm upgrade --install ... --set-file risingwaveDdl=risingwave/ddl-cloud.sql`
+  # (see scripts/deploy-cloud-analytics.sh) rather than a file vendored into
+  # this chart — risingwave/ddl-cloud.sql stays the single source of truth,
+  # also embedded verbatim in workshop/04-analytics/block-2-risingwave.md via
+  # a --8<-- snippet tag, so the chart, the DDL, and the docs can never drift.
+  ddl-cloud.sql: |
+{{ .Values.risingwaveDdl | nindent 4 }}

@@ -1,0 +1,21 @@
+apiVersion: v2
+name: cloud-analytics
+description: >
+  Cloud analytics stack — per-slot RisingWave instance (via the cluster-scoped
+  risingwave-operator), per-slot TimescaleDB instance (via the cluster-scoped
+  CNPG operator), Redpanda Connect (MSK → TimescaleDB), and the in-cluster
+  freshness dashboard. Deployed once per participant namespace on the shared
+  workshop-eks cluster. See scripts/deploy-cloud-analytics.sh for the
+  cluster-scoped operator installs and AWS-side bootstrap (MSK creds/topics,
+  RisingWave S3 state bucket + IRSA) this chart assumes are already in place.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+
+dependencies:
+  # Redpanda Connect — MSK → TimescaleDB sink pipeline
+  - name: connect
+    alias: rp-connect-timescaledb
+    version: "3.*"
+    repository: https://charts.redpanda.com
+    condition: rpConnectTimescaledb.enabled
