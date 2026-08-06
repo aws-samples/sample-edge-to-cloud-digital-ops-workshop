@@ -1,0 +1,89 @@
+{{- if .Values.rpConnectTimescaledb.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rp-connect-timescaledb-config
+  labels:
+    {{- include "cloud-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rp-connect-timescaledb
+data:
+  config.yaml: |
+    # ──────────────────────────────────────────────────────────────────────────
+    # Redpanda Connect pipeline: MSK (sensors.raw.*, raw.telemetry) → TimescaleDB
+    # ──────────────────────────────────────────────────────────────────────────
+    input:
+      kafka_franz:
+        seed_brokers:
+          - "${MSK_BOOTSTRAP_SERVERS}"
+        topics:
+          - "^sensors\\.raw\\."
+          - "^raw\\.telemetry$"
+        regexp_topics: true
+        consumer_group: timescaledb-sink
+        tls:
+          enabled: true
+        sasl:
+          - mechanism: SCRAM-SHA-512
+            username: "${MSK_USERNAME}"
+            password: "${MSK_PASSWORD}"
+
+    # Normalise messages from both topic shapes into the sensor_readings schema.
+    #
+    # raw.telemetry carries flat IoT node metrics:
+    #   {thing_name, cpu_pct, mem_used_pct, disk_used_pct, net_io_bytes_sent,
+    #    net_io_bytes_recv, message_timestamp, mqtt_topic, ingest_ts}
+    #   → fan out into one message per metric (sensor, site_id, value, unit, ts_ms).
+    #
+    # sensors.raw.* topics carry pre-normalised industrial sensor messages:
+    #   {sensor, site_id, value, unit, ts_ms}
+    #   → pass through unchanged.
+    #
+    # A final mapping adds partition_time to every message regardless of origin.
+    pipeline:
+      processors:
+        - switch:
+            - check: 'this.exists("thing_name")'
+              processors:
+                - mapping: |
+                    root = [
+                      {"sensor": "cpu_pct",          "site_id": this.thing_name, "value": (this.cpu_pct | 0).number(),           "unit": "percent", "ts_ms": this.ingest_ts},
+                      {"sensor": "mem_used_pct",      "site_id": this.thing_name, "value": (this.mem_used_pct | 0).number(),      "unit": "percent", "ts_ms": this.ingest_ts},
+                      {"sensor": "disk_used_pct",     "site_id": this.thing_name, "value": (this.disk_used_pct | 0).number(),     "unit": "percent", "ts_ms": this.ingest_ts},
+                      {"sensor": "net_io_bytes_sent", "site_id": this.thing_name, "value": (this.net_io_bytes_sent | 0).number(), "unit": "bytes",   "ts_ms": this.ingest_ts},
+                      {"sensor": "net_io_bytes_recv", "site_id": this.thing_name, "value": (this.net_io_bytes_recv | 0).number(), "unit": "bytes",   "ts_ms": this.ingest_ts}
+                    ]
+                - unarchive:
+                    format: json_array
+            - check: 'true'
+              processors:
+                - mapping: 'root = this'
+        - mapping: |
+            root = this
+            root.partition_time = ((this.ts_ms / 60000).floor() * 60).ts_unix().format_timestamp("2006-01-02T15:04:00Z07:00")
+
+    output:
+      sql_insert:
+        driver: postgres
+        dsn: "${TIMESCALE_DSN}"
+        table: sensor_readings
+        columns:
+          - sensor
+          - site_id
+          - value
+          - unit
+          - ts_ms
+          - partition_time
+        args_mapping: |
+          root = [
+            this.sensor,
+            this.site_id,
+            this.value,
+            this.unit,
+            this.ts_ms,
+            this.partition_time
+          ]
+        max_in_flight: 64
+        batching:
+          count: 1000
+          period: "1s"
+{{- end }}

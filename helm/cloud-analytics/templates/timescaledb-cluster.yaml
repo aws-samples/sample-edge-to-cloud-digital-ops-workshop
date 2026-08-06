@@ -1,0 +1,87 @@
+{{- if .Values.timescaledb.enabled }}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ .Values.timescaledb.crName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloud-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: timescaledb
+spec:
+  instances: {{ .Values.timescaledb.instances }}
+
+  # PostgreSQL 16 with the TimescaleDB extension binaries baked in. The CNPG
+  # operator, not the image, provides HA/failover/backups — only the operand
+  # image changes so `CREATE EXTENSION timescaledb` and continuous aggregates
+  # work. CNPG's image-tag validator rejects the official
+  # `timescale/timescaledb-ha:pg16-tsX` tags (non-semver); the clevyr
+  # community image is the same upstream CNPG base + TimescaleDB, tagged in
+  # CNPG's expected `<pg>.<minor>-ts<ext>` form so it passes validation.
+  imageName: {{ .Values.timescaledb.imageName }}
+
+  postgresql:
+    # timescaledb is a preload library — it must be loaded at server start,
+    # before any database connection, or CREATE EXTENSION fails.
+    shared_preload_libraries:
+      - timescaledb
+    parameters:
+      max_connections: "200"
+      shared_buffers: "512MB"
+      effective_cache_size: "1536MB"
+      maintenance_work_mem: "128MB"
+      work_mem: "8MB"
+      wal_level: logical
+
+  bootstrap:
+    initdb:
+      database: edge
+      owner: workshop
+      # postInitApplicationSQL runs inside the application database (`edge`)
+      # after shared_preload_libraries is active — the right place to CREATE
+      # EXTENSION and build the sensor_readings hypertable Redpanda Connect
+      # writes to, plus the push-notification trigger for #160.
+      postInitApplicationSQL:
+        - CREATE EXTENSION IF NOT EXISTS timescaledb;
+        - |
+          CREATE TABLE IF NOT EXISTS sensor_readings (
+            ts_ms          BIGINT          NOT NULL,
+            sensor         TEXT            NOT NULL,
+            site_id        TEXT            NOT NULL,
+            value          DOUBLE PRECISION,
+            unit           TEXT,
+            partition_time TIMESTAMPTZ     NOT NULL
+          );
+        - SELECT create_hypertable('sensor_readings', 'partition_time', if_not_exists => TRUE);
+        - CREATE INDEX IF NOT EXISTS idx_sensor_readings_sensor ON sensor_readings(sensor, partition_time DESC);
+        # postInitApplicationSQL runs as the superuser, so hand the table to
+        # the workshop role — it must OWN the hypertable to build a
+        # continuous aggregate on it (Block 4), not merely hold DML grants.
+        - ALTER TABLE sensor_readings OWNER TO workshop;
+        # ── Push path for the cloud dashboard (#160) ──────────────────────
+        # TimescaleDB/Postgres has no subscription primitive like RisingWave's
+        # CREATE SUBSCRIPTION — the standard substitute is a trigger that
+        # calls pg_notify() on every insert, paired with a server-side LISTEN
+        # connection (cloud-dashboard's /api/stream/timescaledb route). The
+        # payload only needs to wake the listener, which re-runs the same
+        # fleet-wide aggregate query the polled /api/freshness route uses —
+        # so it stays minimal, well under Postgres's 8000-byte NOTIFY limit.
+        - |
+          CREATE OR REPLACE FUNCTION notify_sensor_reading() RETURNS trigger AS $$
+          BEGIN
+            PERFORM pg_notify('sensor_readings_change', NEW.site_id);
+            RETURN NEW;
+          END;
+          $$ LANGUAGE plpgsql;
+        - DROP TRIGGER IF EXISTS sensor_readings_notify ON sensor_readings;
+        - |
+          CREATE TRIGGER sensor_readings_notify
+            AFTER INSERT ON sensor_readings
+            FOR EACH ROW EXECUTE FUNCTION notify_sensor_reading();
+        - ALTER FUNCTION notify_sensor_reading() OWNER TO workshop;
+
+  storage:
+    size: {{ .Values.timescaledb.storageSize }}
+
+  resources:
+    {{- toYaml .Values.timescaledb.resources | nindent 4 }}
+{{- end }}

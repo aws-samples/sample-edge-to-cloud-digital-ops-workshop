@@ -4,9 +4,9 @@
 
 ---
 
-## What You'll Build
+## What You've Been Looking At
 
-A real-time web dashboard that polls RisingWave and TimescaleDB every 3 seconds — and the Athena/Iceberg warehouse tier every 15 seconds — then renders three live charts:
+If you opened the dashboard at the start of this section (Block 1), you've already seen it: three live charts comparing the same telemetry as served by RisingWave, TimescaleDB, and Athena/Iceberg side by side.
 
 | Chart | Y axis | Source |
 |---|---|---|
@@ -14,15 +14,20 @@ A real-time web dashboard that polls RisingWave and TimescaleDB every 3 seconds 
 | **Fleet Free CPU & Memory** | Percent free (higher = healthier) | Both live DBs |
 | **Time Since Last Message** | Seconds per node | Both live DBs |
 
-All three stores serve the same telemetry, so you can directly compare how stale each store's view of the fleet is — a live streaming MV (RisingWave), a live relational scan (TimescaleDB), and an on-demand warehouse query (Athena over the Iceberg table in S3).
+All three stores serve the same telemetry, so you can directly compare how stale each store's view of the fleet is — a live streaming MV (RisingWave), a live relational scan (TimescaleDB), and an on-demand warehouse query (Athena over the Iceberg table in S3). This block explains how each chart gets its data.
 
----
+If you don't already have it open:
 
-## Navigate to the Dashboard
+```bash
+kubectl port-forward -n ws-slot00 svc/cloud-analytics-dashboard 3000:3000 > /tmp/dashboard-pf.log 2>&1 &
+DASH_PF_PID=$!
+until grep -q "Forwarding from" /tmp/dashboard-pf.log 2>/dev/null; do sleep 1; done
+curl -sf http://localhost:3000 | head -c 200
+kill "$DASH_PF_PID" 2>/dev/null || true
+```
+<!-- e2e:assert {"contains": "<"} -->
 
-Open the workshop app and click **Live Analytics Dashboard**, or go directly to `/dashboard`.
-
-You should see three bar charts auto-updating every 3 seconds. If either database is not yet connected (env vars not set), the charts render with mock data and a warning banner.
+Or keep the port-forward running in a separate terminal and open `http://localhost:3000` in a browser. The RisingWave and TimescaleDB indicators show `live · push`; Athena shows `live · poll`. If either live tier shows `(mock)`, the dashboard's endpoint env vars aren't wired to a live store yet — see [Connecting to Live Databases](#connecting-to-live-databases) below.
 
 ---
 
@@ -38,27 +43,16 @@ The Y axis uses a **log₁₀ scale** because the three tiers span four orders o
 
 A linear axis would make RisingWave and TimescaleDB indistinguishable — the log scale makes all three tiers clearly visible at once.
 
-??? example "API query — RisingWave"
-    ```sql
-    SELECT
-      site_id,
-      MAX(ts_ms) AS latest_ts_ms
-    FROM mv_sensor_fleet_latest
-    GROUP BY site_id
-    ```
-    Freshness = `Date.now() - MAX(ts_ms)`. The `ts_ms` column stores `ingest_ts` — the epoch-ms timestamp stamped by IoT Core when the message arrived, not the device clock.
+??? example "Query — RisingWave and TimescaleDB freshness"
+    [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/cloud-dashboard/src/lib/freshness-queries.ts){ .md-button target=_blank }
 
-??? example "API query — TimescaleDB"
-    ```sql
-    SELECT
-      site_id,
-      MAX(ts_ms) AS latest_ts_ms
-    FROM sensor_readings
-    GROUP BY site_id
+    ```typescript
+    --8<-- "cloud-dashboard/src/lib/freshness-queries.ts"
     ```
-    Same query, same column semantics. Both use `ingest_ts` so clock-skew between EC2 edge nodes and the test runner is eliminated.
 
-??? example "API query — Athena / Iceberg"
+    Freshness = `Date.now() - MAX(ts_ms)`. Both tiers use `ts_ms`/the equivalent column populated from `ingest_ts` — the epoch-ms timestamp stamped by IoT Core when the message arrived, not the device clock — so clock-skew between EC2 edge nodes and the dashboard is eliminated.
+
+??? example "Query — Athena / Iceberg"
     ```sql
     SELECT
       thing_name AS site_id,
@@ -95,16 +89,77 @@ The node label is shortened from `ws-slot00-edge-0` to `edge-0` for readability.
 
 ---
 
+## How the Push Path Works
+
+RisingWave and TimescaleDB both push updates to the browser instead of being polled — no `setInterval` for either live tier. Each has a server-side relay route in the dashboard app that holds one long-lived database connection and fans out over Server-Sent Events:
+
+```
+Browser
+  │  EventSource → /api/stream/risingwave (SSE)
+  ▼
+Next.js Route Handler
+  │  pg connection: DECLARE ... SUBSCRIPTION CURSOR FOR dashboard_freshness_sub
+  │  loop: FETCH FROM cursor → re-run freshness query → push as SSE event
+  ▼
+RisingWave (Block 2's dashboard_freshness_sub)
+
+Browser
+  │  EventSource → /api/stream/timescaledb (SSE)
+  ▼
+Next.js Route Handler
+  │  pg connection: LISTEN sensor_readings_change
+  │  on NOTIFY → re-run freshness query → push as SSE event
+  ▼
+TimescaleDB (trigger: notify_sensor_reading() → pg_notify, on every INSERT
+             into sensor_readings — see k8s/timescaledb-cloud-cluster.yaml)
+```
+
+RisingWave's native subscription cursor and Postgres's `LISTEN`/`NOTIFY` are both wire-protocol primitives — neither needs an external broker. The browser can't hold a persistent pg connection itself, so each route keeps one open server-side and relays over SSE.
+
+??? example "View source — RisingWave push relay"
+    [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/cloud-dashboard/src/app/api/stream/risingwave/route.ts){ .md-button target=_blank }
+
+    ```typescript
+    --8<-- "cloud-dashboard/src/app/api/stream/risingwave/route.ts"
+    ```
+
+??? example "View source — TimescaleDB push relay"
+    [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/cloud-dashboard/src/app/api/stream/timescaledb/route.ts){ .md-button target=_blank }
+
+    ```typescript
+    --8<-- "cloud-dashboard/src/app/api/stream/timescaledb/route.ts"
+    ```
+
+**Athena stays on-demand/polled** — it's a warehouse query, not a live push, and has no subscribe primitive. The dashboard's `usePolledFreshness` hook calls `/api/freshness?tier=athena` on a 15-second `setInterval`; that's the one interval left in the app, and it's deliberate.
+
+??? example "View source — dashboard page (push + poll hooks)"
+    [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/cloud-dashboard/src/app/page.tsx){ .md-button target=_blank }
+
+    ```typescript
+    --8<-- "cloud-dashboard/src/app/page.tsx"
+    ```
+
+Both live-tier hooks and the Athena poll return the same `FreshnessPayload` shape, so the three charts render identically regardless of how the data arrived:
+
+??? example "View source — FreshnessPayload + on-demand route"
+    [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/cloud-dashboard/src/app/api/freshness/route.ts){ .md-button target=_blank }
+
+    ```typescript
+    --8<-- "cloud-dashboard/src/app/api/freshness/route.ts"
+    ```
+
+---
+
 ## Connecting to Live Databases
 
-The dashboard falls back to mock data when the following environment variables are absent. Set them in your Next.js environment (`.env.local` for local dev, or the EKS deployment's ConfigMap/Secret):
+The chart wired above by `helm/cloud-analytics` sets `RISINGWAVE_ENDPOINT` and `TIMESCALEDB_ENDPOINT` automatically from in-cluster service DNS and the CNPG-generated credentials Secret — nothing to configure for a deployed slot. The dashboard falls back to mock data (and a `⚠ Mock data` banner) only when these are unset, e.g. running the app locally outside the cluster:
 
 ```text
 # RisingWave — PostgreSQL wire protocol on port 4567
-RISINGWAVE_ENDPOINT=postgres://root@<risingwave-frontend-svc>:4567/dev
+RISINGWAVE_ENDPOINT=postgres://root@risingwave-cloud-frontend.ws-slot00.svc:4567/dev
 
 # TimescaleDB — standard Postgres on port 5432
-TIMESCALEDB_ENDPOINT=postgres://workshop:<password>@<timescaledb-rw-svc>:5432/edge
+TIMESCALEDB_ENDPOINT=postgres://workshop:<password>@timescaledb-cloud-rw.ws-slot00.svc:5432/edge
 
 # Athena / Iceberg — the warehouse tier. Only the Glue database name is
 # required; the workgroup, table, and (optional) per-slot filter default sanely.
@@ -114,30 +169,4 @@ ATHENA_DATABASE=workshop_telemetry
 # WORKSHOP_DEPLOYMENT_ID=ws-slot00          # optional: scope to one slot's rows
 ```
 
-The two `*_ENDPOINT` values are available after completing Block 1. The Athena
-tier needs no endpoint — it uses your task/pod IAM role to call Athena, so the
-role must allow `athena:StartQueryExecution` / `GetQueryExecution` /
-`GetQueryResults`, Glue read on `workshop_telemetry`, and read/write on the
-workgroup's S3 results location. When `ATHENA_DATABASE` is unset the Athena tier
-falls back to mock data, exactly like the two live DBs.
-
----
-
-## How the API Route Works
-
-Each tier's chart datasets come from a single call to `/api/freshness?tier=risingwave` (or `timescaledb`, or `athena`). The route handler runs one query per tier, computes freshness from `Date.now() - MAX(...)`, and returns a typed `FreshnessPayload` object:
-
-```typescript
-interface FreshnessPayload {
-  tierFreshness: { risingwave_ms, timescaledb_ms, athena_ms };
-  fleetResources: { avg_free_cpu_pct, avg_free_mem_pct };
-  nodeAge: Array<{ site_id, age_seconds }>;
-  source: "risingwave" | "timescaledb" | "athena" | "mock";
-  sampled_at: number;
-}
-```
-
-The dashboard calls the two live endpoints every 3 seconds and the Athena
-endpoint every 15 seconds (it's a slow warehouse query, not a live push) using
-`setInterval` inside a `useEffect`, then passes all three payloads to the
-freshness chart so it can render the tiers side-by-side.
+The Athena tier needs no endpoint — it uses the dashboard pod's IAM role to call Athena, so that role must allow `athena:StartQueryExecution` / `GetQueryExecution` / `GetQueryResults`, Glue read on `workshop_telemetry`, and read/write on the workgroup's S3 results location. When `ATHENA_DATABASE` is unset the Athena tier falls back to mock data, exactly like the two live DBs.

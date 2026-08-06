@@ -82,6 +82,33 @@ spec:
         # aggregate on it (Block 4), not merely hold DML grants.
         - ALTER TABLE sensor_readings OWNER TO workshop;
 
+        # ── Push path for the cloud dashboard (#160) ──────────────────────────
+        # TimescaleDB/Postgres has no subscription primitive like RisingWave's
+        # CREATE SUBSCRIPTION — the standard substitute is a trigger that calls
+        # pg_notify() on every insert, paired with a server-side LISTEN
+        # connection (cloud-dashboard's /api/stream/timescaledb route). The
+        # notify payload only needs to wake the listener; the listener re-runs
+        # the same fleet-wide aggregate query the polled /api/freshness route
+        # uses, so we keep the payload minimal (no per-row fleet data) to stay
+        # well under Postgres's 8000-byte NOTIFY payload limit.
+        - |
+          CREATE OR REPLACE FUNCTION notify_sensor_reading() RETURNS trigger AS $$
+          BEGIN
+            PERFORM pg_notify('sensor_readings_change', NEW.site_id);
+            RETURN NEW;
+          END;
+          $$ LANGUAGE plpgsql;
+        - |
+          DROP TRIGGER IF EXISTS sensor_readings_notify ON sensor_readings;
+        - |
+          CREATE TRIGGER sensor_readings_notify
+            AFTER INSERT ON sensor_readings
+            FOR EACH ROW EXECUTE FUNCTION notify_sensor_reading();
+        # The trigger function runs as the bootstrap superuser (owner of
+        # sensor_readings pre-ALTER); reassign it too so `workshop` can later
+        # replace/drop it without needing superuser.
+        - ALTER FUNCTION notify_sensor_reading() OWNER TO workshop;
+
   # ────────────────────────────────────────────────────────────────────────────
   # Storage — 50 Gi for fleet-wide cloud data (larger than the 10 Gi edge node)
   # ────────────────────────────────────────────────────────────────────────────

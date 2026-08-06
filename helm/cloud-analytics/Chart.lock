@@ -1,0 +1,6 @@
+dependencies:
+- name: connect
+  repository: https://charts.redpanda.com
+  version: 3.2.22
+digest: sha256:2f961c381e7924ec4cc854e33ca314ffe1c0bc96ea60375dd33051576ad841d2
+generated: "2026-08-05T22:01:02.912200422Z"

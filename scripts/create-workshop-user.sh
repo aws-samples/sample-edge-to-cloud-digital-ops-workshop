@@ -55,20 +55,6 @@ if [ -z "$USER_POOL_ID" ] || [ "$USER_POOL_ID" = "None" ]; then
   exit 1
 fi
 
-# Discover the Amplify-hosted frontend URL from the Amplify app named
-# "digital-operations-frontend" (deployed separately from the sandbox backend).
-FRONTEND_URL=""
-APP_ID=$(aws amplify list-apps \
-  --query "apps[?name=='digital-operations-frontend'].appId | [0]" \
-  --output text 2>/dev/null || true)
-if [ -n "$APP_ID" ] && [ "$APP_ID" != "None" ]; then
-  DEFAULT_DOMAIN=$(aws amplify get-app --app-id "$APP_ID" \
-    --query "app.defaultDomain" --output text 2>/dev/null || true)
-  if [ -n "$DEFAULT_DOMAIN" ] && [ "$DEFAULT_DOMAIN" != "None" ]; then
-    FRONTEND_URL="https://main.${DEFAULT_DOMAIN}"
-  fi
-fi
-
 USERNAME="${USERNAME:-participant@${DEPLOYMENT_ID}.workshop.local}"
 
 aws cognito-idp admin-create-user \
@@ -88,7 +74,8 @@ echo ""
 echo "Workshop login credentials:"
 echo "  Username : $USERNAME"
 echo "  Password : $TEMP_PASSWORD"
-if [ -n "$FRONTEND_URL" ]; then
-  echo "  URL      : $FRONTEND_URL"
-fi
+echo ""
+echo "Cloud analytics dashboard (Session 04) — port-forward, no public URL:"
+echo "  kubectl port-forward -n ${DEPLOYMENT_ID} svc/cloud-analytics-dashboard 3000:3000"
+echo "  then open http://localhost:3000"
 echo ""

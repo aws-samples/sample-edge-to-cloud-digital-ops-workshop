@@ -240,6 +240,15 @@ else
   echo ">>> Skipping K3s pre-warm — fewer than 3 devices registered."
 fi
 
+# ── Pre-warm the cloud analytics stack ──────────────────────────────────────
+# RisingWave + TimescaleDB + Redpanda Connect + dashboard into the shared EKS
+# cluster, during the facilitator pre-deploy — so it's already up when
+# attendees reach session 04 instead of costing ~45 min of live session
+# wall-clock. Idempotent: safe to re-run against an already-deployed slot.
+# See scripts/deploy-cloud-analytics.sh and workshop/04-analytics/block-1.
+echo ">>> Pre-warming cloud analytics stack via scripts/deploy-cloud-analytics.sh…"
+bash "$(dirname "$0")/deploy-cloud-analytics.sh" --deployment-id "$DEPLOYMENT_ID"
+
 # ── Write deployment summary ──────────────────────────────────────────────────
 echo ">>> Generating deployment summary..."
 bash "$(dirname "$0")/deployment-summary.sh" "$DEPLOYMENT_ID"

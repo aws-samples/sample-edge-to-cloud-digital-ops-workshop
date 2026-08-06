@@ -1,0 +1,116 @@
+{{- if .Values.dashboard.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cloud-analytics.fullname" . }}-dashboard
+  labels:
+    {{- include "cloud-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+spec:
+  replicas: {{ .Values.dashboard.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "cloud-analytics.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: dashboard
+  template:
+    metadata:
+      labels:
+        {{- include "cloud-analytics.labels" . | nindent 8 }}
+        app.kubernetes.io/component: dashboard
+    spec:
+      serviceAccountName: {{ include "cloud-analytics.fullname" . }}-dashboard
+      initContainers:
+        # Block startup until the CNPG-managed DSN secret exists — mirrors
+        # helm/edge-stack/templates/hmi-deployment.yaml's wait-for-timescale-secret
+        # (see #145): on a cold deploy the dashboard schedules before the
+        # timescaledb-dsn-secret Job has run, and TIMESCALEDB_ENDPOINT being
+        # absent would otherwise just look like "mock mode" instead of a
+        # startup-ordering bug.
+        - name: wait-for-timescaledb-dashboard-env
+          image: bitnami/kubectl:latest
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for timescaledb-dashboard-env secret in namespace {{ .Release.Namespace }}..."
+              until kubectl get secret timescaledb-dashboard-env -n {{ .Release.Namespace }} >/dev/null 2>&1; do
+                sleep 5
+              done
+              echo "timescaledb-dashboard-env present — starting dashboard."
+      containers:
+        - name: dashboard
+          image: "{{ .Values.dashboard.image.repository }}:{{ .Values.dashboard.image.tag }}"
+          imagePullPolicy: {{ .Values.dashboard.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: WORKSHOP_DEPLOYMENT_ID
+              value: {{ .Values.deploymentId | quote }}
+            - name: AWS_REGION
+              value: {{ .Values.awsRegion | quote }}
+            - name: RISINGWAVE_ENDPOINT
+              value: {{ printf "postgres://root@%s-frontend.%s.svc:4567/dev" .Values.risingwave.crName .Release.Namespace | quote }}
+            - name: TIMESCALEDB_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: timescaledb-dashboard-env
+                  key: TIMESCALEDB_ENDPOINT
+                  # NOT optional: the initContainer above guarantees the secret
+                  # exists before this container starts. Marking it optional
+                  # would silently drop the var and fall back to mock data.
+            {{- if .Values.dashboard.athenaDatabase }}
+            - name: ATHENA_DATABASE
+              value: {{ .Values.dashboard.athenaDatabase | quote }}
+            - name: ATHENA_WORKGROUP
+              value: {{ .Values.dashboard.athenaWorkgroup | quote }}
+            - name: ATHENA_TABLE
+              value: {{ .Values.dashboard.athenaTable | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.dashboard.resources | nindent 12 }}
+---
+# ServiceAccount + RBAC for the wait-for-timescaledb-dashboard-env initContainer
+# above. Long-lived (not a Helm hook, unlike the tsdb-dsn SA) because the
+# Deployment may reschedule the pod at any time and must always be able to
+# poll for the secret.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "cloud-analytics.fullname" . }}-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloud-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cloud-analytics.fullname" . }}-dashboard-secret-reader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloud-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cloud-analytics.fullname" . }}-dashboard-secret-reader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloud-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "cloud-analytics.fullname" . }}-dashboard-secret-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cloud-analytics.fullname" . }}-dashboard
+    namespace: {{ .Release.Namespace }}
+{{- end }}
