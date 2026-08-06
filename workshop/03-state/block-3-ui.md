@@ -9,11 +9,16 @@
 Create a Cognito user for the workshop:
 
 ```bash
-./scripts/create-workshop-user.sh --deployment-id ws-slot00
+./scripts/create-workshop-user.sh --deployment-id ws-slot00 --username participant@example.com --password 'ChangeMe1!'
 ```
 <!-- e2e:assert {"contains": "Workshop login credentials"} -->
 
-Load the Amplify-hosted URL and sign in with the credentials output by the script.
+`--username` and `--password` are both optional. If you omit `--username`, it defaults to `participant@<deployment-id>.workshop.local`. If you omit `--password`, the script generates a strong random password and prints it — there is no default password.
+
+!!! note "Cognito password policy"
+    Whatever password you supply (or the generated one) must satisfy the User Pool's password policy: minimum 8 characters, with at least one uppercase letter, one lowercase letter, one number, and one symbol.
+
+Load the Amplify-hosted URL and sign in with the username and password printed under "Workshop login credentials".
 
 ---
 
