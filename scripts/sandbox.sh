@@ -175,7 +175,12 @@ if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
 else
   echo ">>> nvm not found, using system node ($(node -v 2>/dev/null || echo 'not found'))."
 fi
-npx ampx sandbox --identifier "$DEPLOYMENT_ID" --once
+AMPX_STATUS=0
+npx ampx sandbox --identifier "$DEPLOYMENT_ID" --once || AMPX_STATUS=$?
+if [[ "$AMPX_STATUS" -ne 0 ]]; then
+  echo "ERROR: ampx sandbox deploy failed (exit $AMPX_STATUS) — backend rolled back. Skipping device-registration wait, shadow seeding, and summary." >&2
+  exit "$AMPX_STATUS"
+fi
 
 # ── Upload binary and simulator to S3 after CDK creates the bucket ──────────
 echo ">>> Uploading IoT Device Client binary to s3://${S3_BUCKET}/bin/aws-iot-device-client…"
