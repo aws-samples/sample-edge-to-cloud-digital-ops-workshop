@@ -124,7 +124,9 @@ echo ">>> SSM $EDGE_NAT_SSM points at live NAT gateway $EXISTING_NAT_SSM."
 # ── Build IoT Device Client binary and stage to S3 ──────────────────────────
 # Uses the official GHCR build image so EC2 user data only needs a fast S3 download.
 # The binary is cached locally after the first build; subsequent runs skip the build step.
-LOCAL_BINARY_CACHE="$HOME/.cache/workshop/aws-iot-device-client"
+# Cache key suffix bumped for #166 (MQTT keep-alive patch) so a pre-existing
+# cached binary from before this fix is never reused silently.
+LOCAL_BINARY_CACHE="$HOME/.cache/workshop/aws-iot-device-client-keepalive-v1"
 # Resolve the bucket name from the CloudFormation export — avoids hardcoding.
 S3_BUCKET=$(aws cloudformation list-exports \
   --query "Exports[?Name=='workshop-platform-bucket-name'].Value" \
@@ -135,6 +137,33 @@ if [[ ! -f "$LOCAL_BINARY_CACHE" ]]; then
   DC_SRC=$(mktemp -d)
   git clone --depth 1 --branch v1.10.1 \
     https://github.com/awslabs/aws-iot-device-client "$DC_SRC"
+  # #166: v1.10.1 never opts its MQTT socket into SO_KEEPALIVE (no call to
+  # WithTcpKeepAlive() anywhere in SharedCrtResourceManager.cpp, confirmed by
+  # reading the pinned tag's source), and Connect() is called with
+  # keepAliveTimeSecs=0, which falls back to the aws-c-mqtt SDK's hardcoded
+  # 1200s default (source/client.c: s_default_keep_alive_sec). Kernel TCP
+  # keepalive (the sysctl tuning in participant-stack.ts) only fires on
+  # sockets that have opted in via SO_KEEPALIVE, so it is inert against this
+  # socket without this patch. There is also no config-schema field to
+  # express this without a source change (PlainConfig has no keep-alive key).
+  # Patch: opt the MQTT socket into TCP keepalive so the OS-level sysctl
+  # values actually apply to it, and lower the MQTT PINGREQ interval itself
+  # below the 350s NAT idle timeout so protocol-level traffic keeps the flow
+  # warm even if TCP keepalive is ever disabled at the OS layer.
+  KEEPALIVE_PATCH_MARKER='clientConfigBuilder.WithSdkVersion(DEVICE_CLIENT_VERSION);'
+  CONNECT_PATCH_MARKER='connection->Connect(config.thingName->c_str(), false)'
+  grep -qF "$KEEPALIVE_PATCH_MARKER" "$DC_SRC/source/SharedCrtResourceManager.cpp" || {
+    echo "ERROR: #166 keep-alive patch anchor not found in SharedCrtResourceManager.cpp — upstream source has changed, update the patch." >&2
+    exit 1
+  }
+  grep -qF "$CONNECT_PATCH_MARKER" "$DC_SRC/source/SharedCrtResourceManager.cpp" || {
+    echo "ERROR: #166 keep-alive patch Connect() anchor not found in SharedCrtResourceManager.cpp — upstream source has changed, update the patch." >&2
+    exit 1
+  }
+  sed -i "s|${KEEPALIVE_PATCH_MARKER}|${KEEPALIVE_PATCH_MARKER}\n    clientConfigBuilder.WithTcpKeepAlive();|" \
+    "$DC_SRC/source/SharedCrtResourceManager.cpp"
+  sed -i "s|${CONNECT_PATCH_MARKER}|connection->Connect(config.thingName->c_str(), false, 180, 10000)|" \
+    "$DC_SRC/source/SharedCrtResourceManager.cpp"
   # Use public.ecr.aws/amazonlinux/amazonlinux instead of the GHCR build image.
   # Run cmake install + build steps directly inside the container.
   # AL2023 (OpenSSL 3.x) is required — IoT Device Client v1.10.1 needs OpenSSL >= 1.1,

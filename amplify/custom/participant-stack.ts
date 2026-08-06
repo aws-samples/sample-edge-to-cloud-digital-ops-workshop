@@ -661,6 +661,22 @@ set -euxo pipefail
 yum install -y amazon-ssm-agent 2>/dev/null || true
 systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent
 
+# #166: the edge VPC's NAT Gateway reaps idle flows after 350s. The device
+# client's MQTT socket sits idle between telemetry publishes (those go over
+# the HTTPS data plane, not this socket), so with no keepalive traffic below
+# 350s the flow gets silently dropped and the client only notices at its
+# ~1200s MQTT keep-alive ping, forcing a reconnect that leaves the Jobs
+# notify-next subscription stale (see workshop/reference/gotchas.md). Kernel
+# TCP keepalive only fires on sockets that opt into SO_KEEPALIVE — the device
+# client is patched at build time (scripts/sandbox.sh) to do so — so this
+# sysctl tuning is what actually makes those probes fire under 350s.
+cat > /etc/sysctl.d/99-workshop-mqtt-keepalive.conf <<'SYSCTL'
+net.ipv4.tcp_keepalive_time=200
+net.ipv4.tcp_keepalive_intvl=30
+net.ipv4.tcp_keepalive_probes=4
+SYSCTL
+sysctl --system
+
 INSTANCE_ID=$(ec2-metadata --instance-id | cut -d' ' -f2)
 
 mkdir -p /etc/aws-iot-device-client/certs
