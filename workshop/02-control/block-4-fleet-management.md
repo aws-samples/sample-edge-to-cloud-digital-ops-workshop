@@ -9,7 +9,7 @@
 **1. Navigate to [IoT Core → Software Package Catalog](https://console.aws.amazon.com/iot/home#/devicePackages)**
 
 - Observe the pre-registered package `ws-slot00-telemetry-agent` with published versions `1.0.0`–`4.0.0` (created by the platform/participant stacks — no manual registration needed)
-- Because the Session-2 job deployed version `4.0.0` with `--destination-package-versions`, IoT Jobs updated each device's reserved `$package` shadow to `telemetry-agent.version: 4.0.0` automatically on success — the catalog is the source of truth for what each device runs
+- Because the Session-2 job deployed version `2.0.0` with `--destination-package-versions`, IoT Jobs updated each device's reserved `$package` shadow to `telemetry-agent.version: 2.0.0` automatically on success — the catalog is the source of truth for what each device runs
 
 ??? example "AWS CLI equivalent"
     ```bash
@@ -31,7 +31,7 @@
     <!-- e2e:assert {"jsonPath": "things[0].thingName", "matches": ".+"} -->
 
     > **Note:** The example above queries for any reported `config_version` rather
-    > than pinning `2.0.0` — later sessions push newer job versions to the same
+    > than pinning `3.0.0` — later sessions push newer job versions to the same
     > shared slot, so a fixed version would drift out of date. Swap in a specific
     > version to confirm a job rollout completed on your own deployment.
 

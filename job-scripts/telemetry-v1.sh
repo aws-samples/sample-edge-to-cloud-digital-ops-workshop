@@ -1,6 +1,6 @@
 #!/bin/bash
 # --8<-- [start:job-handler]
-# IoT Job handler: shadow-driven telemetry config with 3-decimal measurement precision.
+# IoT Job handler: shadow-driven telemetry config (integer-precision metrics).
 # Reads desired.telemetry_interval_ms and desired.metrics from the device-config
 # shadow on startup; falls back to 100 ms / all five metrics if no desired state is set.
 # Exit 0 = SUCCESS reported to IoT Jobs; non-zero = FAILED.
@@ -116,7 +116,7 @@ systemctl restart workshop-telemetry
 # ── Update shadows: report new version ────────────────────────────────────────
 sleep 2
 REPORTED_PAYLOAD=$(printf \
-  '{"state":{"reported":{"telemetry_interval_ms":%s,"metrics":%s,"config_version":"3.0.0"}}}' \
+  '{"state":{"reported":{"telemetry_interval_ms":%s,"metrics":%s,"config_version":"1.0.0"}}}' \
   "$DESIRED_INTERVAL_MS" "$DESIRED_METRICS")
 aws iot-data update-thing-shadow \
   --region "$REGION" \
@@ -129,6 +129,6 @@ aws iot-data update-thing-shadow \
 
 # NOTE: $package shadow is updated automatically by IoT Jobs (destinationPackageVersions) — do not write it here.
 
-echo "telemetry-v3 applied successfully"
+echo "telemetry-v1 applied successfully"
 exit 0
 # --8<-- [end:job-handler]

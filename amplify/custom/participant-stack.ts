@@ -415,8 +415,8 @@ exports.handler = async (event) => {
     // device runs. Versions carry a `version` attribute; a job with
     // destinationPackageVersions pointed at one of these publishes it into the
     // device's reserved $package shadow automatically (see PackageConfig in the
-    // platform stack). Only 4.0.0 is deployed by a workshop doc today
-    // (02-control/block-2 → telemetry-v4.sh); the lower versions give the
+    // platform stack). Only 2.0.0 is deployed by a workshop doc today
+    // (02-control/block-2 → telemetry-v2.sh); the other versions give the
     // catalog a realistic version history for the fleet-management block.
     const softwarePackage = new CfnSoftwarePackage(this, "TelemetryAgentPackage", {
       packageName: `${deploymentId}-telemetry-agent`,
@@ -1320,18 +1320,18 @@ exports.handler = async (event) => {
       resources: slotS3Prefixes.map((prefix) => `${sharedBucketArn}/${prefix}`),
     }));
     // Read-only access to the shared Firehose→Iceberg telemetry table. Unlike
-    // the slot-owned prefixes above, this table (Glue location
-    // `telemetry/telemetry/`) co-mingles *every* slot's rows in shared data
-    // files — Firehose writes it, participants only read it, and per-slot
-    // isolation is logical (the doc queries carry `WHERE deployment_id=<slot>`),
-    // not physical per-prefix. So the read grant must cover the whole table
-    // prefix (metadata JSON + Avro manifests + Parquet data), not a per-slot
+    // the slot-owned prefixes above, this table (Glue location `telemetry/`)
+    // co-mingles *every* slot's rows in shared data files — Firehose writes
+    // it, participants only read it, and per-slot isolation is logical (the
+    // doc queries carry `WHERE deployment_id=<slot>`), not physical
+    // per-prefix. So the read grant must cover the whole table prefix
+    // (metadata JSON + Avro manifests + Parquet data), not a per-slot
     // subpath. Without it, Athena's StartQueryExecution succeeds but the query
     // itself FAILS at scan time with `PERMISSION_DENIED: s3:GetObject on
-    // .../telemetry/telemetry/metadata/*.metadata.json` — surfacing only as
+    // .../telemetry/metadata/*.metadata.json` — surfacing only as
     // `GetQueryResults: Query did not finish successfully` (01-observe/
     // block-3-athena block 2, 02-control/block-5-observe block 1).
-    const icebergTablePrefix = "telemetry/telemetry/*";
+    const icebergTablePrefix = "telemetry/*";
     participantRole.addToPolicy(new PolicyStatement({
       effect: Effect.ALLOW,
       actions: ["s3:GetObject"],

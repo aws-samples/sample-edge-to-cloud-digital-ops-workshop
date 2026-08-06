@@ -10,7 +10,8 @@ edge-digital-ops-workshop/
 │       └── platform-stack.ts      # Shared VPCs, subnets, route tables
 ├── frontend/                       # Amplify-hosted cloud UI (fleet view, freshness panel)
 ├── job-scripts/                    # IoT Job handler scripts (deployed to devices via Jobs)
-│   ├── telemetry-v2.sh             # Session 2: 1 Hz + network metrics
+│   ├── telemetry-v1.sh             # Session 2: shadow-driven telemetry config (starting point)
+│   ├── telemetry-v2.sh             # Session 2: 3-decimal measurement precision (job exercise)
 │   ├── deploy-k3s.sh               # Session 5: K3s cluster bootstrap
 │   └── add-shadows.sh              # Session 3: app-deployment + device-health shadows
 ├── scripts/

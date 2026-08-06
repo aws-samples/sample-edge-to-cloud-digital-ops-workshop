@@ -32,4 +32,4 @@ By the end of Block 2, each device will:
 
 - Report metric values with **3-decimal-place precision** (`cpu_pct: 12.450` instead of `12`)
 - Read its config from the **`device-config` shadow** on startup — telemetry interval and metrics list are no longer hardcoded
-- Report **`config_version: 3.0.0`** in the `device-config` shadow, closing the desired/reported delta
+- Report **`config_version: 2.0.0`** in the `device-config` shadow, closing the desired/reported delta

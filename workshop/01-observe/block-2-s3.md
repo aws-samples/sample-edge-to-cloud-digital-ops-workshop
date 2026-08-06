@@ -11,7 +11,7 @@
 
 1. Navigate to [**S3 → `workshop-platform-000000000000/telemetry/`**](https://s3.console.aws.amazon.com/s3/buckets/workshop-platform-000000000000?prefix=telemetry/)
 2. Observe Parquet files being written by Amazon Data Firehose (batched — many messages per file, not one file per message)
-3. Note the partitioned key structure: `telemetry/telemetry/data/deployment_id=ws-slot00/year={YYYY}/month={MM}/day={DD}/hour={HH}/{file}.parquet`
+3. Note the partitioned key structure: `telemetry/data/deployment_id=ws-slot00/year={YYYY}/month={MM}/day={DD}/hour={HH}/{file}.parquet`
 4. Click one file → **Download** to inspect a raw Parquet payload (columnar — use a Parquet viewer or `parquet-tools`, not a text editor)
 
 ---
