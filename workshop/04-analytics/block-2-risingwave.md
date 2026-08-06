@@ -1,57 +1,12 @@
-# Block 2 — Create RisingWave Materialized Views
+# Block 2 — RisingWave Materialized Views
 
-**Duration:** 45 min
-
----
-
-## Connect to RisingWave
-
-RisingWave's PostgreSQL wire protocol listens on **port 4567** (not 4566, which is the HTTP dashboard).
-
-```bash
-kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567 > /tmp/rw-cloud-pf.log 2>&1 &
-RW_PF_PID=$!
-# Wait for the forward to bind rather than racing a fixed sleep.
-until grep -q "Forwarding from" /tmp/rw-cloud-pf.log 2>/dev/null; do sleep 1; done
-psql -h localhost -p 4567 -U root -d dev -c "SELECT 1;"
-kill "$RW_PF_PID" 2>/dev/null || true
-```
-<!-- e2e:assert {"contains": "1 row"} -->
-
-Or keep the port-forward running in a separate terminal and connect interactively with `psql -h localhost -p 4567 -U root -d dev`.
+**Duration:** 30 min
 
 ---
 
-## Create the Kafka Source
+## The DDL Is Already Applied
 
-The MSK bootstrap servers and credentials are available from your Amplify-deployed secrets:
-
-```bash
-# Fetch MSK connection details
-MSK_BOOTSTRAP=$(aws kafka get-bootstrap-brokers \
-  --cluster-arn $(aws cloudformation list-exports \
-    --query "Exports[?Name=='workshop-platform-msk-arn'].Value" \
-    --output text) \
-  --region us-east-1 \
-  --query BootstrapBrokerStringSaslScram --output text)
-
-MSK_USER="workshop-ws-slot00"
-MSK_PASS=$(aws secretsmanager get-secret-value \
-  --secret-id AmazonMSK_workshop-ws-slot00 \
-  --query SecretString --output text | python3 -c 'import sys,json; print(json.load(sys.stdin)["password"])')
-
-# Apply the DDL with values substituted — the source and MVs use
-# CREATE ... IF NOT EXISTS, so this is safe to re-run.
-kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567 > /tmp/rw-cloud-pf2.log 2>&1 &
-RW_PF_PID=$!
-until grep -q "Forwarding from" /tmp/rw-cloud-pf2.log 2>/dev/null; do sleep 1; done
-sed -e "s|__MSK_BOOTSTRAP__|$MSK_BOOTSTRAP|g" \
-    -e "s|__MSK_USER__|$MSK_USER|g" \
-    -e "s|__MSK_PASS__|$MSK_PASS|g" \
-    risingwave/ddl-cloud.sql | psql -h localhost -p 4567 -U root -d dev
-kill "$RW_PF_PID" 2>/dev/null || true
-```
-<!-- e2e:assert {"contains": "CREATE_MATERIALIZED_VIEW"} -->
+Block 1's `deploy-cloud-analytics.sh` triggers a post-install Job that ran the DDL below against RisingWave automatically — substituting the MSK bootstrap brokers/credentials from the in-cluster `msk-credentials` Secret, no manual `sed | psql`. This block explains what that DDL created.
 
 ??? example "View source — ddl-cloud.sql"
     [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/risingwave/ddl-cloud.sql){ .md-button target=_blank }
@@ -60,18 +15,41 @@ kill "$RW_PF_PID" 2>/dev/null || true
     --8<-- "risingwave/ddl-cloud.sql"
     ```
 
+| Object | Kind | Purpose |
+|---|---|---|
+| `sensors_raw_cloud` | Source | Industrial sensor readings from MSK topic `sensors.raw.sim` |
+| `sensors_raw_telemetry` | Source | EC2 node telemetry (cpu/mem/disk/net) from MSK topic `raw.telemetry` |
+| `mv_sensor_fleet_latest` | Materialized view | Latest reading per sensor per site, across both sources |
+| `mv_fleet_1min_avg` | Materialized view | 1-minute tumbling-window averages per sensor per site |
+| `dashboard_freshness_sub` | Subscription | Change feed on `mv_sensor_fleet_latest` — the push path the dashboard's `/api/stream/risingwave` route consumes (Block 5) |
+
+!!! warning "RisingWave function compatibility (v2.8.x)"
+    - `MAX_BY(val, ts)` is not available — use `(array_agg(val ORDER BY ts DESC))[1]`
+    - `TUMBLE(src, proctime(), ...)` is only valid for tables with declared watermarks — use integer epoch-bucketing for sources without watermarks
+    - The Kafka topic must exist before `CREATE SOURCE` — wildcard topics are not supported
+
 ---
 
-## Verify the Source
+## Connect and Verify
 
-After running the DDL, confirm the source and views are created:
+RisingWave's PostgreSQL wire protocol listens on **port 4567** (not 4560, which is the HTTP dashboard):
 
-```sql
-SHOW SOURCES;
-SHOW MATERIALIZED VIEWS;
+```bash
+kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567 > /tmp/rw-cloud-pf.log 2>&1 &
+RW_PF_PID=$!
+until grep -q "Forwarding from" /tmp/rw-cloud-pf.log 2>/dev/null; do sleep 1; done
+psql -h localhost -p 4567 -U root -d dev -c "SHOW MATERIALIZED VIEWS;"
+kill "$RW_PF_PID" 2>/dev/null || true
 ```
+<!-- e2e:assert {"contains": "mv_sensor_fleet_latest"} -->
 
-Once your edge nodes are running (Session 5), messages will appear in the views within seconds. You can also test now by querying directly:
+Or keep the port-forward running in a separate terminal and connect interactively with `psql -h localhost -p 4567 -U root -d dev`.
+
+---
+
+## Query the Views
+
+Once your edge nodes are running (Session 5), messages appear in the views within seconds:
 
 ```sql
 -- Poll for incoming messages
@@ -94,13 +72,23 @@ Query the views and observe **sub-100 ms response times**.
 !!! info "Why is the MV always fast?"
     RisingWave incrementally maintains each view using a streaming operator graph. On each new row, the aggregation is updated in memory — not recomputed from scratch. Read cost is always a single row lookup regardless of fleet size.
 
-!!! warning "RisingWave function compatibility (v2.8.x)"
-    - `MAX_BY(val, ts)` is not available — use `(array_agg(val ORDER BY ts DESC))[1]`
-    - `TUMBLE(src, proctime(), ...)` is only valid for tables with declared watermarks — use integer epoch-bucketing for sources without watermarks
-    - The Kafka topic must exist before `CREATE SOURCE` — wildcard topics are not supported
+---
+
+## The Subscription Behind the Push Path
+
+`dashboard_freshness_sub` is what lets the dashboard (Block 5) show live updates without polling. RisingWave's subscription cursor is a change feed over the pg wire protocol — no Kafka, no extra broker:
+
+```sql
+DECLARE dashboard_freshness_cur SUBSCRIPTION CURSOR FOR dashboard_freshness_sub;
+FETCH 10 FROM dashboard_freshness_cur;
+CLOSE dashboard_freshness_cur;
+```
+
+Each `FETCH` returns any rows of `mv_sensor_fleet_latest` that changed since the last fetch. The dashboard's server-side route holds one long-lived connection doing exactly this in a loop, and forwards each change to the browser over SSE — see Block 5.
 
 ---
 
 ## Reference
 
 - [RisingWave streaming SQL](https://docs.risingwave.com/sql/overview)
+- [RisingWave subscriptions](https://docs.risingwave.com/serve/subscription)
