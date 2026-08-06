@@ -158,7 +158,11 @@ print("TOPICS:", sorted(admin.list_topics()))
 PYEOF
 kubectl -n "$DEPLOYMENT_ID" delete pod kafka-admin >/dev/null
 
-# ── 4. RisingWave S3 state bucket + IRSA service account ───────────────────
+# ── 4. RisingWave S3 state bucket + IRSA role lookup ────────────────────────
+# The service account itself (with the IRSA role-arn annotation) is created
+# by the chart (helm/cloud-analytics/templates/risingwave-cr.yaml) — Helm must
+# be its sole owner, so we only resolve the role ARN here and pass it through
+# via --set below rather than kubectl-applying the ServiceAccount ourselves.
 STATE_BUCKET="workshop-${DEPLOYMENT_ID}-${ACCOUNT_ID}-risingwave-state"
 echo ">>> Ensuring RisingWave state bucket ${STATE_BUCKET}..."
 aws s3api head-bucket --bucket "$STATE_BUCKET" 2>/dev/null || \
@@ -170,12 +174,6 @@ if [[ -z "$RISINGWAVE_S3_ROLE_ARN" || "$RISINGWAVE_S3_ROLE_ARN" == "None" ]]; th
   echo "ERROR: could not resolve workshop-platform-risingwave-s3-role-arn CFN export." >&2
   exit 1
 fi
-
-kubectl create serviceaccount risingwave-cloud \
-  --namespace "$DEPLOYMENT_ID" --dry-run=client -o yaml | \
-  kubectl annotate -f - --local -o yaml \
-    "eks.amazonaws.com/role-arn=${RISINGWAVE_S3_ROLE_ARN}" | \
-  kubectl apply -f - >/dev/null
 
 # ── 5. helm upgrade --install the per-slot analytics stack ──────────────────
 # The dashboard image is shared across all slots (one push per code change,
@@ -190,10 +188,11 @@ helm dependency update "$REPO_ROOT/helm/cloud-analytics" >/dev/null
 helm upgrade --install cloud-analytics "$REPO_ROOT/helm/cloud-analytics" \
   --namespace "$DEPLOYMENT_ID" \
   --set deploymentId="$DEPLOYMENT_ID" \
-  --set accountId="$ACCOUNT_ID" \
+  --set-string accountId="$ACCOUNT_ID" \
   --set awsRegion="$REGION" \
   --set dashboard.image.repository="$DASHBOARD_REPO" \
   --set dashboard.image.tag="$DASHBOARD_TAG" \
+  --set risingwave.serviceAccountRoleArn="$RISINGWAVE_S3_ROLE_ARN" \
   --set-file risingwaveDdl="$REPO_ROOT/risingwave/ddl-cloud.sql" \
   --wait --timeout 15m
 
