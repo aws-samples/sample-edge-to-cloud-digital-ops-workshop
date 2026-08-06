@@ -602,13 +602,13 @@ export class PlatformStack extends Stack {
       },
     });
 
-    const icebergWarehousePath = `s3://${workshopBucket.bucketName}/telemetry`;
+    const icebergWarehousePath = `s3://${workshopBucket.bucketName}`;
     const icebergSchemaFields: CfnTable.IcebergStructFieldProperty[] = [
       { id: 1, name: "thing_name", type: "string", required: true },
       { id: 2, name: "message_timestamp", type: "long", required: true },
-      { id: 3, name: "cpu_pct", type: "int", required: false },
-      { id: 4, name: "mem_used_pct", type: "int", required: false },
-      { id: 5, name: "disk_used_pct", type: "int", required: false },
+      { id: 3, name: "cpu_pct", type: "double", required: false },
+      { id: 4, name: "mem_used_pct", type: "double", required: false },
+      { id: 5, name: "disk_used_pct", type: "double", required: false },
       { id: 6, name: "net_io_bytes_sent", type: "long", required: false },
       { id: 7, name: "net_io_bytes_recv", type: "long", required: false },
       { id: 8, name: "mqtt_topic", type: "string", required: false },

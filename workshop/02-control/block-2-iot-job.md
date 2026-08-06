@@ -8,15 +8,15 @@ The telemetry agent currently reports integer values for CPU, memory, and disk (
 
 ## Steps
 
-**1. Create `job-scripts/telemetry-v4.sh`** — a copy of `telemetry-v3.sh` with the precision fix applied. You can open `telemetry-v3.sh` in your editor and save a modified copy as `telemetry-v4.sh`, or run this command to create it in one step:
+**1. Create `job-scripts/telemetry-v2.sh`** — a copy of `telemetry-v1.sh` with the precision fix applied. You can open `telemetry-v1.sh` in your editor and save a modified copy as `telemetry-v2.sh`, or run this command to create it in one step:
 
 ```bash
-sed 's/%d/%.3f/g; s/3\.0\.0/4.0.0/g; s/telemetry-v3/telemetry-v4/g' \
-  job-scripts/telemetry-v3.sh > job-scripts/telemetry-v4.sh && \
-chmod +x job-scripts/telemetry-v4.sh && \
-ls job-scripts/telemetry-v4.sh
+sed 's/%d/%.3f/g; s/1\.0\.0/2.0.0/g; s/telemetry-v1/telemetry-v2/g' \
+  job-scripts/telemetry-v1.sh > job-scripts/telemetry-v2.sh && \
+chmod +x job-scripts/telemetry-v2.sh && \
+ls job-scripts/telemetry-v2.sh
 ```
-<!-- e2e:assert {"contains": "telemetry-v4.sh"} -->
+<!-- e2e:assert {"contains": "telemetry-v2.sh"} -->
 
 The three measurement lines inside the `while true` loop change from integer to 3-decimal precision:
 
@@ -40,11 +40,11 @@ The `%d` format truncates — `42.7%` becomes `42`. The `%.3f` format preserves 
 
 Also note the `exit 0` at the end of the script — this is the contract with the IoT Jobs agent. `0` reports `SUCCEEDED`; any non-zero exit reports `FAILED` and triggers the abort criteria.
 
-??? example "View source — `job-scripts/telemetry-v3.sh` (starting point)"
-    [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/job-scripts/telemetry-v3.sh){ .md-button target=_blank }
+??? example "View source — `job-scripts/telemetry-v1.sh` (starting point)"
+    [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/job-scripts/telemetry-v1.sh){ .md-button target=_blank }
 
     ```bash
-    --8<-- "job-scripts/telemetry-v3.sh:job-handler"
+    --8<-- "job-scripts/telemetry-v1.sh:job-handler"
     ```
 
     The embedded snippet is the actual job handler — a syntax check on the source
@@ -52,20 +52,20 @@ Also note the `exit 0` at the end of the script — this is the contract with th
     inside an IoT Job on a device:
 
     ```bash
-    bash -n job-scripts/telemetry-v3.sh && echo "syntax OK"
+    bash -n job-scripts/telemetry-v1.sh && echo "syntax OK"
     ```
     <!-- e2e:assert {"contains": "syntax OK"} -->
 
 **2. Upload the script and job document to S3:**
 
 ```bash
-aws s3 cp job-scripts/telemetry-v4.sh \
-  s3://workshop-platform-000000000000/job-scripts/ws-slot00/telemetry-v4.sh
+aws s3 cp job-scripts/telemetry-v2.sh \
+  s3://workshop-platform-000000000000/job-scripts/ws-slot00/telemetry-v2.sh
 ```
 <!-- e2e:assert {"contains": "upload:"} -->
 
 ```bash
-cat > /tmp/telemetry-v4-job-doc.json << 'EOF'
+cat > /tmp/telemetry-v2-job-doc.json << 'EOF'
 {
   "version": "1.0",
   "steps": [
@@ -75,7 +75,7 @@ cat > /tmp/telemetry-v4-job-doc.json << 'EOF'
         "type": "runHandler",
         "input": {
           "handler": "run-script.sh",
-          "args": ["s3://workshop-platform-000000000000/job-scripts/ws-slot00/telemetry-v4.sh"]
+          "args": ["s3://workshop-platform-000000000000/job-scripts/ws-slot00/telemetry-v2.sh"]
         },
         "runAsUser": ""
       }
@@ -84,8 +84,8 @@ cat > /tmp/telemetry-v4-job-doc.json << 'EOF'
 }
 EOF
 
-aws s3 cp /tmp/telemetry-v4-job-doc.json \
-  s3://workshop-platform-000000000000/ws-slot00/job-docs/telemetry-v4-job-doc.json
+aws s3 cp /tmp/telemetry-v2-job-doc.json \
+  s3://workshop-platform-000000000000/ws-slot00/job-docs/telemetry-v2-job-doc.json
 ```
 <!-- e2e:assert {"contains": "upload:"} -->
 
@@ -100,25 +100,25 @@ aws s3 cp /tmp/telemetry-v4-job-doc.json \
 - **Job document:** select **From S3**, then paste the S3 URL:
 
     ```
-    s3://workshop-platform-000000000000/ws-slot00/job-docs/telemetry-v4-job-doc.json
+    s3://workshop-platform-000000000000/ws-slot00/job-docs/telemetry-v2-job-doc.json
     ```
 
-- **Software package version (Deployment):** select `ws-slot00-telemetry-agent` version `4.0.0` — this associates the deployment with the catalog so IoT updates the device's `$package` shadow automatically on success.
+- **Software package version (Deployment):** select `ws-slot00-telemetry-agent` version `2.0.0` — this associates the deployment with the catalog so IoT updates the device's `$package` shadow automatically on success.
 - **Rollout:** Max rate **1 device/minute**
 - **Abort criteria:** abort if **>33%** of devices fail
 
 ??? example "AWS CLI equivalent"
     ```bash
-    JOB_ID="ws-slot00-telemetry-v4-$(date +%s)"
+    JOB_ID="ws-slot00-telemetry-v2-$(date +%s)"
     aws iot create-job \
       --job-id "$JOB_ID" \
       --targets "$(aws iot describe-thing-group \
           --thing-group-name ws-slot00-devices \
           --query thingGroupArn --output text)" \
       --document-source \
-          s3://workshop-platform-000000000000/ws-slot00/job-docs/telemetry-v4-job-doc.json \
+          s3://workshop-platform-000000000000/ws-slot00/job-docs/telemetry-v2-job-doc.json \
       --destination-package-versions \
-          "arn:aws:iot:us-east-1:000000000000:package/ws-slot00-telemetry-agent/version/4.0.0" \
+          "arn:aws:iot:us-east-1:000000000000:package/ws-slot00-telemetry-agent/version/2.0.0" \
       --job-executions-rollout-config \
           '{"maximumPerMinute":1}' \
       --abort-config \
@@ -126,11 +126,11 @@ aws s3 cp /tmp/telemetry-v4-job-doc.json \
       --timeout-config '{"inProgressTimeoutInMinutes":15}' \
       --output json
     ```
-    <!-- e2e:assert {"jsonPath": "jobId", "matches": "telemetry-v4-\\d+$", "jobSucceeds": true} -->
+    <!-- e2e:assert {"jsonPath": "jobId", "matches": "telemetry-v2-\\d+$", "jobSucceeds": true} -->
 
     > **Note:** `--destination-package-versions` links this job to the published
     > `telemetry-agent` catalog version. On `SUCCEEDED`, IoT Jobs writes the reserved
-    > `$package` shadow (`telemetry-agent.version: 4.0.0`) for you — the handler no
+    > `$package` shadow (`telemetry-agent.version: 2.0.0`) for you — the handler no
     > longer writes it by hand. The handler still writes the app-level
     > `device-config.reported.config_version` shadow, which package deployment does
     > not manage.

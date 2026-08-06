@@ -143,7 +143,8 @@ amplify/
     participant-stack.ts  # Per-slot resources: EC2, IoT, MSK, S3, AppSync Events
 
 job-scripts/
-  telemetry-v2.sh         # Updates telemetry to 1 Hz, adds net metrics, updates device-config shadow
+  telemetry-v1.sh         # Shadow-driven telemetry config, integer-precision metrics (starting point)
+  telemetry-v2.sh         # Session 2 job exercise: 3-decimal measurement precision
   add-shadows.sh          # Deploys app-deployment and device-health shadow timers
   deploy-k3s.sh           # Installs K3s server/agent, writes kubeconfig to SSM
 

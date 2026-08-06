@@ -48,7 +48,7 @@
         ```
         <!-- e2e:assert {"contains": "SUCCEEDED"} -->
 
-3. Observe that rows added after the job succeeded have decimal-precision values; earlier rows have integers — the Parquet schema widens automatically to `DOUBLE`.
+3. Observe that rows added after the job succeeded have decimal-precision values (e.g. `12.45`) — the Iceberg table declares `cpu_pct`, `mem_used_pct`, and `disk_used_pct` as `double` columns, so the full precision published over MQTT is preserved all the way into Athena.
 
 ---
 

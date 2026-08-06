@@ -74,9 +74,9 @@
 
     ```
     THING                CONFIG_VERSION  TELEMETRY_AGENT
-    i-012cb542a8cd2ad6b  4.0.0           4.0.0
-    i-0a661fd3a5c46da02  4.0.0           4.0.0
-    i-0233f0350a555411c  4.0.0           4.0.0
+    i-012cb542a8cd2ad6b  2.0.0           2.0.0
+    i-0a661fd3a5c46da02  2.0.0           2.0.0
+    i-0233f0350a555411c  2.0.0           2.0.0
     ```
 
     > **Note:** Fleet-indexing search is a *filter*, not a *projection* — a Lucene
@@ -86,7 +86,7 @@
     > In the console you'd instead open a single Thing → **Device Shadows** and read
     > the `device-config` and `$package` shadows one at a time. To do a yes/no
     > rollout check on the fleet instead, add the version to the query itself, e.g.
-    > `... AND shadow.name.device-config.reported.config_version:3.0.0`.
+    > `... AND shadow.name.device-config.reported.config_version:2.0.0`.
 
 7. Query connectivity status:
 
