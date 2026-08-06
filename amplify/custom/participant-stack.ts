@@ -595,7 +595,20 @@ exports.handler = async (event) => {
     // --8<-- [end:provisioning-template]
 
     // ── Edge subnet (private-with-egress /24, network-isolated per slot) ────
-    const slotIndex = parseInt(deploymentId.replace(/\D/g, "").slice(-2), 10) || 0;
+    // The slot index (and therefore the CIDR) is derived only from a strict
+    // `ws-slotNN` deploymentId. Anything else (e.g. `ws-e2e-test`, whose stray
+    // "2" in "e2e" used to be misread as slotIndex 2 — aliasing onto
+    // ws-slot02's subnet) fails fast instead of silently colliding with, or
+    // defaulting onto, another slot's CIDR.
+    const slotIdMatch = /^ws-slot(\d{2})$/.exec(deploymentId);
+    if (!slotIdMatch) {
+      throw new Error(
+        `Unsupported deployment-id format: "${deploymentId}". Expected "ws-slotNN" ` +
+          "(e.g. ws-slot00) so the edge subnet CIDR can be derived without risking " +
+          "a collision with another slot's subnet."
+      );
+    }
+    const slotIndex = parseInt(slotIdMatch[1], 10);
     // Slot subnets start above the platform-reserved edge-public/edge-private
     // tiers (10.0.0.0/24 - 10.0.5.0/24 for 3 AZs), so offset by 16.
     const edgeSubnetCidr = `10.0.${16 + slotIndex}.0/24`;
