@@ -160,9 +160,17 @@ if [[ ! -f "$LOCAL_BINARY_CACHE" ]]; then
     echo "ERROR: #166 keep-alive patch Connect() anchor not found in SharedCrtResourceManager.cpp — upstream source has changed, update the patch." >&2
     exit 1
   }
-  sed -i "s|${KEEPALIVE_PATCH_MARKER}|${KEEPALIVE_PATCH_MARKER}\n    clientConfigBuilder.WithTcpKeepAlive();|" \
+  # Use perl (not `sed -i`) for portability: BSD/macOS sed requires an explicit
+  # backup-suffix arg after -i and does not expand `\n` in the replacement, so a
+  # GNU-style `sed -i "s|...|...\n...|"` fails on a Mac host with
+  # "invalid command code". perl -i -pe behaves identically on macOS and Linux.
+  # \Q..\E matches the anchors as literal strings (the ()/./-> chars are not
+  # treated as regex); the markers are passed via env to avoid quoting issues.
+  KP="$KEEPALIVE_PATCH_MARKER" perl -i -pe \
+    's/\Q$ENV{KP}\E/$ENV{KP}\n    clientConfigBuilder.WithTcpKeepAlive();/' \
     "$DC_SRC/source/SharedCrtResourceManager.cpp"
-  sed -i "s|${CONNECT_PATCH_MARKER}|connection->Connect(config.thingName->c_str(), false, 180, 10000)|" \
+  CP="$CONNECT_PATCH_MARKER" perl -i -pe \
+    's/\Q$ENV{CP}\E/connection->Connect(config.thingName->c_str(), false, 180, 10000)/' \
     "$DC_SRC/source/SharedCrtResourceManager.cpp"
   # Use public.ecr.aws/amazonlinux/amazonlinux instead of the GHCR build image.
   # Run cmake install + build steps directly inside the container.
