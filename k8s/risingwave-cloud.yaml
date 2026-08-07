@@ -10,6 +10,9 @@
 #   4. Service account "risingwave-cloud" exists in your participant namespace with
 #      IRSA annotation: eks.amazonaws.com/role-arn=arn:aws:iam::${ACCOUNT_ID}:role/workshop-risingwave-s3-v2
 #   5. S3 bucket workshop-${DEPLOYMENT_ID}-${ACCOUNT_ID}-risingwave-state exists
+#   6. CNPG cluster timescaledb-cloud is running (k8s/timescaledb-cloud-cluster.yaml)
+#      and a "risingwave_meta" database owned by "workshop" exists on it — see the
+#      metaStore comment below for the one-liner to create it.
 #
 # Apply (substitute your deployment ID and account ID):
 #   sed -e "s/\${DEPLOYMENT_ID}/ws-slot00/g" -e "s/\${ACCOUNT_ID}/123456789012/g" k8s/risingwave-cloud.yaml | kubectl apply -n ws-slot00 -f -
@@ -33,9 +36,24 @@ spec:
       credentials:
         useServiceAccount: true
 
-  # ── Meta store: in-memory (sufficient for workshop; resets on pod restart)
+  # ── Meta store: PostgreSQL, on the same CNPG-managed cluster that backs
+  # TimescaleDB (see k8s/timescaledb-cloud-cluster.yaml), in a dedicated
+  # "risingwave_meta" database owned by the "workshop" role. In-memory meta
+  # does not survive a pod restart, but the S3 state store above does —
+  # every meta restart then mints a fresh cluster_id while S3 still holds
+  # the previous one's hummock/cluster_id/0 marker, and meta refuses to
+  # start ("Data directory is already used by another cluster with id...").
+  # A durable meta store keeps cluster_id persisted alongside the S3 state
+  # it describes. Create the database first with:
+  #   kubectl exec -n ${DEPLOYMENT_ID} timescaledb-cloud-1 -c postgres -- \
+  #     psql -U postgres -c 'CREATE DATABASE risingwave_meta OWNER workshop;'
   metaStore:
-    memory: true
+    postgresql:
+      host: timescaledb-cloud-rw.${DEPLOYMENT_ID}.svc
+      port: 5432
+      database: risingwave_meta
+      credentials:
+        secretName: timescaledb-cloud-app
 
   # ── Component node groups — v2 schema: resources/envFrom at template.spec level
   components:
