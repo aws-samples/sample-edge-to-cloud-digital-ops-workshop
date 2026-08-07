@@ -191,7 +191,7 @@ if [[ ! -f "$LOCAL_BINARY_CACHE" ]]; then
         -DOPENSSL_CRYPTO_LIBRARY=/usr/lib64/libcrypto.so \
         -DOPENSSL_SSL_LIBRARY=/usr/lib64/libssl.so && \
       cmake --build build --target aws-iot-device-client -j\$(nproc) && \
-      chmod -R a+rwX /root/aws-iot-device-client
+      chmod -R a+rwX /root/aws-iot-device-client 2>/dev/null || true
     "
   mkdir -p "$(dirname "$LOCAL_BINARY_CACHE")"
   cp "$DC_SRC/build/aws-iot-device-client" "$LOCAL_BINARY_CACHE"
