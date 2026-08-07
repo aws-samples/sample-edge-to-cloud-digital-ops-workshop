@@ -65,13 +65,19 @@ spec:
         # payload only needs to wake the listener, which re-runs the same
         # fleet-wide aggregate query the polled /api/freshness route uses —
         # so it stays minimal, well under Postgres's 8000-byte NOTIFY limit.
+        # Use a *named* dollar-quote tag ($notify$), not the bare $$: CNPG's
+        # instance-manager collapses `$$` to a single `$` when it hands each
+        # postInitApplicationSQL entry to the backend, producing
+        # `... AS $ BEGIN ... END; $ LANGUAGE plpgsql` — a syntax error that
+        # aborts initdb (SQLSTATE 42601) and wedges the whole cluster bootstrap.
+        # A named tag survives the collapse intact.
         - |
-          CREATE OR REPLACE FUNCTION notify_sensor_reading() RETURNS trigger AS $$
+          CREATE OR REPLACE FUNCTION notify_sensor_reading() RETURNS trigger AS $notify$
           BEGIN
             PERFORM pg_notify('sensor_readings_change', NEW.site_id);
             RETURN NEW;
           END;
-          $$ LANGUAGE plpgsql;
+          $notify$ LANGUAGE plpgsql;
         - DROP TRIGGER IF EXISTS sensor_readings_notify ON sensor_readings;
         - |
           CREATE TRIGGER sensor_readings_notify

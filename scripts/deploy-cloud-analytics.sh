@@ -185,6 +185,13 @@ DASHBOARD_TAG="${DASHBOARD_IMAGE##*:}"
 
 echo ">>> Deploying helm/cloud-analytics into namespace ${DEPLOYMENT_ID}..."
 helm dependency update "$REPO_ROOT/helm/cloud-analytics" >/dev/null
+# NOTE: intentionally NOT `--wait`. The dashboard/redpanda-connect pods block
+# (non-optional initContainer / secretRef) on the timescaledb-credentials +
+# timescaledb-dashboard-env secrets, which are derived below from the password
+# CNPG auto-generates in the "<crName>-app" secret. With `--wait`, Helm would
+# hold main-resource readiness *before* running the post-upgrade DSN hook —
+# but that hook is exactly what unblocks readiness, so the two deadlock and
+# `helm --wait` times out on a fresh slot. We drive readiness ourselves below.
 helm upgrade --install cloud-analytics "$REPO_ROOT/helm/cloud-analytics" \
   --namespace "$DEPLOYMENT_ID" \
   --set deploymentId="$DEPLOYMENT_ID" \
@@ -194,7 +201,37 @@ helm upgrade --install cloud-analytics "$REPO_ROOT/helm/cloud-analytics" \
   --set dashboard.image.tag="$DASHBOARD_TAG" \
   --set risingwave.serviceAccountRoleArn="$RISINGWAVE_S3_ROLE_ARN" \
   --set-file risingwaveDdl="$REPO_ROOT/risingwave/ddl-cloud.sql" \
-  --wait --timeout 15m
+  --timeout 15m
+
+# ── 6. Derive the TimescaleDB DSN secrets from CNPG's generated password ────
+# CNPG creates "timescaledb-cloud-app" once the cluster bootstraps its primary.
+# Build the two consumer secrets from it here (idempotent) rather than relying
+# on the Helm post-upgrade hook, which cannot run under `--wait` (see above).
+TSDB_CR="timescaledb-cloud"
+echo ">>> Waiting for CNPG-generated ${TSDB_CR}-app secret (primary bootstrap ~1-3 min)..."
+for _ in $(seq 1 120); do
+  kubectl get secret "${TSDB_CR}-app" -n "$DEPLOYMENT_ID" >/dev/null 2>&1 && break
+  sleep 5
+done
+TSDB_PASSWORD=$(kubectl get secret "${TSDB_CR}-app" -n "$DEPLOYMENT_ID" \
+  -o jsonpath='{.data.password}' 2>/dev/null | base64 -d)
+if [[ -z "$TSDB_PASSWORD" ]]; then
+  echo "ERROR: ${TSDB_CR}-app secret never appeared — CNPG cluster failed to bootstrap." >&2
+  exit 1
+fi
+TSDB_DSN="postgres://workshop:${TSDB_PASSWORD}@${TSDB_CR}-rw.${DEPLOYMENT_ID}.svc:5432/edge"
+echo ">>> Creating timescaledb-credentials + timescaledb-dashboard-env secrets..."
+kubectl create secret generic timescaledb-credentials -n "$DEPLOYMENT_ID" \
+  --from-literal=TIMESCALE_DSN="$TSDB_DSN" \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl create secret generic timescaledb-dashboard-env -n "$DEPLOYMENT_ID" \
+  --from-literal=TIMESCALEDB_ENDPOINT="$TSDB_DSN" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# ── 7. Drive readiness ourselves (replaces the `--wait` we dropped above) ────
+echo ">>> Waiting for cloud-analytics workloads to become ready..."
+kubectl rollout status -n "$DEPLOYMENT_ID" deploy/cloud-analytics-dashboard --timeout=10m
+kubectl rollout status -n "$DEPLOYMENT_ID" deploy/cloud-analytics-redpanda-connect --timeout=10m
 
 echo ">>> Cloud analytics deploy complete for ${DEPLOYMENT_ID}."
 echo ">>> Port-forward the dashboard with:"

@@ -160,16 +160,45 @@ if [[ ! -f "$LOCAL_BINARY_CACHE" ]]; then
     echo "ERROR: #166 keep-alive patch Connect() anchor not found in SharedCrtResourceManager.cpp — upstream source has changed, update the patch." >&2
     exit 1
   }
-  sed -i "s|${KEEPALIVE_PATCH_MARKER}|${KEEPALIVE_PATCH_MARKER}\n    clientConfigBuilder.WithTcpKeepAlive();|" \
+  # Use perl (not `sed -i`) for portability: BSD/macOS sed requires an explicit
+  # backup-suffix arg after -i and does not expand `\n` in the replacement, so a
+  # GNU-style `sed -i "s|...|...\n...|"` fails on a Mac host with
+  # "invalid command code". perl -i -pe behaves identically on macOS and Linux.
+  # \Q..\E matches the anchors as literal strings (the ()/./-> chars are not
+  # treated as regex); the markers are passed via env to avoid quoting issues.
+  KP="$KEEPALIVE_PATCH_MARKER" perl -i -pe \
+    's/\Q$ENV{KP}\E/$ENV{KP}\n    clientConfigBuilder.WithTcpKeepAlive();/' \
     "$DC_SRC/source/SharedCrtResourceManager.cpp"
-  sed -i "s|${CONNECT_PATCH_MARKER}|connection->Connect(config.thingName->c_str(), false, 180, 10000)|" \
+  CP="$CONNECT_PATCH_MARKER" perl -i -pe \
+    's/\Q$ENV{CP}\E/connection->Connect(config.thingName->c_str(), false, 180, 10000)/' \
     "$DC_SRC/source/SharedCrtResourceManager.cpp"
+  # Drop the unit-test subdirectory from the build. v1.10.1's top-level
+  # CMakeLists.txt calls `add_subdirectory(test)` unconditionally, and
+  # test/CMakeLists.txt then requires gtest — either via a configure-time
+  # `git clone` of googletest (BUILD_TEST_DEPS=ON, which fails intermittently
+  # with "Could not resolve host", especially under amd64 emulation) or via
+  # `find_package(GTest REQUIRED)` (BUILD_TEST_DEPS=OFF, which errors when gtest
+  # isn't installed). We only ship the production binary, so remove the test
+  # dir entirely — no gtest needed by any path, and one less flaky network step.
+  TEST_SUBDIR_MARKER='add_subdirectory(test)'
+  grep -qF "$TEST_SUBDIR_MARKER" "$DC_SRC/CMakeLists.txt" || {
+    echo "ERROR: 'add_subdirectory(test)' not found in CMakeLists.txt — upstream layout changed, update the patch." >&2
+    exit 1
+  }
+  TS="$TEST_SUBDIR_MARKER" perl -i -pe \
+    's/^(\s*)(\Q$ENV{TS}\E)/$1# $2  # removed: production build needs no gtest/' \
+    "$DC_SRC/CMakeLists.txt"
   # Use public.ecr.aws/amazonlinux/amazonlinux instead of the GHCR build image.
   # Run cmake install + build steps directly inside the container.
   # AL2023 (OpenSSL 3.x) is required — IoT Device Client v1.10.1 needs OpenSSL >= 1.1,
   # but AL2 ships 1.0.2k. Explicit OPENSSL_*_LIBRARY paths work around cmake's
   # FindOpenSSL module failing to locate libcrypto/libssl on this image.
-  docker run --rm \
+  # Pin --platform linux/amd64: the edge EC2 instances are x86_64, but on an
+  # Apple Silicon host Docker would otherwise build a linux/arm64 binary that
+  # dies on the device with "Exec format error" (status=203/EXEC). Emulated
+  # amd64 build is slower but produces the correct arch. (CI's ubuntu-latest is
+  # already amd64, so this is a no-op there.)
+  docker run --rm --platform linux/amd64 \
     -v "$DC_SRC:/root/aws-iot-device-client" \
     public.ecr.aws/amazonlinux/amazonlinux:2023 \
     bash -c "
@@ -177,13 +206,14 @@ if [[ ! -f "$LOCAL_BINARY_CACHE" ]]; then
         libcurl-devel git make zip unzip tar && \
       cd /root/aws-iot-device-client && \
       cmake -B build -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_TEST_DEPS=OFF \
         -DEXCLUDE_JOBS=OFF -DEXCLUDE_NAMED_SHADOW=OFF \
         -DEXCLUDE_TUNNELING=ON -DEXCLUDE_DEVICE_DEFENDER=ON \
         -DEXCLUDE_FLEET_PROVISIONING=OFF \
         -DOPENSSL_CRYPTO_LIBRARY=/usr/lib64/libcrypto.so \
         -DOPENSSL_SSL_LIBRARY=/usr/lib64/libssl.so && \
       cmake --build build --target aws-iot-device-client -j\$(nproc) && \
-      chmod -R a+rwX /root/aws-iot-device-client
+      chmod -R a+rwX /root/aws-iot-device-client 2>/dev/null || true
     "
   mkdir -p "$(dirname "$LOCAL_BINARY_CACHE")"
   cp "$DC_SRC/build/aws-iot-device-client" "$LOCAL_BINARY_CACHE"

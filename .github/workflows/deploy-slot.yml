@@ -1,0 +1,107 @@
+name: Deploy Slot (manual)
+
+# Deploys a full participant slot (Docker-built IoT Device Client + per-slot CDK)
+# on demand, so contributors — including the @agentcore-claude remote agent,
+# whose sandbox cannot run Docker — can get a live slot deployed for validation
+# without local AWS credentials.
+#
+# MANUAL DISPATCH ONLY. This intentionally does NOT run on pull_request activity:
+# every run updates the SAME shared slot stack (ws-slot90 by default) regardless
+# of branch, so auto-running on each PR would let unrelated branches clobber each
+# other's deploy. Trigger it explicitly (from the chosen branch) only when the
+# change is ready to deploy:
+#
+#   gh workflow run deploy-slot.yml --ref <branch> [-f slot=ws-slotNN]
+#
+# The slot is LEFT RUNNING after the workflow finishes so the agent can validate
+# against it. Reclaim it with `scripts/teardown.sh <slot>` when done.
+
+on:
+  workflow_dispatch:
+    inputs:
+      slot:
+        description: 'Slot id to deploy (must match ws-slotNN)'
+        required: false
+        default: ''
+
+concurrency:
+  # One deploy at a time for the shared slot stack — a second dispatch while a
+  # deploy is mid-flight would race on the same CloudFormation stacks. Do NOT
+  # cancel in-progress: a half-cancelled CDK deploy leaves stacks in
+  # UPDATE_ROLLBACK_* limbo. Keyed on the slot so different slots can deploy
+  # concurrently but the same slot serializes.
+  group: deploy-slot-${{ github.event.inputs.slot || vars.CI_DEPLOY_SLOT || 'ws-slot90' }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write   # OIDC → AWS credentials
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  # Reserved CI slot. ws-slotNN → edge subnet 10.0.(16+NN).0/24, so 90 → 10.0.106.0/24,
+  # well clear of participant slots 00-15. Override with the CI_DEPLOY_SLOT repo variable.
+  DEFAULT_CI_SLOT: ws-slot90
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: pnpm
+
+      - name: Resolve target slot
+        id: slot
+        run: |
+          SLOT="${{ github.event.inputs.slot }}"
+          [ -z "$SLOT" ] && SLOT="${{ vars.CI_DEPLOY_SLOT }}"
+          [ -z "$SLOT" ] && SLOT="${{ env.DEFAULT_CI_SLOT }}"
+          if ! printf '%s' "$SLOT" | grep -Eq '^ws-slot[0-9]{2}$'; then
+            echo "::error::Slot '$SLOT' does not match ws-slotNN (participant-stack.ts fails fast on anything else)."
+            exit 1
+          fi
+          echo "slot=$SLOT" >> "$GITHUB_OUTPUT"
+          echo ">>> Target slot: $SLOT (from branch ${{ github.ref_name }})"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 21600
+
+      - name: Authenticate to ECR Public (device-client build image)
+        # sandbox.sh builds the IoT Device Client inside public.ecr.aws/amazonlinux.
+        # An explicit login avoids anonymous-pull rate limits / stale-token failures.
+        run: |
+          aws ecr-public get-login-password --region us-east-1 \
+            | docker login --username AWS --password-stdin public.ecr.aws
+
+      - name: Deploy slot
+        run: pnpm run sandbox "${{ steps.slot.outputs.slot }}"
+
+      - name: Smoke test
+        env:
+          WORKSHOP_TEST_SLOT: ${{ steps.slot.outputs.slot }}
+        run: pnpm test
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ '${{ job.status }}' = 'success' ]; then
+            echo "✅ Deployed slot \`${{ steps.slot.outputs.slot }}\` from \`${{ github.ref_name }}\` (smoke test passed). Left running for validation — reclaim with \`scripts/teardown.sh ${{ steps.slot.outputs.slot }}\`." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "❌ Slot deploy for \`${{ steps.slot.outputs.slot }}\` failed (status: ${{ job.status }})." >> "$GITHUB_STEP_SUMMARY"
+          fi
