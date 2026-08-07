@@ -175,6 +175,22 @@ if [[ -z "$RISINGWAVE_S3_ROLE_ARN" || "$RISINGWAVE_S3_ROLE_ARN" == "None" ]]; th
   exit 1
 fi
 
+# ── 4b. Adopt a stale non-Helm risingwave-cloud ServiceAccount, if present ──
+# A leftover SA from an earlier partial run / pre-Helm manual apply (#175)
+# lacks the app.kubernetes.io/managed-by=Helm label + meta.helm.sh/release-*
+# annotations Helm requires before it will take ownership of an existing
+# object, so `helm install` refuses it outright. Stamp that adoption metadata
+# on unconditionally (idempotent — a no-op on a SA Helm already owns, and a
+# no-op when the SA doesn't exist yet on a truly fresh slot).
+if kubectl get serviceaccount risingwave-cloud -n "$DEPLOYMENT_ID" >/dev/null 2>&1; then
+  echo ">>> Adopting pre-existing risingwave-cloud ServiceAccount into the Helm release..."
+  kubectl label serviceaccount risingwave-cloud -n "$DEPLOYMENT_ID" \
+    app.kubernetes.io/managed-by=Helm --overwrite >/dev/null
+  kubectl annotate serviceaccount risingwave-cloud -n "$DEPLOYMENT_ID" \
+    meta.helm.sh/release-name=cloud-analytics \
+    meta.helm.sh/release-namespace="$DEPLOYMENT_ID" --overwrite >/dev/null
+fi
+
 # ── 5. helm upgrade --install the per-slot analytics stack ──────────────────
 # The dashboard image is shared across all slots (one push per code change,
 # not per slot) — default to this account's ECR repo, built/pushed via
