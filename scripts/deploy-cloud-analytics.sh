@@ -11,6 +11,15 @@
 # --install / CREATE ... IF NOT EXISTS DDL / --if-not-exists topics). Exits 0
 # on a repeat run against an already-deployed slot.
 #
+# --migrate-risingwave-meta: required, opt-in flag to move a slot that still
+# has the old in-memory-backed RisingWave meta store onto the durable
+# PostgreSQL one. RisingWave's validating webhook forbids changing
+# spec.metaStore on an existing CR, so this deletes the CR and clears its S3
+# Hummock state (destructive to RW state only — TimescaleDB is the system of
+# record) before letting Helm recreate it fresh. Without this flag, the
+# script fails fast on such a slot rather than silently destroying state. A
+# fresh slot with no existing CR is never affected by this flag.
+#
 # Splits into two kinds of work, same distinction block-1 already draws:
 #   - Cluster-scoped, run once per EKS cluster by whoever has cluster-admin
 #     (cert-manager, risingwave-operator, cnpg operator, default StorageClass).
@@ -25,19 +34,21 @@ DEPLOYMENT_ID=""
 SKIP_CLUSTER_SCOPED=false
 DASHBOARD_IMAGE=""
 REGION="${AWS_DEFAULT_REGION:-us-east-1}"
+MIGRATE_RISINGWAVE_META=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --deployment-id)       DEPLOYMENT_ID="$2"; shift 2 ;;
-    --skip-cluster-scoped)  SKIP_CLUSTER_SCOPED=true; shift ;;
-    --dashboard-image)      DASHBOARD_IMAGE="$2"; shift 2 ;;
-    --region)                REGION="$2"; shift 2 ;;
+    --deployment-id)          DEPLOYMENT_ID="$2"; shift 2 ;;
+    --skip-cluster-scoped)     SKIP_CLUSTER_SCOPED=true; shift ;;
+    --dashboard-image)         DASHBOARD_IMAGE="$2"; shift 2 ;;
+    --region)                   REGION="$2"; shift 2 ;;
+    --migrate-risingwave-meta)  MIGRATE_RISINGWAVE_META=true; shift ;;
     *) echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
 
 if [[ -z "$DEPLOYMENT_ID" ]]; then
-  echo "Usage: $0 --deployment-id <ws-slotNN> [--skip-cluster-scoped] [--dashboard-image <repo:tag>]" >&2
+  echo "Usage: $0 --deployment-id <ws-slotNN> [--skip-cluster-scoped] [--dashboard-image <repo:tag>] [--migrate-risingwave-meta]" >&2
   exit 1
 fi
 
@@ -189,6 +200,38 @@ if kubectl get serviceaccount risingwave-cloud -n "$DEPLOYMENT_ID" >/dev/null 2>
   kubectl annotate serviceaccount risingwave-cloud -n "$DEPLOYMENT_ID" \
     meta.helm.sh/release-name=cloud-analytics \
     meta.helm.sh/release-namespace="$DEPLOYMENT_ID" --overwrite >/dev/null
+fi
+
+# ── 4c. Migrate an existing memory-backed RisingWave meta store, if any ─────
+# The RisingWave validating webhook forbids changing spec.metaStore in place
+# on an existing CR ("meta store must be kept consistent"), so a slot already
+# running the old in-memory meta store can't simply be `helm upgrade`d onto
+# the durable PostgreSQL one below — the webhook rejects the upgrade outright.
+# The only path forward is to delete the CR and let Helm recreate it fresh,
+# but the S3 Hummock state left behind (hummock/cluster_id/0) still names the
+# old in-memory cluster_id and would collide with the new one meta mints on
+# recreation — so migrating also means clearing that state. RW state is
+# expendable by design (TimescaleDB is the system of record), but destroying
+# it is a call only the operator should make explicitly, never a silent side
+# effect of a routine deploy — hence the dedicated opt-in flag, same guard
+# philosophy as --delete-platform-stack in e2e/doc-runner-cli.ts.
+RW_CR_NAME="risingwave-cloud"
+if kubectl get risingwave "$RW_CR_NAME" -n "$DEPLOYMENT_ID" >/dev/null 2>&1; then
+  EXISTING_META_MEMORY=$(kubectl get risingwave "$RW_CR_NAME" -n "$DEPLOYMENT_ID" \
+    -o jsonpath='{.spec.metaStore.memory}' 2>/dev/null || true)
+  if [[ -n "$EXISTING_META_MEMORY" ]]; then
+    if [[ "$MIGRATE_RISINGWAVE_META" == "true" ]]; then
+      echo ">>> [migrate] Existing RisingWave CR '${RW_CR_NAME}' uses an in-memory meta store; deleting it and clearing its S3 Hummock state so it can be recreated on the durable PostgreSQL meta store (--migrate-risingwave-meta)..."
+      kubectl delete risingwave "$RW_CR_NAME" -n "$DEPLOYMENT_ID" --ignore-not-found --wait=true
+      echo ">>> [migrate] Clearing s3://${STATE_BUCKET} — the leftover hummock/cluster_id marker from the old in-memory meta would otherwise collide with the new cluster_id. This is safe: RW state is expendable, TimescaleDB is the system of record."
+      aws s3 rm "s3://${STATE_BUCKET}" --recursive --region "$REGION" >/dev/null
+    else
+      echo "ERROR: existing RisingWave CR '${RW_CR_NAME}' uses an in-memory meta store." >&2
+      echo "       spec.metaStore cannot be changed in place (RisingWave's validating webhook forbids it), so helm upgrade would fail." >&2
+      echo "       Re-run with --migrate-risingwave-meta to delete the CR and clear its S3 state, then recreate it on the durable PostgreSQL meta store." >&2
+      exit 1
+    fi
+  fi
 fi
 
 # ── 5. helm upgrade --install the per-slot analytics stack ──────────────────
