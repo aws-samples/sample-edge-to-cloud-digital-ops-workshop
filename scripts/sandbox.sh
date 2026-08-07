@@ -172,6 +172,22 @@ if [[ ! -f "$LOCAL_BINARY_CACHE" ]]; then
   CP="$CONNECT_PATCH_MARKER" perl -i -pe \
     's/\Q$ENV{CP}\E/connection->Connect(config.thingName->c_str(), false, 180, 10000)/' \
     "$DC_SRC/source/SharedCrtResourceManager.cpp"
+  # Drop the unit-test subdirectory from the build. v1.10.1's top-level
+  # CMakeLists.txt calls `add_subdirectory(test)` unconditionally, and
+  # test/CMakeLists.txt then requires gtest — either via a configure-time
+  # `git clone` of googletest (BUILD_TEST_DEPS=ON, which fails intermittently
+  # with "Could not resolve host", especially under amd64 emulation) or via
+  # `find_package(GTest REQUIRED)` (BUILD_TEST_DEPS=OFF, which errors when gtest
+  # isn't installed). We only ship the production binary, so remove the test
+  # dir entirely — no gtest needed by any path, and one less flaky network step.
+  TEST_SUBDIR_MARKER='add_subdirectory(test)'
+  grep -qF "$TEST_SUBDIR_MARKER" "$DC_SRC/CMakeLists.txt" || {
+    echo "ERROR: 'add_subdirectory(test)' not found in CMakeLists.txt — upstream layout changed, update the patch." >&2
+    exit 1
+  }
+  TS="$TEST_SUBDIR_MARKER" perl -i -pe \
+    's/^(\s*)(\Q$ENV{TS}\E)/$1# $2  # removed: production build needs no gtest/' \
+    "$DC_SRC/CMakeLists.txt"
   # Use public.ecr.aws/amazonlinux/amazonlinux instead of the GHCR build image.
   # Run cmake install + build steps directly inside the container.
   # AL2023 (OpenSSL 3.x) is required — IoT Device Client v1.10.1 needs OpenSSL >= 1.1,
