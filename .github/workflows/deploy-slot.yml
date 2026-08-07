@@ -1,22 +1,22 @@
-name: Deploy Slot (PR)
+name: Deploy Slot (manual)
 
 # Deploys a full participant slot (Docker-built IoT Device Client + per-slot CDK)
-# from a pull request, so contributors — including the @agentcore-claude remote
-# agent, whose sandbox cannot run Docker — can get a live slot deployed for
-# validation without local AWS credentials.
+# on demand, so contributors — including the @agentcore-claude remote agent,
+# whose sandbox cannot run Docker — can get a live slot deployed for validation
+# without local AWS credentials.
 #
-# Trigger is LABEL-GATED: the deploy only runs when the PR carries the `deploy`
-# label (added by a maintainer or the agent). It fires when the label is added
-# and on subsequent pushes to an already-labeled PR, plus a manual
-# workflow_dispatch. This avoids spinning up ~20-40 min of AWS resources on
-# every docs/typo PR.
+# MANUAL DISPATCH ONLY. This intentionally does NOT run on pull_request activity:
+# every run updates the SAME shared slot stack (ws-slot90 by default) regardless
+# of branch, so auto-running on each PR would let unrelated branches clobber each
+# other's deploy. Trigger it explicitly (from the chosen branch) only when the
+# change is ready to deploy:
+#
+#   gh workflow run deploy-slot.yml --ref <branch> [-f slot=ws-slotNN]
 #
 # The slot is LEFT RUNNING after the workflow finishes so the agent can validate
-# against it. Reclaim it manually with `scripts/teardown.sh <slot>` when done.
+# against it. Reclaim it with `scripts/teardown.sh <slot>` when done.
 
 on:
-  pull_request:
-    types: [labeled, synchronize]
   workflow_dispatch:
     inputs:
       slot:
@@ -25,16 +25,17 @@ on:
         default: ''
 
 concurrency:
-  # One deploy at a time per slot — a second push while a deploy is mid-flight
-  # would race on the same CloudFormation stacks. Do NOT cancel in-progress: a
-  # half-cancelled CDK deploy leaves stacks in UPDATE_ROLLBACK_* limbo.
-  group: deploy-slot-${{ github.event.pull_request.number || github.run_id }}
+  # One deploy at a time for the shared slot stack — a second dispatch while a
+  # deploy is mid-flight would race on the same CloudFormation stacks. Do NOT
+  # cancel in-progress: a half-cancelled CDK deploy leaves stacks in
+  # UPDATE_ROLLBACK_* limbo. Keyed on the slot so different slots can deploy
+  # concurrently but the same slot serializes.
+  group: deploy-slot-${{ github.event.inputs.slot || vars.CI_DEPLOY_SLOT || 'ws-slot90' }}
   cancel-in-progress: false
 
 permissions:
   id-token: write   # OIDC → AWS credentials
   contents: read
-  pull-requests: write   # post the deploy result back onto the PR
 
 env:
   AWS_REGION: us-east-1
@@ -44,22 +45,10 @@ env:
 
 jobs:
   deploy:
-    # Label path: only when the PR carries `deploy`. `synchronize` (new push)
-    # re-checks the label so a push to an unlabeled PR does nothing. Dispatch
-    # path always runs.
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-       contains(github.event.pull_request.labels.*.name, 'deploy'))
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-        with:
-          # On a PR, deploy the PR's merge/head ref (default checkout already
-          # resolves this for pull_request events); dispatch uses the branch it
-          # was launched from.
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - uses: pnpm/action-setup@v4
         with:
@@ -81,7 +70,7 @@ jobs:
             exit 1
           fi
           echo "slot=$SLOT" >> "$GITHUB_OUTPUT"
-          echo ">>> Target slot: $SLOT"
+          echo ">>> Target slot: $SLOT (from branch ${{ github.ref_name }})"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -108,19 +97,11 @@ jobs:
           WORKSHOP_TEST_SLOT: ${{ steps.slot.outputs.slot }}
         run: pnpm test
 
-      - name: Comment deploy result on PR
-        if: github.event_name == 'pull_request' && always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const slot = '${{ steps.slot.outputs.slot }}';
-            const ok = '${{ job.status }}' === 'success';
-            const body = ok
-              ? `✅ Deployed slot \`${slot}\` from this PR (smoke test passed). It is **left running** for validation — reclaim with \`scripts/teardown.sh ${slot}\` when done.`
-              : `❌ Slot deploy for \`${slot}\` failed (status: ${{ job.status }}). See the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}).`;
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body,
-            });
+      - name: Summary
+        if: always()
+        run: |
+          if [ '${{ job.status }}' = 'success' ]; then
+            echo "✅ Deployed slot \`${{ steps.slot.outputs.slot }}\` from \`${{ github.ref_name }}\` (smoke test passed). Left running for validation — reclaim with \`scripts/teardown.sh ${{ steps.slot.outputs.slot }}\`." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "❌ Slot deploy for \`${{ steps.slot.outputs.slot }}\` failed (status: ${{ job.status }})." >> "$GITHUB_STEP_SUMMARY"
+          fi

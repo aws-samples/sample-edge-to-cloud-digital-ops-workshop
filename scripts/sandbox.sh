@@ -190,6 +190,7 @@ if [[ ! -f "$LOCAL_BINARY_CACHE" ]]; then
         libcurl-devel git make zip unzip tar && \
       cd /root/aws-iot-device-client && \
       cmake -B build -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_TEST_DEPS=OFF \
         -DEXCLUDE_JOBS=OFF -DEXCLUDE_NAMED_SHADOW=OFF \
         -DEXCLUDE_TUNNELING=ON -DEXCLUDE_DEVICE_DEFENDER=ON \
         -DEXCLUDE_FLEET_PROVISIONING=OFF \
