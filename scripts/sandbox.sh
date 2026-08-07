@@ -177,7 +177,12 @@ if [[ ! -f "$LOCAL_BINARY_CACHE" ]]; then
   # AL2023 (OpenSSL 3.x) is required — IoT Device Client v1.10.1 needs OpenSSL >= 1.1,
   # but AL2 ships 1.0.2k. Explicit OPENSSL_*_LIBRARY paths work around cmake's
   # FindOpenSSL module failing to locate libcrypto/libssl on this image.
-  docker run --rm \
+  # Pin --platform linux/amd64: the edge EC2 instances are x86_64, but on an
+  # Apple Silicon host Docker would otherwise build a linux/arm64 binary that
+  # dies on the device with "Exec format error" (status=203/EXEC). Emulated
+  # amd64 build is slower but produces the correct arch. (CI's ubuntu-latest is
+  # already amd64, so this is a no-op there.)
+  docker run --rm --platform linux/amd64 \
     -v "$DC_SRC:/root/aws-iot-device-client" \
     public.ecr.aws/amazonlinux/amazonlinux:2023 \
     bash -c "
