@@ -237,6 +237,29 @@ keep going locally — it is a peer worker, not a subprocess you wait on.
 4. Track the resulting PR like any other; review before merge. Two agents must
    not edit the same file on divergent branches — split by file/module.
 
+**Grouping related issues — one agent per *set*, not per issue:**
+When a piece of work naturally decomposes into several issues that touch the same
+code paths or must land together (e.g. "automate the deploy" + "change the app's
+behaviour" + "rewrite the docs to match"), **dispatch a single agent to the whole
+set** — do **not** assign one agent per issue. Independent, non-overlapping tasks
+can still go to separate agents; but tightly-coupled issues that share files or a
+dependency chain belong to one agent so it can implement them in order, in one
+branch/PR, without divergent edits to the same files racing each other.
+
+How to group and dispatch a set:
+- File each unit of work as its **own** issue (so the set has a clean paper trail
+  and reviewable scope), and wire the dependency chain with the native
+  issue-relationships API — `blocked_by` in implementation order.
+- Mark each issue as part of the set at the top of its body (e.g. a blockquote:
+  "Part of a 3-issue set (#159 → #160 → #161) for one remote agent") so the agent
+  knows to read the siblings and implement them together.
+- Dispatch by commenting `@agentcore-claude` on the **lead** issue (the one nothing
+  else blocks), listing the full set and the intended order, and instruct the agent
+  to open **one** PR covering all of them, closing each issue in order.
+- When the set explicitly needs live deploy/test that only credentialed sessions
+  can do (and the agent's environment is set up for it), say so — this overrides
+  the usual "keep live-slot validation local" default for that dispatch.
+
 **What to keep local (do NOT delegate):** anything requiring this machine's AWS
 credentials or the SSM tunnel into a private K3s cluster, platform/slot teardown,
 and any change you can't hand off with a self-verifiable acceptance check.
