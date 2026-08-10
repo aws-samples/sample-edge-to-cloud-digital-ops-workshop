@@ -34,8 +34,15 @@ spec:
                 - secretRef:
                     name: msk-credentials
               env:
+                # Checkpoint barrier cadence. RisingWave commits a checkpoint to
+                # the meta store on every barrier; at very low intervals the
+                # commit path (esp. an external Postgres/S3 meta+state store on a
+                # 1-vCPU node) can't keep up, the committed epoch falls behind
+                # wall-clock, and MV freshness lags by minutes even under trivial
+                # load. Keep at the RisingWave default (1000ms) unless profiling
+                # shows the commit path has headroom for a tighter interval.
                 - name: RW_BARRIER_INTERVAL_MS
-                  value: "50"
+                  value: {{ .Values.risingwave.barrierIntervalMs | quote }}
               resources:
                 {{- toYaml .Values.risingwave.resources.meta | nindent 16 }}
 
@@ -63,8 +70,10 @@ spec:
                 - secretRef:
                     name: msk-credentials
               env:
+                # See the meta node group above — barrier cadence must match
+                # across meta and compute. RisingWave default (1000ms).
                 - name: RW_BARRIER_INTERVAL_MS
-                  value: "50"
+                  value: {{ .Values.risingwave.barrierIntervalMs | quote }}
               resources:
                 {{- toYaml .Values.risingwave.resources.compute | nindent 16 }}
 

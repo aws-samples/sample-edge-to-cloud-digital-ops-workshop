@@ -18,13 +18,15 @@
  *   jsonPath         — dot-path to extract from stdout JSON (e.g. "jobId")
  *   matches          — regex the jsonPath value must match
  *   jobSucceeds      — after the block, poll until all IoT job executions SUCCEED
- *   captureFreshness — record a data-freshness measurement from this block into
- *                      the run report. The block must emit a JSON object on
- *                      stdout shaped {"tier","freshness_ms"[,"rows"]}; the last
- *                      such object wins. Used by the Block-5 CLI freshness step
- *                      to log RisingWave / TimescaleDB / Athena freshness side
- *                      by side, the same three-tier comparison the dashboard
- *                      renders (see workshop/04-analytics/block-5-dashboard.md).
+ *   captureFreshness — record a data-freshness + query-latency measurement from
+ *                      this block into the run report. The block must emit a
+ *                      JSON object on stdout shaped
+ *                      {"tier","freshness_ms"[,"query_latency_ms"][,"rows"]};
+ *                      the last such object wins. Used by the Block-5 CLI step
+ *                      to log RisingWave / TimescaleDB / Athena data staleness
+ *                      AND read-path latency side by side, the same three-tier
+ *                      comparison the dashboard renders (see
+ *                      workshop/04-analytics/block-5-dashboard.md).
  *
  * A block that tears down the shared platform stack (VPCs/EKS/MSK) must also
  * carry a <!-- e2e:platform-teardown --> comment alongside its e2e:assert one —
@@ -74,19 +76,22 @@ export interface AssertSpec {
   jobTimeoutMinutes?: number;
   /** Restrict this block to one persona. Omitted = runs under both. */
   persona?: Persona;
-  /** Record a data-freshness measurement from this block into the run report.
-   *  The block must print a JSON object on stdout shaped
-   *  {"tier": "...", "freshness_ms": <number>, "rows"?: <number>}; the last such
-   *  object in stdout wins. */
+  /** Record a data-freshness + query-latency measurement from this block into
+   *  the run report. The block must print a JSON object on stdout shaped
+   *  {"tier": "...", "freshness_ms": <number>, "query_latency_ms"?: <number>,
+   *  "rows"?: <number>}; the last such object in stdout wins. */
   captureFreshness?: boolean;
 }
 
-/** One data-freshness measurement captured from a block annotated
- *  captureFreshness — the CLI-equivalent of a data-freshness dashboard tile.
- *  Aggregated across all files into the run report. */
+/** One measurement captured from a block annotated captureFreshness — the
+ *  CLI-equivalent of the dashboard's freshness + query-latency tiles for one
+ *  tier. Aggregated across all files into the run report. `freshness_ms` is
+ *  data staleness (now − MAX(ts)); `query_latency_ms` is read-path wall-clock —
+ *  two orthogonal metrics, either may be absent if the block didn't emit it. */
 export interface FreshnessMeasurement {
   tier: string;
   freshness_ms: number | null;
+  query_latency_ms?: number | null;
   rows?: number;
   file: string;
 }
@@ -591,20 +596,26 @@ export async function runDocBlocks(
       }
     }
 
-    // Capture a data-freshness measurement for the run report. The block emits
-    // {"tier","freshness_ms"[,"rows"]} on stdout; the last such object wins
-    // (matching the polling-loop convention used elsewhere in this file). Only
-    // recorded when the block otherwise passed — a failed query's freshness
-    // number is meaningless.
+    // Capture a data-freshness + query-latency measurement for the run report.
+    // The block emits {"tier","freshness_ms"[,"query_latency_ms"][,"rows"]} on
+    // stdout; the last such object wins (matching the polling-loop convention
+    // used elsewhere in this file). Only recorded when the block otherwise
+    // passed — a failed query's freshness/latency numbers are meaningless.
     let freshness: FreshnessMeasurement | undefined;
     if (!error && assert.captureFreshness) {
       for (const parsed of extractJsonValues(blockOut)) {
-        const obj = parsed as { tier?: unknown; freshness_ms?: unknown; rows?: unknown };
+        const obj = parsed as { tier?: unknown; freshness_ms?: unknown; query_latency_ms?: unknown; rows?: unknown };
         if (obj && typeof obj.tier === "string" && "freshness_ms" in obj) {
           const ms = obj.freshness_ms;
+          const lat = obj.query_latency_ms;
           freshness = {
             tier: obj.tier,
             freshness_ms: typeof ms === "number" ? ms : ms == null ? null : Number(ms),
+            query_latency_ms:
+              !("query_latency_ms" in obj) ? undefined
+              : typeof lat === "number" ? lat
+              : lat == null ? null
+              : Number(lat),
             rows: typeof obj.rows === "number" ? obj.rows : undefined,
             file: mdPath,
           };

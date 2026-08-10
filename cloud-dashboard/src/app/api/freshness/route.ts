@@ -7,8 +7,19 @@ import { queryRisingWaveFreshness, queryTimescaleDbFreshness } from "../../../li
 // this endpoint remains the source of truth for the initial page load and for
 // the Athena tier, which has no push mechanism (on-demand warehouse query).
 export interface FreshnessPayload {
-  // Chart 1 — data freshness per tier (single numbers, ms)
+  // Chart 1 — data freshness per tier (single numbers, ms).
+  // Freshness = now − MAX(ts): how stale the newest row is (a property of the
+  // ingestion pipeline, not the read path).
   tierFreshness: {
+    risingwave_ms: number | null;
+    timescaledb_ms: number | null;
+    athena_ms: number | null;
+  };
+  // Chart 1b — query latency per tier (single numbers, ms). Wall-clock to run
+  // this tier's read. Distinct axis from freshness: this is the read-path cost
+  // (in-memory MV vs relational scan vs warehouse round-trip), independent of
+  // how stale the data is.
+  tierLatency: {
     risingwave_ms: number | null;
     timescaledb_ms: number | null;
     athena_ms: number | null;
@@ -29,11 +40,22 @@ function mockPayload(source: "risingwave" | "timescaledb" | "athena" | "mock"): 
   const rw_ms = source === "risingwave" ? 350 + Math.random() * 200 : null;
   const ts_ms = source === "timescaledb" ? 1500 + Math.random() * 800 : null;
   const at_ms = source === "athena" ? 28000 + Math.random() * 5000 : null;
+  // Mock query latency: RW's in-memory MV is fastest, TSDB's scan a bit slower,
+  // Athena's warehouse round-trip slowest — the ordering the read-path axis
+  // is meant to show.
+  const rw_lat = source === "risingwave" ? 3 + Math.random() * 5 : null;
+  const ts_lat = source === "timescaledb" ? 15 + Math.random() * 20 : null;
+  const at_lat = source === "athena" ? 1200 + Math.random() * 800 : null;
   return {
     tierFreshness: {
       risingwave_ms: rw_ms,
       timescaledb_ms: ts_ms,
       athena_ms: at_ms,
+    },
+    tierLatency: {
+      risingwave_ms: rw_lat,
+      timescaledb_ms: ts_lat,
+      athena_ms: at_lat,
     },
     fleetResources: {
       avg_free_cpu_pct: 85 + Math.random() * 10,
@@ -109,6 +131,10 @@ export async function GET(req: NextRequest) {
 
       const athena = new AthenaClient({ region });
       const now = Date.now();
+      // Query latency for the warehouse tier is the full submit → poll → fetch
+      // round-trip, so it's seconds — the deliberately-slow read path in the
+      // comparison. Measured from just before StartQueryExecution.
+      const queryT0 = Date.now();
 
       const whereClause = deploymentId
         ? `WHERE deployment_id = '${deploymentId.replace(/'/g, "''")}'`
@@ -185,6 +211,11 @@ export async function GET(req: NextRequest) {
           risingwave_ms: null,
           timescaledb_ms: null,
           athena_ms: latestTs > 0 ? now - latestTs : null,
+        },
+        tierLatency: {
+          risingwave_ms: null,
+          timescaledb_ms: null,
+          athena_ms: Date.now() - queryT0,
         },
         fleetResources: {
           avg_free_cpu_pct: avgFreeCpu,

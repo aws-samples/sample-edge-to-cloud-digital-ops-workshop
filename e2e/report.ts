@@ -59,16 +59,23 @@ export function renderReport(fileSummaries: FileSummaryLike[], info: ReportRunIn
 
   if (measurements.length > 0) {
     lines.push("");
-    lines.push("## Data freshness");
+    lines.push("## Data freshness & query latency");
     lines.push("");
-    lines.push("Measured `now − MAX(timestamp)` per storage tier — the CLI equivalent of the dashboard's Data Freshness chart.");
+    lines.push(
+      "Two orthogonal per-tier metrics — the CLI equivalent of the dashboard's " +
+        "Data Freshness and Query Latency charts. **Freshness** = `now − MAX(timestamp)` " +
+        "(how stale the newest row is — an ingestion-lag metric). **Query latency** = " +
+        "wall-clock to run the read query (the read-path cost — in-memory MV vs relational " +
+        "scan vs warehouse round-trip). A tier can be fresh yet slow, or stale yet fast."
+    );
     lines.push("");
-    lines.push("| Tier | Freshness | Rows |");
-    lines.push("|---|---|---|");
+    lines.push("| Tier | Freshness | Query latency | Rows |");
+    lines.push("|---|---|---|---|");
     for (const m of measurements) {
       const fresh = m.freshness_ms == null ? "—" : `${m.freshness_ms.toLocaleString()} ms`;
+      const latency = m.query_latency_ms == null ? "—" : `${m.query_latency_ms.toLocaleString()} ms`;
       const rows = m.rows == null ? "—" : String(m.rows);
-      lines.push(`| ${m.tier} | ${fresh} | ${rows} |`);
+      lines.push(`| ${m.tier} | ${fresh} | ${latency} | ${rows} |`);
     }
   }
 

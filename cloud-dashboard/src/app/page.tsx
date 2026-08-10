@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer,
@@ -36,6 +36,79 @@ interface FreshnessBarDatum {
   rw: number | null;
   tsdb: number | null;
   athena: number | null;
+}
+
+// A single log-scale grouped bar chart of a per-tier ms metric. Shared by the
+// freshness chart (data staleness) and the query-latency chart (read-path cost)
+// — same three tiers, same log axis, different metric.
+function TierMsBarChart({
+  title, blurb, axisLabel, rw, tsdb, athena,
+}: {
+  title: string; blurb: string; axisLabel: string;
+  rw: number | null; tsdb: number | null; athena: number | null;
+}) {
+  const chartData: FreshnessBarDatum[] = [
+    { tier: "RisingWave",  rw: logVal(rw),  tsdb: null,          athena: null          },
+    { tier: "TimescaleDB", rw: null,        tsdb: logVal(tsdb),  athena: null          },
+    { tier: "Athena/S3",   rw: null,        tsdb: null,          athena: logVal(athena) },
+  ];
+
+  const CustomTooltip = ({ active, payload, label }: any) => {
+    if (!active || !payload?.length) return null;
+    const ms = Math.pow(10, payload[0]?.value ?? 0);
+    return (
+      <div style={{ background: "#1e293b", border: "1px solid #334155", padding: "8px 12px", borderRadius: 6, fontSize: 13 }}>
+        <p style={{ margin: 0, color: "#94a3b8" }}>{label}</p>
+        <p style={{ margin: "4px 0 0", color: "#f8fafc", fontWeight: 600 }}>{msLabel(ms)}</p>
+      </div>
+    );
+  };
+
+  return (
+    <div className="card">
+      <h2 style={{ marginBottom: "0.25rem", fontSize: "1rem" }}>{title}</h2>
+      <p style={{ color: "#888", fontSize: "0.8rem", marginBottom: "0.75rem" }}>{blurb}</p>
+      <ResponsiveContainer width="100%" height={220}>
+        <BarChart data={chartData} margin={{ top: 4, right: 16, left: 8, bottom: 4 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+          <XAxis dataKey="tier" tick={{ fill: "#94a3b8", fontSize: 12 }} />
+          <YAxis
+            tickFormatter={logTickFormatter}
+            ticks={LOG_TICKS.map(v => Math.log10(v))}
+            domain={[0, Math.log10(100_000)]}
+            tick={{ fill: "#94a3b8", fontSize: 11 }}
+            label={{ value: axisLabel, angle: -90, position: "insideLeft", fill: "#64748b", fontSize: 11 }}
+          />
+          <Tooltip content={<CustomTooltip />} cursor={{ fill: "rgba(255,255,255,0.05)" }} />
+          <Bar dataKey="rw"     name="RisingWave"  fill={COLOUR_RW}     radius={[4,4,0,0]} />
+          <Bar dataKey="tsdb"   name="TimescaleDB" fill={COLOUR_TSDB}   radius={[4,4,0,0]} />
+          <Bar dataKey="athena" name="Athena/S3"   fill={COLOUR_ATHENA} radius={[4,4,0,0]} />
+        </BarChart>
+      </ResponsiveContainer>
+      <div style={{ display: "flex", gap: "1.5rem", marginTop: "0.5rem", fontSize: "0.85rem", color: "#94a3b8" }}>
+        <span><span style={{ color: COLOUR_RW,     fontWeight: 600 }}>● </span>RisingWave: {msLabel(rw)}</span>
+        <span><span style={{ color: COLOUR_TSDB,   fontWeight: 600 }}>● </span>TimescaleDB: {msLabel(tsdb)}</span>
+        <span><span style={{ color: COLOUR_ATHENA, fontWeight: 600 }}>● </span>Athena: {msLabel(athena)}</span>
+      </div>
+    </div>
+  );
+}
+
+// ── chart 1b: query latency (log scale) ──────────────────────────────────────
+// Read-path cost per tier — the metric where RisingWave's pre-aggregated
+// in-memory MV is expected to beat TimescaleDB's relational scan, and both beat
+// Athena's warehouse round-trip. Orthogonal to freshness (data staleness).
+function LatencyChart({ rw, tsdb, athena }: { rw: FreshnessPayload | null; tsdb: FreshnessPayload | null; athena: FreshnessPayload | null }) {
+  return (
+    <TierMsBarChart
+      title="Query Latency (log scale)"
+      blurb="Wall-clock time to run each tier's read query. Lower is better. This is the read-path cost — in-memory MV vs relational scan vs warehouse round-trip — independent of how stale the data is."
+      axisLabel="latency (log)"
+      rw={rw?.tierLatency.risingwave_ms ?? null}
+      tsdb={tsdb?.tierLatency.timescaledb_ms ?? null}
+      athena={athena?.tierLatency.athena_ms ?? null}
+    />
+  );
 }
 
 // ── push hook: subscribe to /api/stream/{tier} over SSE ──────────────────────
@@ -92,70 +165,18 @@ function usePolledFreshness(tier: "athena", intervalMs: number) {
 }
 
 // ── chart 1 component ─────────────────────────────────────────────────────────
+// Data freshness = now − MAX(ts): how stale the newest row is (ingestion-lag,
+// not read cost). See LatencyChart for the orthogonal read-path metric.
 function FreshnessChart({ rw, tsdb, athena }: { rw: FreshnessPayload | null; tsdb: FreshnessPayload | null; athena: FreshnessPayload | null }) {
-  // We keep a rolling 30-point history so the chart scrolls like a time series.
-  const historyRef = useRef<Array<{ t: number; rw_ms: number | null; tsdb_ms: number | null; athena_ms: number | null }>>([]);
-
-  const rwMs   = rw?.tierFreshness.risingwave_ms   ?? null;
-  const tsMs   = tsdb?.tierFreshness.timescaledb_ms ?? null;
-  const atMs   = athena?.tierFreshness.athena_ms ?? null;
-  const sampledAt = rw?.sampled_at ?? tsdb?.sampled_at ?? athena?.sampled_at ?? Date.now();
-
-  useEffect(() => {
-    if (rwMs == null && tsMs == null && atMs == null) return;
-    historyRef.current = [
-      ...historyRef.current.slice(-29),
-      { t: sampledAt, rw_ms: rwMs, tsdb_ms: tsMs, athena_ms: atMs },
-    ];
-  }, [rwMs, tsMs, atMs, sampledAt]);
-
-  const chartData: FreshnessBarDatum[] = [
-    { tier: "RisingWave",  rw: logVal(rwMs),  tsdb: null,         athena: null      },
-    { tier: "TimescaleDB", rw: null,           tsdb: logVal(tsMs), athena: null      },
-    { tier: "Athena/S3",   rw: null,           tsdb: null,         athena: logVal(atMs) },
-  ];
-
-  const CustomTooltip = ({ active, payload, label }: any) => {
-    if (!active || !payload?.length) return null;
-    const ms = Math.pow(10, payload[0]?.value ?? 0);
-    return (
-      <div style={{ background: "#1e293b", border: "1px solid #334155", padding: "8px 12px", borderRadius: 6, fontSize: 13 }}>
-        <p style={{ margin: 0, color: "#94a3b8" }}>{label}</p>
-        <p style={{ margin: "4px 0 0", color: "#f8fafc", fontWeight: 600 }}>{msLabel(ms)}</p>
-      </div>
-    );
-  };
-
   return (
-    <div className="card">
-      <h2 style={{ marginBottom: "0.25rem", fontSize: "1rem" }}>Data Freshness (log scale)</h2>
-      <p style={{ color: "#888", fontSize: "0.8rem", marginBottom: "0.75rem" }}>
-        How stale is the most recent message in each store. Lower is better.
-        RisingWave and TimescaleDB update by push; Athena updates on its own poll cadence.
-      </p>
-      <ResponsiveContainer width="100%" height={220}>
-        <BarChart data={chartData} margin={{ top: 4, right: 16, left: 8, bottom: 4 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-          <XAxis dataKey="tier" tick={{ fill: "#94a3b8", fontSize: 12 }} />
-          <YAxis
-            tickFormatter={logTickFormatter}
-            ticks={LOG_TICKS.map(v => Math.log10(v))}
-            domain={[0, Math.log10(100_000)]}
-            tick={{ fill: "#94a3b8", fontSize: 11 }}
-            label={{ value: "latency (log)", angle: -90, position: "insideLeft", fill: "#64748b", fontSize: 11 }}
-          />
-          <Tooltip content={<CustomTooltip />} cursor={{ fill: "rgba(255,255,255,0.05)" }} />
-          <Bar dataKey="rw"     name="RisingWave"  fill={COLOUR_RW}     radius={[4,4,0,0]} />
-          <Bar dataKey="tsdb"   name="TimescaleDB" fill={COLOUR_TSDB}   radius={[4,4,0,0]} />
-          <Bar dataKey="athena" name="Athena/S3"   fill={COLOUR_ATHENA} radius={[4,4,0,0]} />
-        </BarChart>
-      </ResponsiveContainer>
-      <div style={{ display: "flex", gap: "1.5rem", marginTop: "0.5rem", fontSize: "0.85rem", color: "#94a3b8" }}>
-        <span><span style={{ color: COLOUR_RW,     fontWeight: 600 }}>● </span>RisingWave: {msLabel(rwMs)}</span>
-        <span><span style={{ color: COLOUR_TSDB,   fontWeight: 600 }}>● </span>TimescaleDB: {msLabel(tsMs)}</span>
-        <span><span style={{ color: COLOUR_ATHENA, fontWeight: 600 }}>● </span>Athena: {msLabel(atMs)}</span>
-      </div>
-    </div>
+    <TierMsBarChart
+      title="Data Freshness (log scale)"
+      blurb="How stale is the most recent message in each store. Lower is better. RisingWave and TimescaleDB update by push; Athena updates on its own poll cadence."
+      axisLabel="staleness (log)"
+      rw={rw?.tierFreshness.risingwave_ms ?? null}
+      tsdb={tsdb?.tierFreshness.timescaledb_ms ?? null}
+      athena={athena?.tierFreshness.athena_ms ?? null}
+    />
   );
 }
 
@@ -300,6 +321,8 @@ export default function DashboardPage() {
       </div>
 
       <FreshnessChart  rw={rwData}   tsdb={tsdbData} athena={athenaData} />
+      <div style={{ height: "1rem" }} />
+      <LatencyChart    rw={rwData}   tsdb={tsdbData} athena={athenaData} />
       <div style={{ height: "1rem" }} />
       <ResourceChart   rw={rwData}   tsdb={tsdbData} />
       <div style={{ height: "1rem" }} />
