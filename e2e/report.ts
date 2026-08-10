@@ -49,6 +49,29 @@ export function renderReport(fileSummaries: FileSummaryLike[], info: ReportRunIn
     lines.push(`- ${failed.length > 0 ? "✗" : "✓"} ${file} — ${status}`);
   }
 
+  // Data-freshness measurements captured from blocks annotated
+  // captureFreshness (the CLI equivalent of the dashboard's freshness panel).
+  // One row per tier, ordered fastest-first, so a report shows the same
+  // three-tier freshness ladder side by side that the live dashboard renders.
+  const measurements = fileSummaries
+    .flatMap(({ results }) => results.map((r) => r.freshness).filter((f): f is NonNullable<typeof f> => f != null))
+    .sort((a, b) => (a.freshness_ms ?? Infinity) - (b.freshness_ms ?? Infinity));
+
+  if (measurements.length > 0) {
+    lines.push("");
+    lines.push("## Data freshness");
+    lines.push("");
+    lines.push("Measured `now − MAX(timestamp)` per storage tier — the CLI equivalent of the dashboard's Data Freshness chart.");
+    lines.push("");
+    lines.push("| Tier | Freshness | Rows |");
+    lines.push("|---|---|---|");
+    for (const m of measurements) {
+      const fresh = m.freshness_ms == null ? "—" : `${m.freshness_ms.toLocaleString()} ms`;
+      const rows = m.rows == null ? "—" : String(m.rows);
+      lines.push(`| ${m.tier} | ${fresh} | ${rows} |`);
+    }
+  }
+
   lines.push("");
   lines.push("## Summary");
   lines.push("");

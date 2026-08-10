@@ -13,11 +13,18 @@
  *   workshop-platform-000000000000 → SHARED_BUCKET
  *
  * Assert spec (JSON in the comment):
- *   contains      — stdout must include this string
- *   notContains   — stdout must not include this string
- *   jsonPath      — dot-path to extract from stdout JSON (e.g. "jobId")
- *   matches       — regex the jsonPath value must match
- *   jobSucceeds   — after the block, poll until all IoT job executions SUCCEED
+ *   contains         — stdout must include this string
+ *   notContains      — stdout must not include this string
+ *   jsonPath         — dot-path to extract from stdout JSON (e.g. "jobId")
+ *   matches          — regex the jsonPath value must match
+ *   jobSucceeds      — after the block, poll until all IoT job executions SUCCEED
+ *   captureFreshness — record a data-freshness measurement from this block into
+ *                      the run report. The block must emit a JSON object on
+ *                      stdout shaped {"tier","freshness_ms"[,"rows"]}; the last
+ *                      such object wins. Used by the Block-5 CLI freshness step
+ *                      to log RisingWave / TimescaleDB / Athena freshness side
+ *                      by side, the same three-tier comparison the dashboard
+ *                      renders (see workshop/04-analytics/block-5-dashboard.md).
  *
  * A block that tears down the shared platform stack (VPCs/EKS/MSK) must also
  * carry a <!-- e2e:platform-teardown --> comment alongside its e2e:assert one —
@@ -67,6 +74,21 @@ export interface AssertSpec {
   jobTimeoutMinutes?: number;
   /** Restrict this block to one persona. Omitted = runs under both. */
   persona?: Persona;
+  /** Record a data-freshness measurement from this block into the run report.
+   *  The block must print a JSON object on stdout shaped
+   *  {"tier": "...", "freshness_ms": <number>, "rows"?: <number>}; the last such
+   *  object in stdout wins. */
+  captureFreshness?: boolean;
+}
+
+/** One data-freshness measurement captured from a block annotated
+ *  captureFreshness — the CLI-equivalent of a data-freshness dashboard tile.
+ *  Aggregated across all files into the run report. */
+export interface FreshnessMeasurement {
+  tier: string;
+  freshness_ms: number | null;
+  rows?: number;
+  file: string;
 }
 
 export interface BlockResult {
@@ -78,6 +100,9 @@ export interface BlockResult {
   passed: boolean;
   error?: string;
   durationMs: number;
+  /** Set when the block was annotated captureFreshness and emitted a parseable
+   *  measurement — surfaced in the run report's data-freshness table. */
+  freshness?: FreshnessMeasurement;
 }
 
 interface RawBlock {
@@ -566,6 +591,30 @@ export async function runDocBlocks(
       }
     }
 
+    // Capture a data-freshness measurement for the run report. The block emits
+    // {"tier","freshness_ms"[,"rows"]} on stdout; the last such object wins
+    // (matching the polling-loop convention used elsewhere in this file). Only
+    // recorded when the block otherwise passed — a failed query's freshness
+    // number is meaningless.
+    let freshness: FreshnessMeasurement | undefined;
+    if (!error && assert.captureFreshness) {
+      for (const parsed of extractJsonValues(blockOut)) {
+        const obj = parsed as { tier?: unknown; freshness_ms?: unknown; rows?: unknown };
+        if (obj && typeof obj.tier === "string" && "freshness_ms" in obj) {
+          const ms = obj.freshness_ms;
+          freshness = {
+            tier: obj.tier,
+            freshness_ms: typeof ms === "number" ? ms : ms == null ? null : Number(ms),
+            rows: typeof obj.rows === "number" ? obj.rows : undefined,
+            file: mdPath,
+          };
+        }
+      }
+      if (!freshness) {
+        error = `captureFreshness: true but no {"tier","freshness_ms"} JSON found in block output:\n${blockOut.slice(0, 500)}`;
+      }
+    }
+
     onResult({
       file: mdPath,
       blockIndex: idx,
@@ -575,6 +624,7 @@ export async function runDocBlocks(
       passed: error === undefined,
       error,
       durationMs,
+      freshness,
     });
   }
 }
