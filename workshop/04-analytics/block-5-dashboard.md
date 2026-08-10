@@ -70,6 +70,80 @@ A linear axis would make RisingWave and TimescaleDB indistinguishable — the lo
     of "freshness" even when the data itself is recent: you're measuring the
     warehouse round-trip, not a live push.
 
+### CLI — read the same freshness numbers
+
+The three panels above render in a browser, but the underlying metric is just
+`now − MAX(timestamp)` per store — you can read it from the CLI with the exact
+same queries the dashboard runs. Each block below prints a one-line JSON
+`{"tier", "freshness_ms", "rows"}`. The freshness is computed **in-SQL**
+(`now()` in epoch-ms minus the store's latest timestamp) so there's no dependency
+on the client clock or a GNU-only `date` flag.
+
+The end-to-end suite runs these blocks against a live slot and records each
+tier's `freshness_ms` in the run report's **Data freshness** table, so the
+three-tier freshness ladder is captured on every e2e pass — the CLI equivalent
+of the dashboard's Data Freshness chart.
+
+??? example "RisingWave freshness (port 4567)"
+    ```bash
+    kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567 > /tmp/rw-fresh-pf.log 2>&1 &
+    RW_PF_PID=$!
+    until grep -q "Forwarding from" /tmp/rw-fresh-pf.log 2>/dev/null; do sleep 1; done
+    # Same MV the dashboard's /api/stream/risingwave route reads. ts_ms is the
+    # IoT-Core ingest timestamp (epoch-ms), so freshness is clock-skew-free.
+    IFS='|' read -r RW_FRESH RW_ROWS < <(psql -h localhost -p 4567 -U root -d dev -tA -F'|' \
+      -c "SELECT (EXTRACT(EPOCH FROM now())*1000)::bigint - MAX(ts_ms), COUNT(*) FROM mv_sensor_fleet_latest;")
+    kill "$RW_PF_PID" 2>/dev/null || true
+    echo "{\"tier\":\"risingwave\",\"freshness_ms\":${RW_FRESH:-null},\"rows\":${RW_ROWS:-0}}"
+    ```
+    <!-- e2e:assert {"captureFreshness": true} -->
+
+??? example "TimescaleDB freshness (port 5432)"
+    ```bash
+    TSDB_PASS=$(kubectl get secret timescaledb-cloud-app -n ws-slot00 \
+      -o jsonpath='{.data.password}' | base64 -d)
+    kubectl port-forward -n ws-slot00 svc/timescaledb-cloud-rw 5432:5432 > /tmp/tsdb-fresh-pf.log 2>&1 &
+    TSDB_PF_PID=$!
+    until grep -q "Forwarding from" /tmp/tsdb-fresh-pf.log 2>/dev/null; do sleep 1; done
+    # Same sensor_readings table the dashboard's /api/stream/timescaledb route reads.
+    IFS='|' read -r TS_FRESH TS_ROWS < <(PGPASSWORD="$TSDB_PASS" psql -h localhost -p 5432 -U workshop -d edge -tA -F'|' \
+      -c "SELECT (EXTRACT(EPOCH FROM now())*1000)::bigint - MAX(ts_ms), COUNT(*) FROM sensor_readings;")
+    kill "$TSDB_PF_PID" 2>/dev/null || true
+    echo "{\"tier\":\"timescaledb\",\"freshness_ms\":${TS_FRESH:-null},\"rows\":${TS_ROWS:-0}}"
+    ```
+    <!-- e2e:assert {"captureFreshness": true} -->
+
+??? example "Athena / Iceberg freshness (no port-forward)"
+    ```bash
+    # Same Iceberg table + message_timestamp basis the dashboard's
+    # /api/freshness?tier=athena route queries. Freshness here includes the
+    # warehouse round-trip, so it's tens of seconds even when data is recent.
+    QUERY_ID=$(aws athena start-query-execution \
+      --work-group workshop-shared \
+      --query-string "SELECT CAST(to_unixtime(now())*1000 AS bigint) - MAX(message_timestamp) AS freshness_ms, COUNT(*) AS n FROM workshop_telemetry.telemetry WHERE deployment_id='ws-slot00'" \
+      --query QueryExecutionId --output text)
+
+    for _i in $(seq 1 20); do
+      STATE=$(aws athena get-query-execution \
+        --query-execution-id "$QUERY_ID" \
+        --query 'QueryExecution.Status.State' --output text)
+      if [ "$STATE" = "SUCCEEDED" ] || [ "$STATE" = "FAILED" ] || [ "$STATE" = "CANCELLED" ]; then
+        break
+      fi
+      sleep 3
+    done
+
+    AT_FRESH=$(aws athena get-query-results --query-execution-id "$QUERY_ID" \
+      --query 'ResultSet.Rows[1].Data[0].VarCharValue' --output text)
+    AT_ROWS=$(aws athena get-query-results --query-execution-id "$QUERY_ID" \
+      --query 'ResultSet.Rows[1].Data[1].VarCharValue' --output text)
+    # aws CLI renders a SQL NULL as the literal "None" in text output — normalise it.
+    if [ "$AT_FRESH" = "None" ]; then AT_FRESH=""; fi
+    if [ "$AT_ROWS" = "None" ]; then AT_ROWS=""; fi
+    echo "{\"tier\":\"athena\",\"freshness_ms\":${AT_FRESH:-null},\"rows\":${AT_ROWS:-0}}"
+    ```
+    <!-- e2e:assert {"captureFreshness": true} -->
+
 ---
 
 ## Chart 2 — Fleet Free CPU & Memory

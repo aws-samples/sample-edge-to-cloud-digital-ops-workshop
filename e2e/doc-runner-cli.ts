@@ -319,7 +319,10 @@ for (const mdPath of mdPaths) {
       (r) => {
         results.push(r);
         if (r.passed) {
-          console.log(`  ✓  block ${r.blockIndex + 1}  [${r.durationMs}ms]`);
+          const fresh = r.freshness
+            ? `  freshness[${r.freshness.tier}]=${r.freshness.freshness_ms == null ? "n/a" : `${r.freshness.freshness_ms}ms`}`
+            : "";
+          console.log(`  ✓  block ${r.blockIndex + 1}  [${r.durationMs}ms]${fresh}`);
         } else {
           console.error(`  ✗  block ${r.blockIndex + 1}  [${r.durationMs}ms]`);
           console.error(`       ${r.error}`);
