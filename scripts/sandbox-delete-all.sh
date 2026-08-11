@@ -1,87 +1,68 @@
 #!/usr/bin/env bash
-# Usage: ./scripts/sandbox-delete-all.sh ws-a1b2c3 ws-b4c5d6 [...]
-#   Deletes each participant's Amplify sandbox in parallel, then destroys
-#   WorkshopPlatformStack (shared VPCs).
+# Usage: ./scripts/sandbox-delete-all.sh [ws-slot00 ws-slot01 ...]
+#
+# Tears down EVERYTHING: every slot's runtime artefacts, then the single shared
+# WorkshopPlatformStack (VPCs, EKS, MSK, Firehose, S3 — and, as nested stacks,
+# every slot's Auth/Data/Participant resources).
+#
+# Since epic #180 / #181 there are no per-slot top-level stacks or per-slot
+# Amplify sandboxes to delete — a slot's CFN resources are NESTED inside the
+# platform stack, so `cdk destroy WorkshopPlatformStack` cascades and removes
+# them all. What CFN can't remove on its own is the RUNTIME state each slot
+# accreted: self-registered IoT things+certs (fleet provisioning created them,
+# not CFN), the slot's SCRAM secret association + per-slot topics on the shared
+# MSK cluster, and the EKS namespace. Those must be cleaned first (scripts/
+# teardown.sh) or the nested-stack delete deadlocks on attached certs.
+#
+# If no slot ids are given, the active-slot set persisted in SSM
+# (/workshop/platform/active-slots, see scripts/slot-list.sh) is used — that is
+# the authoritative list of what the platform stack currently contains.
 
 set -euo pipefail
 
-if [[ $# -eq 0 ]]; then
-  echo "Usage: $0 <deployment-id> [deployment-id ...]" >&2
-  exit 1
-fi
-
-DEPLOYMENT_IDS=("$@")
+HERE="$(dirname "$0")"
 PLATFORM_STACK="WorkshopPlatformStack"
 PLATFORM_APP="npx tsx amplify/custom/platform-app.ts"
 
-# ── Delete any per-slot MSK clusters left over from older deployments ────────
-# The shared platform MSK cluster is destroyed automatically by the
-# `cdk destroy` below; this only cleans up legacy per-slot clusters if present.
-echo ">>> Deleting MSK clusters for all deployment IDs..."
-MSK_PIDS=()
-for ID in "${DEPLOYMENT_IDS[@]}"; do
-  (
-    MSK_ARN=$(aws kafka list-clusters-v2 \
-      --query "ClusterInfoList[?ClusterName=='workshop-${ID}-msk'].ClusterArn" \
-      --output text 2>/dev/null)
-    if [[ -z "$MSK_ARN" || "$MSK_ARN" == "None" ]]; then
-      echo ">>> [$ID] No MSK cluster found, skipping."
-      exit 0
-    fi
-    STATE=$(aws kafka describe-cluster-v2 --cluster-arn "$MSK_ARN" \
-      --query "ClusterInfo.State" --output text 2>/dev/null || echo "UNKNOWN")
-    if [[ "$STATE" == "DELETING" ]]; then
-      echo ">>> [$ID] MSK already deleting."
-    elif [[ "$STATE" != "UNKNOWN" ]]; then
-      echo ">>> [$ID] Deleting MSK cluster ($STATE)..."
-      aws kafka delete-cluster --cluster-arn "$MSK_ARN" > /dev/null
-    fi
-    echo ">>> [$ID] Waiting for MSK to finish deleting..."
-    while true; do
-      S=$(aws kafka describe-cluster-v2 --cluster-arn "$MSK_ARN" \
-        --query "ClusterInfo.State" --output text 2>&1)
-      [[ "$S" == *"NotFoundException"* || "$S" == *"does not exist"* ]] && break
-      echo ">>> [$ID] MSK: $S"
-      sleep 30
-    done
-    echo ">>> [$ID] MSK deleted."
-  ) &
-  MSK_PIDS+=($!)
-done
-for pid in "${MSK_PIDS[@]}"; do wait "$pid" || true; done
-echo ">>> All MSK clusters deleted."
+# shellcheck source=scripts/slot-list.sh
+source "$HERE/slot-list.sh"
 
-# ── Delete participant sandboxes in parallel ─────────────────────────────────
-echo ">>> Deleting ${#DEPLOYMENT_IDS[@]} sandboxes in parallel..."
-
-PIDS=()
-for ID in "${DEPLOYMENT_IDS[@]}"; do
-  bash -c '
-    . "$HOME/.nvm/nvm.sh"
-    nvm use 22 --silent
-    WORKSHOP_DEPLOYMENT_ID="'"$ID"'" npx ampx sandbox delete --identifier "'"$ID"'" --yes
-  ' > >(sed "s/^/[$ID] /") \
-    2> >(sed "s/^/[$ID] /" >&2) &
-  PIDS+=($!)
-  echo ">>> [$ID] delete started (pid $!)"
-done
-
-FAILED=0
-for i in "${!PIDS[@]}"; do
-  if ! wait "${PIDS[$i]}"; then
-    echo "ERROR: sandbox delete for ${DEPLOYMENT_IDS[$i]} failed" >&2
-    FAILED=1
+DEPLOYMENT_IDS=("$@")
+if [[ ${#DEPLOYMENT_IDS[@]} -eq 0 ]]; then
+  echo ">>> No slots given — using persisted active-slot set from SSM."
+  CURRENT=$(slots_get)
+  if [[ -n "$CURRENT" ]]; then
+    IFS=',' read -r -a DEPLOYMENT_IDS <<< "$CURRENT"
   fi
-done
+fi
+echo ">>> Slots to tear down: ${DEPLOYMENT_IDS[*]:-<none — platform only>}"
 
-if [[ $FAILED -ne 0 ]]; then
-  echo "ERROR: one or more sandbox deletes failed — aborting platform stack destroy" >&2
-  exit 1
+# ── 1. Per-slot runtime cleanup (parallel) ───────────────────────────────────
+# teardown.sh detaches/deletes self-registered IoT things+certs, disassociates
+# the slot's SCRAM secret + deletes per-slot topics on the shared MSK cluster,
+# and deletes the EKS namespace — the runtime state CFN can't reclaim itself.
+if [[ ${#DEPLOYMENT_IDS[@]} -gt 0 ]]; then
+  echo ">>> Cleaning up runtime artefacts for ${#DEPLOYMENT_IDS[@]} slot(s) in parallel..."
+  PIDS=()
+  for ID in "${DEPLOYMENT_IDS[@]}"; do
+    bash "$HERE/teardown.sh" --deployment-id "$ID" \
+      > >(sed "s/^/[$ID] /") 2> >(sed "s/^/[$ID] /" >&2) &
+    PIDS+=($!)
+    echo ">>> [$ID] runtime cleanup started (pid $!)"
+  done
+  for i in "${!PIDS[@]}"; do
+    wait "${PIDS[$i]}" || echo "WARNING: runtime cleanup for ${DEPLOYMENT_IDS[$i]} returned non-zero (continuing)." >&2
+  done
+  echo ">>> Runtime cleanup complete."
 fi
 
-echo ">>> All sandboxes deleted."
+# ── 2. Clear the persisted active-slot set ───────────────────────────────────
+# The platform is about to be destroyed entirely, so the list must be empty —
+# otherwise a later `sandbox:all` with no args would think slots still exist.
+echo ">>> Clearing active-slot set..."
+slots_put "" >/dev/null || true
 
-# ── Destroy platform stack ───────────────────────────────────────────────────
+# ── 3. Destroy the platform stack (cascades all nested slot stacks) ──────────
 STACK_STATUS=$(aws cloudformation describe-stacks \
   --stack-name "$PLATFORM_STACK" \
   --query "Stacks[0].StackStatus" \
@@ -104,7 +85,7 @@ if [[ -n "$ACCOUNT_ID" ]] && aws s3api head-bucket --bucket "$SHARED_BUCKET" 2>/
   aws s3 rm "s3://${SHARED_BUCKET}" --recursive || true
 fi
 
-echo ">>> Destroying $PLATFORM_STACK..."
+echo ">>> Destroying $PLATFORM_STACK (and every slot's nested stacks)..."
 npx cdk destroy \
   --app "$PLATFORM_APP" \
   --require-approval never \

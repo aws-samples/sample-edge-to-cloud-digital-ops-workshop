@@ -1,0 +1,118 @@
+name: Deploy (async, fire-and-forget)
+
+# Fire-and-forget workshop deploy (epic #180 / #183).
+#
+# Unlike deploy-slot.yml (which runs `pnpm run sandbox` ON the runner and blocks
+# for the whole 20-40 min deploy, timeout-minutes: 90), this workflow only
+# TRIGGERS the cloud-side orchestrator (the workshop-deploy-orchestrator
+# CodeBuild project, amplify/custom/orchestrator-stack.ts) and EXITS. The actual
+# deploy runs in CodeBuild, so the GitHub runner is done in well under a minute
+# and there is no 30-min runner wait to pay for.
+#
+# The job summary carries the build id (the pollable handle) and a console deep
+# link. Poll it from your laptop with `scripts/poll-deploy.sh <build-id>`, or
+# watch it in the CodeBuild console.
+#
+# PREREQUISITE (one-time, per account): the orchestrator project must already be
+# deployed —
+#   npx cdk deploy --app "npx tsx amplify/custom/orchestrator-app.ts" \
+#     WorkshopDeployOrchestrator -c repoCloneUrl=<https url>
+# and CodeBuild must have a GitHub source credential so it can clone the repo.
+
+on:
+  workflow_dispatch:
+    inputs:
+      slots:
+        description: 'Comma-separated slot list to deploy (e.g. ws-slot00,ws-slot01)'
+        required: true
+        default: 'ws-slot00'
+      branch:
+        description: 'Branch/ref for CodeBuild to deploy FROM (default: this ref)'
+        required: false
+        default: ''
+
+concurrency:
+  # Only serialize the TRIGGER step; the orchestrator itself enforces one deploy
+  # at a time via the CodeBuild project's concurrentBuildLimit=1. We do not
+  # cancel-in-progress: a trigger is near-instant, there's nothing to cancel.
+  group: deploy-trigger
+  cancel-in-progress: false
+
+permissions:
+  id-token: write   # OIDC → AWS credentials
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ORCHESTRATOR_PROJECT: workshop-deploy-orchestrator
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10   # generous ceiling for a job that only calls start-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate slot list
+        id: slots
+        run: |
+          SLOTS="${{ github.event.inputs.slots }}"
+          # Every entry must match ws-slotNN (participant-stack.ts fails fast otherwise).
+          IFS=',' read -r -a ARR <<< "$SLOTS"
+          for s in "${ARR[@]}"; do
+            s_trimmed="$(echo "$s" | xargs)"
+            if ! printf '%s' "$s_trimmed" | grep -Eq '^ws-slot[0-9]{2}$'; then
+              echo "::error::Slot '$s_trimmed' does not match ws-slotNN."
+              exit 1
+            fi
+          done
+          echo "slots=$SLOTS" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve deploy branch
+        id: branch
+        run: |
+          BRANCH="${{ github.event.inputs.branch }}"
+          [ -z "$BRANCH" ] && BRANCH="${{ github.ref_name }}"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Trigger async deploy (returns immediately)
+        id: trigger
+        run: |
+          # Turn the CSV into positional args for trigger-deploy.sh.
+          IFS=',' read -r -a ARR <<< "${{ steps.slots.outputs.slots }}"
+          # Trim whitespace on each entry.
+          ARGS=()
+          for s in "${ARR[@]}"; do ARGS+=("$(echo "$s" | xargs)"); done
+          BUILD_ID="$(bash scripts/trigger-deploy.sh "${ARGS[@]}" --branch "${{ steps.branch.outputs.branch }}")"
+          echo "build_id=$BUILD_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Job summary (handle + console link)
+        if: always()
+        run: |
+          BUILD_ID="${{ steps.trigger.outputs.build_id }}"
+          if [ -n "$BUILD_ID" ]; then
+            REGION="${{ env.AWS_REGION }}"
+            # CodeBuild console deep-link for this build.
+            URL="https://${REGION}.console.aws.amazon.com/codesuite/codebuild/projects/${{ env.ORCHESTRATOR_PROJECT }}/build/$(printf '%s' "$BUILD_ID" | sed 's/:/%3A/')"
+            {
+              echo "### Deploy triggered (fire-and-forget)"
+              echo ""
+              echo "- Slots: \`${{ steps.slots.outputs.slots }}\`"
+              echo "- Branch: \`${{ steps.branch.outputs.branch }}\`"
+              echo "- Build handle: \`$BUILD_ID\`"
+              echo "- Console: [$BUILD_ID]($URL)"
+              echo ""
+              echo "The deploy runs in CodeBuild (20-40 min). Poll from your laptop:"
+              echo '```'
+              echo "scripts/poll-deploy.sh $BUILD_ID"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Deploy trigger failed — no build id was returned." >> "$GITHUB_STEP_SUMMARY"
+          fi

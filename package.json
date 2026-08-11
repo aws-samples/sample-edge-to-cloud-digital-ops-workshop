@@ -7,11 +7,11 @@
   "scripts": {
     "sandbox": "bash scripts/sandbox.sh",
     "sandbox:all": "bash scripts/sandbox-all.sh",
-    "sandbox:delete": "npx ampx sandbox delete --identifier ${WORKSHOP_DEPLOYMENT_ID:-ws-slot00} --yes",
+    "sandbox:delete": "bash scripts/delete-slot.sh ${WORKSHOP_DEPLOYMENT_ID:-ws-slot00}",
     "sandbox:delete-all": "bash scripts/sandbox-delete-all.sh",
     "destroy:orphan-stack": "bash scripts/destroy-orphan-stack.sh",
     "detach:device-policy": "bash scripts/detach-device-policy.sh",
-    "pipeline-deploy": "npx ampx pipeline-deploy",
+    "pipeline-deploy": "npx cdk deploy --app \"npx tsx amplify/custom/platform-app.ts\" --require-approval never WorkshopPlatformStack",
     "test": "node scripts/smoke-test.mjs",
     "e2e": "pnpm --filter edge-digital-ops-e2e test",
     "e2e:admin": "pnpm --filter edge-digital-ops-e2e test:admin",

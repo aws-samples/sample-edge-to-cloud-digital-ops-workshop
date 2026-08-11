@@ -79,6 +79,23 @@ export class PlatformStack extends Stack {
   public readonly edgeVpc: Vpc;
   public readonly cloudVpc: Vpc;
 
+  /**
+   * Shared-platform values consumed by each per-slot ParticipantStack nested
+   * stack (see #181). Exposed as live construct references so that when
+   * platform-app.ts instantiates the nested stacks, CDK wires them in as
+   * parent→child CfnParameters — the correct replacement for the old
+   * `Fn.importValue` cross-stack imports, which a nested stack cannot use
+   * against its own still-in-progress parent's exports.
+   */
+  public readonly shared: {
+    bucketName: string;
+    bucketArn: string;
+    mskClusterArn: string;
+    mskBootstrapScram: string;
+    mskScramKeyArn: string;
+    edgeNatGatewayId: string;
+  };
+
   constructor(scope: Construct, id: string, props?: PlatformStackProps) {
     super(scope, id, props);
 
@@ -911,5 +928,18 @@ export class PlatformStack extends Stack {
         resources: AwsCustomResourcePolicy.ANY_RESOURCE,
       }),
     });
+
+    // ── Shared values for per-slot nested ParticipantStacks (#181) ────────────
+    // Live construct references (not Fn.importValue): platform-app.ts passes
+    // these into each ParticipantStack, and CDK turns cross-stack references
+    // into nested-stack CfnParameters, preserving correct create ordering.
+    this.shared = {
+      bucketName: workshopBucket.bucketName,
+      bucketArn: workshopBucket.bucketArn,
+      mskClusterArn: mskCluster.attrArn,
+      mskBootstrapScram: mskBootstrapLookup.getResponseField("BootstrapBrokerStringSaslScram"),
+      mskScramKeyArn: mskScramKey.keyArn,
+      edgeNatGatewayId: edgeNatGateway.ref,
+    };
   }
 }

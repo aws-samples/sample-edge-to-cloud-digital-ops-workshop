@@ -9,7 +9,7 @@ hide:
 !!! warning "Admin only"
     This step is performed by a cloud admin **before Session 1**. Participants never touch this step.
 
-The entire workshop runs on an AWS Amplify Gen 2 project. The Amplify project is the deployment root — it deploys custom CDK constructs via `amplify/backend.ts`, then adds application-layer resources (Cognito, AppSync Events API, S3 hosting) on top.
+The entire workshop is one CDK app. `amplify/custom/platform-app.ts` is the deployment root — a single `cdk deploy` of `WorkshopPlatformStack` brings up the shared infrastructure and, as nested stacks per slot, the auth (Cognito), data (AppSync GraphQL), and participant (IoT/EC2/MSK/S3) resources.
 
 ---
 
@@ -111,7 +111,7 @@ pnpm run sandbox:all ws-slot00 ws-slot01 ws-slot02 ws-slot03 ws-slot04 ws-slot05
 ```
 
 !!! info "What `pnpm sandbox:all` does"
-    `scripts/sandbox-all.sh` deploys `WorkshopPlatformStack` (shared VPCs) sequentially first — eliminating any race condition — then fans out `npx ampx sandbox --identifier <ID>` for each participant in parallel. Each participant gets their own isolated full-stack Amplify environment. Logs are prefixed with `[ws-a1b2c3]` etc. for readability.
+    `scripts/sandbox-all.sh` runs a **single** `cdk deploy` of `WorkshopPlatformStack` — the shared VPCs/EKS/MSK plus, as nested stacks, every listed slot's Auth/Data/Participant resources (driven by `WORKSHOP_SLOTS`). It then runs the per-slot post-deploy tail (`scripts/post-deploy-slot.sh`: device-registration wait, shadow seeding, K3s + cloud-analytics pre-warm) in parallel. Logs are prefixed with `[ws-slot00]` etc. for readability.
 
 !!! tip "Single participant"
     To deploy or iterate on one environment: `pnpm run sandbox ws-a1b2c3`

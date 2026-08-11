@@ -1,0 +1,59 @@
+# buildspec-deploy.yml — CodeBuild build spec for the async deploy orchestrator
+# (epic #180 / #182). Run by the `workshop-deploy-orchestrator` CodeBuild project
+# defined in amplify/custom/orchestrator-stack.ts.
+#
+# The orchestrator IS the single `cdk deploy` of WorkshopPlatformStack for the
+# requested slot set, followed by the per-slot post-deploy tail — exactly what
+# `pnpm run sandbox:all <slots>` does locally. Running it inside CodeBuild is
+# what makes the deploy "fire-and-forget": the GitHub workflow (or the local
+# scripts/trigger-deploy.sh) calls `aws codebuild start-build` and returns
+# immediately with the build id as the pollable handle, while the 20-40 min
+# deploy runs here in the cloud.
+#
+# Idempotent: `cdk deploy` is idempotent and scripts/sandbox-all.sh unions the
+# requested slots into the persisted active-slot set (scripts/slot-list.sh), so
+# re-running with the same or a subset of slots never tears others down. The
+# CodeBuild project sets concurrentBuildLimit=1 so two builds can't race the same
+# CloudFormation stack.
+#
+# Inputs (environment variables, set by start-build --environment-variables-override):
+#   WORKSHOP_SLOTS   comma-separated slot list, e.g. ws-slot00,ws-slot01 (required)
+
+version: 0.2
+
+env:
+  variables:
+    AWS_REGION: us-east-1
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 22
+    commands:
+      - corepack enable
+      - corepack prepare pnpm@10.28.2 --activate
+      - pnpm install --frozen-lockfile
+
+  pre_build:
+    commands:
+      - |
+        if [ -z "${WORKSHOP_SLOTS:-}" ]; then
+          echo "ERROR: WORKSHOP_SLOTS is required (comma-separated ws-slotNN list)." >&2
+          exit 1
+        fi
+      - echo ">>> Deploying slots:$WORKSHOP_SLOTS"
+      # The device-client binary is built via Docker inside sandbox.sh; CodeBuild
+      # needs privilegedMode=true (set on the project) for that. Log in to ECR
+      # Public up front to avoid anonymous-pull rate limits.
+      - aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws || true
+
+  build:
+    commands:
+      # Turn "ws-slot00,ws-slot01" into positional args for sandbox-all.sh.
+      - |
+        IFS=',' read -r -a SLOT_ARGS <<< "$WORKSHOP_SLOTS"
+        pnpm run sandbox:all "${SLOT_ARGS[@]}"
+
+  post_build:
+    commands:
+      - echo ">>> Deploy build complete (status $CODEBUILD_BUILD_SUCCEEDING)."
