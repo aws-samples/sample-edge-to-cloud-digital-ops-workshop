@@ -52,6 +52,29 @@ risingwave:
   crName: risingwave-cloud
   image: "docker.risingwave.com/risingwavelabs/risingwave:v2.8.4"
   serviceAccountName: risingwave-cloud
+
+  # ── Placement / resilience (#196) ────────────────────────────────────────────
+  # On the shared EKS, every workshop node is a burstable t3.medium (~3.4Gi,
+  # ~1.9 vCPU allocatable) and pod limits oversubscribe it (observed 163% memory /
+  # 155% CPU of allocatable on a single node). When one such node flaps to
+  # NotReady it evicts whatever streaming/stateful pods happen to share it — live
+  # we saw a single node event take down RW compute for one slot AND TimescaleDB +
+  # compactor for another at the same instant. Kafka sources then report
+  # AllBrokersDown and the committed MV epoch falls minutes behind wall-clock, so
+  # the dashboard reads a 100s+ freshness spike.
+  #
+  # podAntiAffinity keeps the freshness-critical components (RW meta, RW compute,
+  # and — via timescaledb.affinity below — the TimescaleDB primary) OFF the same
+  # node as each other, so no single node event can down the whole tier at once.
+  # `preferred` (soft), not `required`: on a small cluster a hard rule could leave
+  # a pod Pending, which is a worse freshness outcome than co-location. It is
+  # applied per-slot within THIS release (matchLabels scope the release + the two
+  # RW components), so it spreads a slot's own critical pods without fighting other
+  # slots' placement. The deeper fix — a dedicated memory-optimized, non-burstable
+  # node group for the analytics tier — is a platform-stack change tracked in the
+  # block-5 node-sizing guidance, not something a per-slot chart can do.
+  podAntiAffinity:
+    enabled: true
   # IAM role trusted for IRSA — created once by WorkshopPlatformStack, trusts
   # any `risingwave-cloud` service account cluster-wide (see
   # amplify/custom/platform-stack.ts).
@@ -109,6 +132,14 @@ timescaledb:
   resources:
     requests: { cpu: 500m, memory: 1Gi }
     limits: { cpu: 2000m, memory: 2Gi }
+  # Keep the two TimescaleDB instances (primary + replica) on separate nodes so a
+  # single NodeNotReady can't take the primary AND its failover target at once
+  # (#196). CNPG's native anti-affinity — `preferred` by default, so it won't wedge
+  # scheduling on a small cluster.
+  affinity:
+    enablePodAntiAffinity: true
+    topologyKey: kubernetes.io/hostname
+    podAntiAffinityType: preferred
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Redpanda Connect — MSK → TimescaleDB sink pipeline
