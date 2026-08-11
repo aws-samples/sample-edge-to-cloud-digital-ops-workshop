@@ -97,11 +97,23 @@ spec:
         # `... AS $ BEGIN ... END; $ LANGUAGE plpgsql` — a syntax error that
         # aborts initdb (SQLSTATE 42601) and wedges the whole cluster bootstrap.
         # A named tag survives the collapse intact.
+        #
+        # #210: this was originally FOR EACH ROW, calling pg_notify() once per
+        # inserted row. redpanda-connect's sql_insert sink issues one INSERT
+        # statement per row regardless of its batching config, so under a
+        # burst this fired one dashboard aggregate query per row and saturated
+        # the SSE route's pg pool. FOR EACH STATEMENT collapses that to one
+        # notify per INSERT statement — the function can no longer read NEW
+        # (there's no single row in a statement-level trigger), so the
+        # payload is just a fixed wakeup token; the dashboard re-aggregates on
+        # every wakeup regardless of payload contents anyway. This is only
+        # half the fix — the SSE route also debounces/single-flights the
+        # resulting queries (see cloud-dashboard/src/app/api/stream/timescaledb/route.ts).
         - |
           CREATE OR REPLACE FUNCTION notify_sensor_reading() RETURNS trigger AS $notify$
           BEGIN
-            PERFORM pg_notify('sensor_readings_change', NEW.site_id);
-            RETURN NEW;
+            PERFORM pg_notify('sensor_readings_change', 'batch');
+            RETURN NULL;
           END;
           $notify$ LANGUAGE plpgsql;
         - |
@@ -109,11 +121,23 @@ spec:
         - |
           CREATE TRIGGER sensor_readings_notify
             AFTER INSERT ON sensor_readings
-            FOR EACH ROW EXECUTE FUNCTION notify_sensor_reading();
+            FOR EACH STATEMENT EXECUTE FUNCTION notify_sensor_reading();
         # The trigger function runs as the bootstrap superuser (owner of
         # sensor_readings pre-ALTER); reassign it too so `workshop` can later
         # replace/drop it without needing superuser.
         - ALTER FUNCTION notify_sensor_reading() OWNER TO workshop;
+        # NB: postInitApplicationSQL only runs once, at initdb — a slot whose
+        # TimescaleDB cluster was already bootstrapped before #210 keeps its
+        # old FOR EACH ROW trigger unless this block is re-applied by hand:
+        #   kubectl exec -it -n ws-slot00 timescaledb-cloud-1 -- psql -U workshop -d edge -c "
+        #     CREATE OR REPLACE FUNCTION notify_sensor_reading() RETURNS trigger AS \$notify\$
+        #     BEGIN PERFORM pg_notify('sensor_readings_change', 'batch'); RETURN NULL; END;
+        #     \$notify\$ LANGUAGE plpgsql;
+        #     DROP TRIGGER IF EXISTS sensor_readings_notify ON sensor_readings;
+        #     CREATE TRIGGER sensor_readings_notify AFTER INSERT ON sensor_readings
+        #       FOR EACH STATEMENT EXECUTE FUNCTION notify_sensor_reading();"
+        # (the helm/cloud-analytics chart path re-applies this automatically via
+        # helm/cloud-analytics/templates/timescaledb-notify-ddl-job.yaml on every upgrade.)
 
   # ────────────────────────────────────────────────────────────────────────────
   # Storage — 50 Gi for fleet-wide cloud data (larger than the 10 Gi edge node)

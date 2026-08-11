@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer,
@@ -129,6 +129,17 @@ function usePushFreshness(tier: "risingwave" | "timescaledb") {
         setError(null);
       } catch {
         // ignore malformed event
+      }
+    });
+    // #210: the server sends this instead of silently doing nothing when a
+    // connect/query error occurs, so a transient blip is visible rather than
+    // an indefinite "—".
+    es.addEventListener("tier-error", (evt: MessageEvent) => {
+      try {
+        const { message } = JSON.parse(evt.data);
+        setError(message ?? "tier error");
+      } catch {
+        setError("tier error");
       }
     });
     es.onerror = () => setError("stream disconnected");
@@ -281,6 +292,95 @@ function NodeAgeChart({ rw, tsdb }: { rw: FreshnessPayload | null; tsdb: Freshne
   );
 }
 
+// ── latency map (#205) ───────────────────────────────────────────────────────
+// Architecture-style diagram: edge → store → dashboard, one lane per tier,
+// annotated with the same two hop numbers the bar charts above already
+// compute — never re-derived here, so the map can't disagree with them.
+// Hop 1 ("ingest lag") is tierFreshness: now minus the newest row's
+// ingest-stamped ts_ms — everything upstream of the store (device → MQTT →
+// pipeline → write). Hop 2 ("query") is tierLatency: wall-clock to read the
+// store from this dashboard. Per #206, freshness must never come from a
+// database's own now() (RisingWave's included) — tierFreshness already
+// satisfies that (see lib/freshness-queries.ts), so reusing it here can't
+// regress that constraint.
+function HopArrow({ label, ms, color }: { label: string; ms: number | null; color: string }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: 1, minWidth: 110 }}>
+      <div style={{ fontSize: "0.68rem", color: "#64748b", marginBottom: 2, textAlign: "center" }}>{label}</div>
+      <div style={{ width: "100%", display: "flex", alignItems: "center" }}>
+        <div style={{ flex: 1, height: 2, background: color, opacity: 0.5 }} />
+        <div style={{ fontSize: "0.72rem", color: "#e2e8f0", fontWeight: 600, padding: "0 6px", whiteSpace: "nowrap" }}>
+          {msLabel(ms)}
+        </div>
+        <div style={{ flex: 1, height: 2, background: color, opacity: 0.5 }} />
+      </div>
+    </div>
+  );
+}
+
+function LatencyMapNode({ children, accent }: { children: ReactNode; accent?: string }) {
+  return (
+    <div style={{
+      border: `1px solid ${accent ?? "#334155"}`,
+      borderRadius: 8,
+      padding: "0.5rem 0.75rem",
+      fontSize: "0.78rem",
+      color: "#e2e8f0",
+      background: "#0f172a",
+      whiteSpace: "nowrap",
+      textAlign: "center",
+      minWidth: 96,
+      flexShrink: 0,
+    }}>
+      {children}
+    </div>
+  );
+}
+
+function LatencyMapRow({
+  label, color, storeLabel, ingestMs, queryMs, pushMode,
+}: {
+  label: string; color: string; storeLabel: string;
+  ingestMs: number | null; queryMs: number | null; pushMode: "push" | "poll";
+}) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.6rem 0", borderTop: "1px solid #1e293b", flexWrap: "wrap" }}>
+      <div style={{ width: 100, fontSize: "0.8rem", color, fontWeight: 600, flexShrink: 0 }}>{label}</div>
+      <LatencyMapNode>Edge device</LatencyMapNode>
+      <HopArrow label="ingest lag" ms={ingestMs} color={color} />
+      <LatencyMapNode accent={color}>{storeLabel}</LatencyMapNode>
+      <HopArrow label={pushMode === "push" ? "query · live push" : "query · on-demand poll"} ms={queryMs} color={color} />
+      <LatencyMapNode>Dashboard</LatencyMapNode>
+    </div>
+  );
+}
+
+function LatencyMap({ rw, tsdb, athena }: { rw: FreshnessPayload | null; tsdb: FreshnessPayload | null; athena: FreshnessPayload | null }) {
+  return (
+    <div className="card">
+      <h2 style={{ marginBottom: "0.25rem", fontSize: "1rem" }}>Edge → Cloud Latency Map</h2>
+      <p style={{ color: "#888", fontSize: "0.8rem", marginBottom: "0.75rem" }}>
+        The same freshness/latency numbers as the charts above, laid out along each tier&apos;s path: how stale the newest row is by the time it lands in the store (ingest lag), then how long that store takes to answer the fleet aggregate (query).
+      </p>
+      <LatencyMapRow
+        label="RisingWave" color={COLOUR_RW} storeLabel="RisingWave MV" pushMode="push"
+        ingestMs={rw?.tierFreshness.risingwave_ms ?? null}
+        queryMs={rw?.tierLatency.risingwave_ms ?? null}
+      />
+      <LatencyMapRow
+        label="TimescaleDB" color={COLOUR_TSDB} storeLabel="TimescaleDB CAGG" pushMode="push"
+        ingestMs={tsdb?.tierFreshness.timescaledb_ms ?? null}
+        queryMs={tsdb?.tierLatency.timescaledb_ms ?? null}
+      />
+      <LatencyMapRow
+        label="Athena/S3" color={COLOUR_ATHENA} storeLabel="Iceberg/Athena" pushMode="poll"
+        ingestMs={athena?.tierFreshness.athena_ms ?? null}
+        queryMs={athena?.tierLatency.athena_ms ?? null}
+      />
+    </div>
+  );
+}
+
 // ── pulse indicator ───────────────────────────────────────────────────────────
 function Pulse({ active }: { active: boolean }) {
   return (
@@ -327,6 +427,8 @@ export default function DashboardPage() {
       <ResourceChart   rw={rwData}   tsdb={tsdbData} />
       <div style={{ height: "1rem" }} />
       <NodeAgeChart    rw={rwData}   tsdb={tsdbData} />
+      <div style={{ height: "1rem" }} />
+      <LatencyMap      rw={rwData}   tsdb={tsdbData} athena={athenaData} />
     </div>
   );
 }

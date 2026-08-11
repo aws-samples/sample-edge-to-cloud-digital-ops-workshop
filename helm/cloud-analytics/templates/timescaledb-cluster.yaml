@@ -81,18 +81,31 @@ spec:
         # `... AS $ BEGIN ... END; $ LANGUAGE plpgsql` — a syntax error that
         # aborts initdb (SQLSTATE 42601) and wedges the whole cluster bootstrap.
         # A named tag survives the collapse intact.
+        #
+        # #210: originally FOR EACH ROW — redpanda-connect issues one INSERT
+        # per row regardless of its batching config, so this fired one
+        # dashboard aggregate query per row and saturated the SSE route's pg
+        # pool under load. FOR EACH STATEMENT collapses that to one notify per
+        # INSERT statement; the function can no longer read NEW, so the
+        # payload is just a fixed wakeup token (the listener re-aggregates on
+        # every wakeup regardless of payload contents anyway). This is only
+        # half the fix — see cloud-dashboard/src/app/api/stream/timescaledb/route.ts
+        # for the debounce/single-flight half, and
+        # helm/cloud-analytics/templates/timescaledb-notify-ddl-job.yaml,
+        # which re-applies this function+trigger on every upgrade since
+        # postInitApplicationSQL below only ever runs once, at initdb.
         - |
           CREATE OR REPLACE FUNCTION notify_sensor_reading() RETURNS trigger AS $notify$
           BEGIN
-            PERFORM pg_notify('sensor_readings_change', NEW.site_id);
-            RETURN NEW;
+            PERFORM pg_notify('sensor_readings_change', 'batch');
+            RETURN NULL;
           END;
           $notify$ LANGUAGE plpgsql;
         - DROP TRIGGER IF EXISTS sensor_readings_notify ON sensor_readings;
         - |
           CREATE TRIGGER sensor_readings_notify
             AFTER INSERT ON sensor_readings
-            FOR EACH ROW EXECUTE FUNCTION notify_sensor_reading();
+            FOR EACH STATEMENT EXECUTE FUNCTION notify_sensor_reading();
         - ALTER FUNCTION notify_sensor_reading() OWNER TO workshop;
 
   storage:

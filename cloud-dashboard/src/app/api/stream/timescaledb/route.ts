@@ -1,4 +1,4 @@
-import { Client } from "pg";
+import { Client, Pool } from "pg";
 import { queryTimescaleDbFreshness } from "../../../../lib/freshness-queries";
 
 export const dynamic = "force-dynamic";
@@ -10,15 +10,28 @@ export const dynamic = "force-dynamic";
  * TimescaleDB/Postgres has no subscription primitive — instead a trigger on
  * `sensor_readings` (see k8s/timescaledb-cloud-cluster.yaml,
  * notify_sensor_reading()) calls pg_notify('sensor_readings_change', ...) on
- * every insert. This route holds one long-lived connection with
- * `LISTEN sensor_readings_change` and, on each notification, re-runs the same
+ * every INSERT statement. This route holds one long-lived connection with
+ * `LISTEN sensor_readings_change` and, on notification, re-runs the same
  * aggregate query the polled /api/freshness route uses and pushes the result
  * to the browser. This replaces the 3-second setInterval poll that used to
  * drive this tier.
  *
+ * #210: a notification burst (one per INSERT statement under sustained
+ * ingest) used to fan out into one full aggregate query per notification
+ * against a default-sized pool, saturating it within seconds — a single
+ * viewer was enough to trigger connect timeouts, and a caught query error
+ * used to end() the shared pool, poisoning every subsequent query for the
+ * rest of the connection's life. Fixed on two sides: the trigger is now
+ * FOR EACH STATEMENT (see the cluster manifests), and this route
+ * single-flights + trailing-debounces the resulting queries so at most one
+ * aggregate runs at a time no matter how fast notifications arrive.
+ *
  * If TIMESCALEDB_ENDPOINT is unset (local dev / mock mode), falls back to
  * emitting a mock payload on a timer.
  */
+
+const DEBOUNCE_MS = 300;
+
 export async function GET(): Promise<Response> {
   let controller!: ReadableStreamDefaultController<Uint8Array>;
   let closed = false;
@@ -29,8 +42,11 @@ export async function GET(): Promise<Response> {
     },
     cancel() {
       closed = true;
+      onCancel?.();
     },
   });
+
+  let onCancel: (() => void) | undefined;
 
   const encoder = new TextEncoder();
 
@@ -83,27 +99,72 @@ export async function GET(): Promise<Response> {
     });
   }
 
+  // One long-lived pool for the lifetime of this SSE connection. Never end()
+  // it on a transient query error (#210) — only in the finally block below,
+  // after the LISTEN client has been torn down. A small explicit `max` caps
+  // worst-case connection usage per viewer regardless of notification rate.
+  const pool = new Pool({ connectionString: endpoint, connectionTimeoutMillis: 5000, max: 5 });
+  pool.on("error", err => {
+    // Fires for errors on idle pooled clients (e.g. a killed backend) — must
+    // be handled or it crashes the process. The pool itself stays usable.
+    console.error("[stream/timescaledb] pool error:", err);
+  });
+
   const client = new Client({ connectionString: endpoint, connectionTimeoutMillis: 5000 });
+
+  // Single-flight + trailing debounce (#210): collapse a burst of
+  // notifications into at most one in-flight aggregate query. If more
+  // notifications arrive while a query is running, run exactly one more
+  // when it completes rather than one per notification.
+  let inFlight = false;
+  let queuedWhileInFlight = false;
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  async function runAggregate() {
+    if (inFlight) {
+      queuedWhileInFlight = true;
+      return;
+    }
+    inFlight = true;
+    try {
+      const payload = await queryTimescaleDbFreshness(pool);
+      send("freshness", payload);
+    } catch (err) {
+      console.error("[stream/timescaledb] query error:", err);
+      send("tier-error", { message: String(err instanceof Error ? err.message : err) });
+    } finally {
+      inFlight = false;
+      if (queuedWhileInFlight) {
+        queuedWhileInFlight = false;
+        void runAggregate();
+      }
+    }
+  }
+
+  function scheduleAggregate() {
+    if (debounceTimer) return;
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      void runAggregate();
+    }, DEBOUNCE_MS);
+  }
+
+  onCancel = () => {
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+  };
 
   (async () => {
     try {
       await client.connect();
 
-      // Fan out every notification into a fresh aggregate query — see the
-      // module doc comment above for why we re-query instead of trusting the
-      // notification payload directly (it carries one row, the chart needs a
-      // fleet-wide aggregate).
-      const { Pool } = await import("pg");
-      const pool = new Pool({ connectionString: endpoint, connectionTimeoutMillis: 5000 });
-
-      client.on("notification", () => {
-        queryTimescaleDbFreshness(pool)
-          .then(payload => send("freshness", payload))
-          .catch(err => console.error("[stream/timescaledb] query error:", err));
-      });
+      client.on("notification", scheduleAggregate);
 
       client.on("error", err => {
         console.error("[stream/timescaledb] connection error:", err);
+        send("tier-error", { message: String(err instanceof Error ? err.message : err) });
       });
 
       await client.query("LISTEN sensor_readings_change");
@@ -111,7 +172,7 @@ export async function GET(): Promise<Response> {
 
       // Send an initial snapshot immediately so the chart has data before the
       // first notification arrives.
-      send("freshness", await queryTimescaleDbFreshness(pool));
+      await runAggregate();
 
       // Keep the connection open — notifications arrive asynchronously via
       // the 'notification' event above. Poll for browser disconnect instead
@@ -119,10 +180,9 @@ export async function GET(): Promise<Response> {
       while (!closed) {
         await new Promise(r => setTimeout(r, 1000));
       }
-
-      await pool.end();
     } catch (err) {
       console.error("[stream/timescaledb] error:", err);
+      send("tier-error", { message: String(err instanceof Error ? err.message : err) });
       sendComment(`error: ${String(err)}`);
       try {
         controller.close();
@@ -130,10 +190,19 @@ export async function GET(): Promise<Response> {
         // already closed
       }
     } finally {
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+        debounceTimer = null;
+      }
       try {
         await client.end();
       } catch {
-        // ignore
+        // ignore — connection may already be down
+      }
+      try {
+        await pool.end();
+      } catch {
+        // ignore — pool may already be shutting down
       }
     }
   })();
