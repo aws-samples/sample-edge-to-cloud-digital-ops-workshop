@@ -62,6 +62,7 @@ risingwave:
   # whole sensors.raw.sim topic and flushes SSTs) stay under the cgroup limit.
   # 1.5Gi reserved under a 3Gi limit leaves ~50% headroom for that backfill spike
   # on the workshop's t3.medium nodes (~3.4Gi allocatable).
+  # --8<-- [start:compute-sizing]
   computeTotalMemoryBytes: "1610612736"  # 1.5 GiB, well under the 3Gi limit below
 
   resources:
@@ -75,9 +76,14 @@ risingwave:
       # request stays at 1Gi so the pod schedules on a ~3.4Gi t3.medium already
       # sharing the node with timescaledb; the 3Gi limit is burst headroom (limits
       # may oversubscribe the node, only requests must fit) to absorb the
-      # startup-backfill spike without a cgroup OOM kill.
+      # startup-backfill spike without a cgroup OOM kill. To *showcase* RisingWave
+      # (flat in-memory reads at scale), move compute to a memory-optimized node
+      # (r6i.xlarge) and raise both the limit and computeTotalMemoryBytes to
+      # 16-24Gi — see workshop/04-analytics/block-5-dashboard.md. Never a t-family
+      # node: CPU-credit throttling stalls the checkpoint/barrier path.
       requests: { cpu: 500m, memory: 1Gi }
       limits: { cpu: 1000m, memory: 3Gi }
+  # --8<-- [end:compute-sizing]
     compactor:
       requests: { cpu: 100m, memory: 512Mi }
       limits: { cpu: 500m, memory: 1Gi }

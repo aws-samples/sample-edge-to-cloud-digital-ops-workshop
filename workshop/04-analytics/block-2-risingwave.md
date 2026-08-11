@@ -72,6 +72,37 @@ Query the views and observe **sub-100 ms response times**.
 !!! info "Why is the MV always fast?"
     RisingWave incrementally maintains each view using a streaming operator graph. On each new row, the aggregation is updated in memory — not recomputed from scratch. Read cost is always a single row lookup regardless of fleet size.
 
+!!! abstract "Three storage layers — only one is on the read path"
+    "In-memory reads" is the whole reason RisingWave is here, so it's worth being
+    precise about *what* is in memory. RisingWave has three distinct storage
+    concerns, and mixing them up leads to the wrong sizing decisions:
+
+    | Layer | What it holds | On the query hot path? | Where it lives in this workshop |
+    |---|---|---|---|
+    | **Compute serving layer** | Live MV state + **Hummock block cache** | **Yes** — reads are served from here | Compute pod **memory** |
+    | **State store** (Hummock) | The durable MV/operator state, as an LSM tree | Only on a **cache miss** | S3 bucket (tier below the cache) |
+    | **Meta store** | Catalog, `cluster_id`, checkpoint bookkeeping | **No** — consulted at plan time, not per row | PostgreSQL (`risingwave_meta` on the CNPG cluster) |
+
+    When the dashboard runs `SELECT … MAX(ts_ms) FROM mv_sensor_fleet_latest`, the
+    **compute node answers it from memory** — the pre-computed MV state held in the
+    Hummock block cache. It never touches the meta store, and it only reaches S3 on
+    a cache miss. So:
+
+    - **Read speed is governed by the compute node's memory** (block-cache hit rate),
+      *not* by the meta store. Putting the meta store on PostgreSQL costs nothing on
+      reads — meta traffic is tiny and low-frequency (one commit per checkpoint
+      barrier, plus DDL).
+    - **The meta store on PostgreSQL is deliberate and correct.** It makes cluster
+      identity durable across pod restarts. In-memory meta (the operator default)
+      is wiped on every restart while the S3 state bucket survives, so the cluster
+      would mint a fresh `cluster_id` that no longer matches its own persisted
+      state — RisingWave then refuses to start
+      (*"Data directory is already used by another cluster with id…"*). Durability
+      of identity, not read performance, is what the meta-store choice buys.
+    - **If you want faster / more reliably in-memory reads, the lever is compute-node
+      memory** (a bigger Hummock cache), not the meta store — see the node-sizing
+      guidance in [Block 5](block-5-dashboard.md#node-sizing-what-actually-makes-risingwave-fast).
+
 ---
 
 ## The Subscription Behind the Push Path

@@ -281,6 +281,53 @@ What holds the budget as you scale:
   budget regardless of scale. Use it for backfill, audits, and large historical
   scans — not the live panel.
 
+### Node sizing — what actually makes RisingWave fast
+
+RisingWave's selling point in this workshop is **flat, in-memory reads** of
+operational state. That speed comes from exactly one place: the **Hummock block
+cache on the compute node**. Reads are served from that cache; the S3 state store
+is only touched on a *cache miss*, and a single S3 round-trip can add hundreds of
+milliseconds — enough to blow the 2 s budget on its own if it happens per query.
+So the read-performance lever is **compute-node memory**, and the node type has to
+suit a streaming workload. Two rules, both straight from RisingWave's own sizing
+guidance:
+
+- **Size for memory: RisingWave wants a 1:4 CPU-to-memory ratio** (≈4 GiB per
+  vCPU) and a **practical minimum of ~8 GiB per compute node** to keep the working
+  set cache-resident rather than spilling to S3. Below that the block cache
+  thrashes and "flat sub-100 ms reads" degrade into intermittent S3 latency —
+  which reads on the dashboard as read-latency spikes, not freshness lag.
+- **Do not run compute on burstable (t-family) instances.** A stream is a
+  *sustained* CPU workload, which is the exact anti-pattern for burstable nodes:
+  they run on a CPU-credit economy, and once credits are exhausted the vCPU is
+  hard-throttled to a low baseline. RisingWave propagates **checkpoint barriers**
+  on a fixed cadence (`barrierIntervalMs`), and a mid-barrier throttle stalls the
+  whole pipeline → barrier-latency spikes → backpressure → freshness lag, and
+  eventually OOM as buffers accumulate. This is a contributing cause of the
+  OOM/lag class of bug, not just a memory shortage.
+
+!!! tip "Instance-type guidance for the RisingWave compute node"
+    | Choice | Verdict | Why |
+    |---|---|---|
+    | **`r6i.xlarge`** (4 vCPU / 32 GiB) | **Recommended for the demo** | Memory-optimized (8:1) — dedicate the node to compute, give the pod a 16–24 GiB limit with `RW_TOTAL_MEMORY_BYTES` sized *under* it, and reads stay cache-resident and genuinely flat. This is the config that *shows RisingWave's value*. |
+    | `m6i.large` (2 vCPU / 8 GiB) | Minimum viable | General-purpose 4:1 ratio, no credit throttling. Meets the floor but leaves little cache headroom — expect occasional S3 spills under load. |
+    | `t3.large` / any t-family | **Avoid** | Burstable: CPU-credit throttling stalls the barrier/checkpoint path (see above), and 8 GiB shared with other pods starves the block cache. On the shared `t3.medium` workshop nodes the compute pod is squeezed to a ~1 GiB request — enough to run, **not** enough to demonstrate flat in-memory reads at scale. |
+
+    Two knobs move together: the container **memory limit** (the cgroup ceiling)
+    and **`RW_TOTAL_MEMORY_BYTES`** (the budget RisingWave sizes its own heap/cache
+    to). Always keep the latter *below* the former — the operator otherwise defaults
+    it to 100 % of the limit, leaving no room for jemalloc/stack/Hummock overhead,
+    and the pod gets OOM-killed. Both live in
+    `helm/cloud-analytics/values.yaml` under `risingwave.resources.compute` and
+    `risingwave.computeTotalMemoryBytes`.
+
+    ??? example "View source — compute node sizing in the chart"
+        [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/helm/cloud-analytics/values.yaml){ .md-button target=_blank }
+
+        ```yaml
+        --8<-- "helm/cloud-analytics/values.yaml:compute-sizing"
+        ```
+
 !!! note "Why a live tier can show minutes of 'freshness' — and why it isn't a latency problem"
     If RisingWave (or TimescaleDB) reports **seconds-to-minutes** of freshness, the
     read path is not slow — the **newest row it has committed really is that old**.
