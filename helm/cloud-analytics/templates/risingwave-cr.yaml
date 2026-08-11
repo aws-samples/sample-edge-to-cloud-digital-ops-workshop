@@ -74,6 +74,13 @@ spec:
                 # across meta and compute. RisingWave default (1000ms).
                 - name: RW_BARRIER_INTERVAL_MS
                   value: {{ .Values.risingwave.barrierIntervalMs | quote }}
+                # Cap RisingWave's self-managed memory *below* the container
+                # limit so jemalloc/stack/RocksDB overhead can't push the cgroup
+                # over its limit and trigger an OOM kill (exit 137). Without this
+                # the operator sizes the heap to 100% of the limit and the pod
+                # gets OOMKilled, stalling barriers and spiking MV freshness.
+                - name: RW_TOTAL_MEMORY_BYTES
+                  value: {{ .Values.risingwave.computeTotalMemoryBytes | quote }}
               resources:
                 {{- toYaml .Values.risingwave.resources.compute | nindent 16 }}
 
