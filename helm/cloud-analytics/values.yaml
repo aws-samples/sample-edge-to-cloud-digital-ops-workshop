@@ -43,6 +43,13 @@ risingwave:
   serviceAccountRoleArn: ""
   stateBucketRegion: us-east-1
 
+  # Checkpoint barrier interval (ms). RisingWave commits a checkpoint to the meta
+  # store every barrier; too tight an interval saturates the commit path on a
+  # small (1-vCPU) node, so the committed epoch — and therefore MV freshness —
+  # falls minutes behind wall-clock even under trivial load. 1000ms is the
+  # RisingWave default; do not lower without profiling the commit path.
+  barrierIntervalMs: 1000
+
   resources:
     meta:
       requests: { cpu: 100m, memory: 512Mi }

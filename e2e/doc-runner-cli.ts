@@ -320,7 +320,8 @@ for (const mdPath of mdPaths) {
         results.push(r);
         if (r.passed) {
           const fresh = r.freshness
-            ? `  freshness[${r.freshness.tier}]=${r.freshness.freshness_ms == null ? "n/a" : `${r.freshness.freshness_ms}ms`}`
+            ? `  ${r.freshness.tier}: freshness=${r.freshness.freshness_ms == null ? "n/a" : `${r.freshness.freshness_ms}ms`}` +
+              `${r.freshness.query_latency_ms == null ? "" : ` latency=${r.freshness.query_latency_ms}ms`}`
             : "";
           console.log(`  ✓  block ${r.blockIndex + 1}  [${r.durationMs}ms]${fresh}`);
         } else {
