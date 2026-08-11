@@ -15,7 +15,14 @@ set -euo pipefail
 
 SKIP_BUILD=false
 REPO_NAME="workshop-cloud-dashboard"
-IMAGE_TAG="latest"
+# Empty by default — resolved to an immutable git-short-SHA tag below (once
+# REPO_ROOT is known) unless --tag overrides it. Tagging by commit SHA rather
+# than the floating `:latest` means every code change produces a distinct,
+# immutable tag: `helm upgrade` then references a new image and Kubernetes
+# actually re-pulls, instead of a node continuing to serve a stale `:latest`
+# under imagePullPolicy: IfNotPresent (the #197 bug). It also sidesteps the
+# shared-`:latest` cross-slot trap in workshop/reference/repo-structure.md.
+IMAGE_TAG=""
 REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 
 while [[ $# -gt 0 ]]; do
@@ -29,6 +36,14 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Default to the current commit's short SHA (immutable per-change tag). Falls
+# back to a timestamp if git rev-parse fails (e.g. building from a tarball with
+# no .git) so the tag is still unique-per-build rather than the stale-prone
+# shared `latest`.
+if [[ -z "$IMAGE_TAG" ]]; then
+  IMAGE_TAG=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || date -u +%Y%m%d%H%M%S)
+fi
 
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 REGISTRY="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"

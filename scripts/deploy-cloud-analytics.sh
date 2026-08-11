@@ -33,6 +33,7 @@ set -euo pipefail
 DEPLOYMENT_ID=""
 SKIP_CLUSTER_SCOPED=false
 DASHBOARD_IMAGE=""
+SKIP_DASHBOARD_BUILD=false
 REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 MIGRATE_RISINGWAVE_META=false
 
@@ -41,6 +42,7 @@ while [[ $# -gt 0 ]]; do
     --deployment-id)          DEPLOYMENT_ID="$2"; shift 2 ;;
     --skip-cluster-scoped)     SKIP_CLUSTER_SCOPED=true; shift ;;
     --dashboard-image)         DASHBOARD_IMAGE="$2"; shift 2 ;;
+    --skip-dashboard-build)     SKIP_DASHBOARD_BUILD=true; shift ;;
     --region)                   REGION="$2"; shift 2 ;;
     --migrate-risingwave-meta)  MIGRATE_RISINGWAVE_META=true; shift ;;
     *) echo "Unknown argument: $1" >&2; exit 1 ;;
@@ -48,7 +50,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$DEPLOYMENT_ID" ]]; then
-  echo "Usage: $0 --deployment-id <ws-slotNN> [--skip-cluster-scoped] [--dashboard-image <repo:tag>] [--migrate-risingwave-meta]" >&2
+  echo "Usage: $0 --deployment-id <ws-slotNN> [--skip-cluster-scoped] [--dashboard-image <repo:tag>] [--skip-dashboard-build] [--migrate-risingwave-meta]" >&2
   exit 1
 fi
 
@@ -248,13 +250,36 @@ if kubectl get risingwave "$RW_CR_NAME" -n "$DEPLOYMENT_ID" >/dev/null 2>&1; the
   fi
 fi
 
-# ── 5. helm upgrade --install the per-slot analytics stack ──────────────────
-# The dashboard image is shared across all slots (one push per code change,
-# not per slot) — default to this account's ECR repo, built/pushed via
-# scripts/build-cloud-dashboard.sh.
-DASHBOARD_IMAGE="${DASHBOARD_IMAGE:-${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/workshop-cloud-dashboard:latest}"
-DASHBOARD_REPO="${DASHBOARD_IMAGE%%:*}"
-DASHBOARD_TAG="${DASHBOARD_IMAGE##*:}"
+# ── 5. Resolve the dashboard image to an immutable, current tag ─────────────
+# #197: the old default pinned `:latest` with imagePullPolicy: IfNotPresent and
+# never rebuilt on redeploy, so an existing slot kept serving whatever image
+# was baked into `:latest` when the node first pulled it — a stale, pre-#187
+# image that lacked the Query Latency chart. Fix: tag by the current commit's
+# short SHA (immutable per code change) and rebuild+push it as part of the
+# deploy, so `helm upgrade` always references a fresh tag Kubernetes must pull.
+#
+# Precedence:
+#   1. --dashboard-image <repo:tag>  → use exactly that (explicit escape hatch;
+#      no rebuild — the caller owns that image).
+#   2. otherwise → build+push cloud-dashboard under this commit's short SHA via
+#      scripts/build-cloud-dashboard.sh, then reference that immutable tag.
+#      --skip-dashboard-build reuses an already-pushed SHA tag (no rebuild).
+DASHBOARD_REPO_NAME="workshop-cloud-dashboard"
+if [[ -n "$DASHBOARD_IMAGE" ]]; then
+  DASHBOARD_REPO="${DASHBOARD_IMAGE%%:*}"
+  DASHBOARD_TAG="${DASHBOARD_IMAGE##*:}"
+  echo ">>> Using explicitly-provided dashboard image ${DASHBOARD_IMAGE} (no rebuild)."
+else
+  DASHBOARD_TAG=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || date -u +%Y%m%d%H%M%S)
+  DASHBOARD_REPO="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${DASHBOARD_REPO_NAME}"
+  if [[ "$SKIP_DASHBOARD_BUILD" == "true" ]]; then
+    echo ">>> --skip-dashboard-build: assuming ${DASHBOARD_REPO}:${DASHBOARD_TAG} is already in ECR."
+  else
+    echo ">>> Building + pushing current dashboard image ${DASHBOARD_REPO}:${DASHBOARD_TAG} (immutable SHA tag)..."
+    "$SCRIPT_DIR/build-cloud-dashboard.sh" --tag "$DASHBOARD_TAG" --region "$REGION"
+  fi
+fi
+echo ">>> Dashboard image: ${DASHBOARD_REPO}:${DASHBOARD_TAG}"
 
 echo ">>> Deploying helm/cloud-analytics into namespace ${DEPLOYMENT_ID}..."
 helm dependency update "$REPO_ROOT/helm/cloud-analytics" >/dev/null
