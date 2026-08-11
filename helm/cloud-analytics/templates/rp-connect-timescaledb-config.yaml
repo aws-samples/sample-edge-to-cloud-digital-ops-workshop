@@ -19,7 +19,13 @@ data:
           - "^sensors\\.raw\\."
           - "^raw\\.telemetry$"
         regexp_topics: true
-        consumer_group: timescaledb-sink
+        # Slot-scope the consumer group. All slots' sinks read the SAME shared
+        # MSK topics (sensors.raw.*, raw.telemetry); a shared group name makes
+        # them one consumer group, so Kafka splits each topic's partitions
+        # across slots and every slot only sees a fraction of the messages (a
+        # fresh slot can see none). A per-slot group gives each slot its own
+        # independent offset cursor over the full topic set.
+        consumer_group: timescaledb-sink-{{ .Values.deploymentId }}
         tls:
           enabled: true
         sasl:
