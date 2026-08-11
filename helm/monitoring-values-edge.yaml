@@ -1,0 +1,121 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# kube-prometheus-stack — EDGE override values (K3s, single-node/demo)
+# --8<-- [start:edge-monitoring-values]
+#
+# Installed as a standalone release in the `monitoring` namespace, NOT as an
+# edge-stack subchart — same pattern the workshop uses for cert-manager and the
+# CNPG / RisingWave operators (cluster infra installed once, out-of-band of the
+# data umbrella chart). The prometheus-operator this bundles then auto-discovers
+# the ServiceMonitor / PodMonitor resources emitted by the edge-stack chart.
+#
+#   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+#   helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+#     --namespace monitoring --create-namespace \
+#     -f helm/monitoring-values-edge.yaml
+#
+# TRIMMED for the edge: this cluster is 3× t3.xlarge and already runs the whole
+# data stack. We drop Alertmanager, drop persistence, and keep Prometheus
+# retention short so the observability release never starves the workloads it
+# is meant to watch.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Let Prometheus discover ServiceMonitors/PodMonitors in ALL namespaces (the
+# edge data stack lives in `edge`, not `monitoring`) rather than only those it
+# "owns". Without this the operator ignores every monitor we emit.
+prometheus:
+  prometheusSpec:
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    # Short local retention — this is a live demo cluster, not long-term storage.
+    retention: 24h
+    # No PVC: Prometheus TSDB lives on the node's emptyDir. A pod restart loses
+    # history, which is fine for a workshop and saves a 20Gi+ PV on a busy node.
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1500Mi
+
+# Alertmanager off — nobody is on-call for a workshop cluster, and it is the
+# single biggest thing we can drop to reclaim memory on the edge.
+alertmanager:
+  enabled: false
+
+grafana:
+  enabled: true
+  # No admin ingress — reached via `kubectl port-forward` like the HMI / cloud
+  # dashboard (see Session 5 Block 5). Default admin password is set here for
+  # the workshop; rotate for any non-demo use.
+  adminPassword: workshop
+  persistence:
+    enabled: false
+  service:
+    type: NodePort
+    nodePort: 30902
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+  # Auto-load any ConfigMap labelled grafana_dashboard: "1" — this is how the
+  # RisingWave / CNPG / Redpanda dashboards shipped by the edge-stack chart
+  # (helm/edge-stack/templates/monitoring/*-dashboard.yaml) land in Grafana.
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      searchNamespace: ALL
+    datasources:
+      enabled: true
+
+# node-exporter + kube-state-metrics stay ON — they are the "is the cluster
+# healthy" backbone (node CPU/mem/disk, pod restarts, pending pods) and are
+# cheap. Trim their requests for the small edge nodes.
+nodeExporter:
+  enabled: true
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+kubeStateMetrics:
+  enabled: true
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 48Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# K3s runs its control-plane as a single embedded process, so the separate
+# etcd / scheduler / controller-manager / kube-proxy scrape targets that
+# kube-prometheus-stack expects on a kubeadm cluster don't exist. Disabling
+# them avoids a wall of red "target down" panels that would confuse attendees.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false
+# --8<-- [end:edge-monitoring-values]

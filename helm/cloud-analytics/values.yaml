@@ -26,6 +26,21 @@ accountId: "000000000000"
 
 awsRegion: us-east-1
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Observability — per-slot PodMonitors discovered by the shared-cluster
+# kube-prometheus-stack (namespace `monitoring`, installed cluster-scoped by
+# scripts/deploy-cloud-analytics.sh alongside cert-manager / the operators).
+# --8<-- [start:cloud-monitoring-toggle]
+#
+# DEFAULT ON (unlike the edge): on the shared EKS the monitoring.coreos.com CRDs
+# are installed cluster-scoped BEFORE any per-slot cloud-analytics release, so
+# there is no CRD-ordering hazard. Set monitoring.enabled=false only when
+# deploying a slot into a cluster whose prometheus-operator CRDs are absent.
+monitoring:
+  enabled: true
+  releaseLabel: monitoring
+# --8<-- [end:cloud-monitoring-toggle]
+
 # risingwave/ddl-cloud.sql, supplied via `--set-file risingwaveDdl=...` by
 # scripts/deploy-cloud-analytics.sh — see risingwave-ddl-job.yaml.
 risingwaveDdl: ""

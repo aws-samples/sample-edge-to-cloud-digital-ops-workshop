@@ -27,6 +27,7 @@
 | [Block 2](block-2-k3s-launch.md) | 60 min | Launch K3s Job + Sensor EC2 (parallel) |
 | [Block 3](block-3-helm.md) | 60 min | Deploy Edge Helm Stack |
 | [Block 4](block-4-verify.md) | 45 min | Verify Edge Data Pipeline |
+| [Block 5](block-5-observability.md) | 45 min | Cluster Observability (Prometheus + Grafana + k9s) |
 | Wrap-up | 15 min | Recap + preview Session 6 |
 
 ---

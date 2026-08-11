@@ -1,0 +1,90 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# kube-prometheus-stack — CLOUD (shared EKS) override values
+# --8<-- [start:cloud-monitoring-values]
+#
+# ONE Prometheus + Grafana for the whole shared workshop-eks cluster, installed
+# cluster-scoped by scripts/deploy-cloud-analytics.sh (alongside cert-manager /
+# risingwave-operator / cnpg). It discovers the per-slot PodMonitors that each
+# cloud-analytics release emits in its own namespace, so every slot's RisingWave
+# + TimescaleDB show up in the same Grafana with a namespace filter.
+#
+#   helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+#     --namespace monitoring --create-namespace \
+#     -f helm/monitoring-values-cloud.yaml
+#
+# The EKS cluster has real headroom (managed node group), so unlike the edge
+# override we keep Alertmanager and give Prometheus a persistent volume + longer
+# retention.
+# ──────────────────────────────────────────────────────────────────────────────
+
+prometheus:
+  prometheusSpec:
+    # Discover monitors in every slot namespace, not just `monitoring`.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    retention: 7d
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp3
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 20Gi
+    resources:
+      requests:
+        cpu: 300m
+        memory: 1Gi
+      limits:
+        cpu: "1"
+        memory: 2Gi
+
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp3
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 2Gi
+
+grafana:
+  enabled: true
+  adminPassword: workshop
+  persistence:
+    enabled: true
+    storageClassName: gp3
+    size: 2Gi
+  # Reached via `kubectl port-forward svc/monitoring-grafana -n monitoring 3002:80`
+  # — no ingress/LoadBalancer, matching the cloud dashboard access pattern (#159).
+  service:
+    type: ClusterIP
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      searchNamespace: ALL
+    datasources:
+      enabled: true
+
+nodeExporter:
+  enabled: true
+kubeStateMetrics:
+  enabled: true
+
+# EKS is a managed control plane: the API server is scrapable but etcd /
+# scheduler / controller-manager are AWS-managed and not exposed to workloads,
+# so disable those targets to avoid permanently-down panels.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false
+# --8<-- [end:cloud-monitoring-values]

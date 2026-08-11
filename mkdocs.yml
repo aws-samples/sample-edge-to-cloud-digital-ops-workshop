@@ -103,6 +103,7 @@ nav:
       - Block 2 — Launch K3s + Sensor EC2: 05-edge-infra/block-2-k3s-launch.md
       - Block 3 — Deploy Edge Helm Stack: 05-edge-infra/block-3-helm.md
       - Block 4 — Verify Edge Pipeline: 05-edge-infra/block-4-verify.md
+      - Block 5 — Cluster Observability: 05-edge-infra/block-5-observability.md
   - Session 6 — HMI:
       - Overview: 06-hmi/index.md
       - Block 1 — Port-Forward and Load HMI: 06-hmi/block-1-port-forward.md

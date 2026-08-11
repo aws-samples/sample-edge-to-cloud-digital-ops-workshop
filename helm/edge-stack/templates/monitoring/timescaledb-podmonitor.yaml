@@ -1,0 +1,38 @@
+{{- /*
+PodMonitor for the edge TimescaleDB (CloudNativePG-managed Postgres).
+
+CNPG exposes a built-in Prometheus exporter on the `metrics` port (9187) of
+every instance pod, which carries the cnpg.io/cluster label. CNPG's own chart
+can emit a PodMonitor, but here the Cluster CR is created by our template
+(templates/timescaledb-cluster.yaml), not by the operator chart, so we author
+the monitor ourselves.
+
+Same monitoring.enabled gate as the RisingWave PodMonitor — the CRD only exists
+after Block 5 installs kube-prometheus-stack.
+*/ -}}
+{{- if .Values.monitoring.enabled }}
+{{- if or .Values.timescaledb.enabled .Values.cnpg.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ .Release.Name }}-timescaledb
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: timescaledb
+    release: {{ .Values.monitoring.releaseLabel | default "monitoring" }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      # The Cluster CR in templates/timescaledb-cluster.yaml is named "timescaledb";
+      # CNPG stamps this label on every instance pod it manages.
+      cnpg.io/cluster: timescaledb
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+{{- end }}
+{{- end }}

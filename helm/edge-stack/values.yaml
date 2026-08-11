@@ -7,6 +7,25 @@
 deploymentId: workshop-slot00
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Observability — Prometheus ServiceMonitor/PodMonitor + Grafana dashboards
+# --8<-- [start:edge-monitoring-toggle]
+#
+# DEFAULT OFF, and deliberately so: this chart is installed in Session 5 Block 3,
+# BEFORE kube-prometheus-stack brings the monitoring.coreos.com CRDs (Block 5).
+# Rendering a ServiceMonitor/PodMonitor with no CRD present fails `helm install`
+# with "no matches for kind". Block 5 re-runs the release with:
+#   helm upgrade edge-stack ... --reuse-values --set monitoring.enabled=true
+# once kube-prometheus-stack (and its CRDs + Grafana dashboard sidecar) are up.
+monitoring:
+  enabled: false
+  # `release` label kube-prometheus-stack's operator matches on for rule/monitor
+  # discovery. Our values files set serviceMonitorSelectorNilUsesHelmValues=false
+  # so this is belt-and-suspenders, but keep it aligned with the release name
+  # (`monitoring`) used in Session 5 Block 5.
+  releaseLabel: monitoring
+# --8<-- [end:edge-monitoring-toggle]
+
+# ──────────────────────────────────────────────────────────────────────────────
 # HMI (Next.js)
 # ──────────────────────────────────────────────────────────────────────────────
 hmi:

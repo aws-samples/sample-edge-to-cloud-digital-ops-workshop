@@ -1,0 +1,47 @@
+{{- /*
+PodMonitor for the standalone edge RisingWave pod.
+
+The upstream risingwave chart only emits its own PodMonitor in the multi-node
+topology (`if not .Values.standalone.enabled`), so in the workshop's standalone
+mode we author our own. The standalone pod exposes ALL component metrics on the
+single `metrics` container port (frontend.metrics = 8080) at /metrics.
+
+Gated behind `monitoring.enabled` (default false) because the edge-stack chart
+is installed in Session 5 Block 3 — BEFORE kube-prometheus-stack brings the
+monitoring.coreos.com CRDs in Block 5. Rendering a PodMonitor against a cluster
+that has no PodMonitor CRD fails `helm install` with "no matches for kind". The
+observability block re-runs `helm upgrade --set monitoring.enabled=true` once
+the CRDs exist.
+*/ -}}
+{{- if .Values.monitoring.enabled }}
+{{- if .Values.risingwave.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ .Release.Name }}-risingwave
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: risingwave
+    release: {{ .Values.monitoring.releaseLabel | default "monitoring" }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: risingwave
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      relabelings:
+        # Drop the very high-cardinality per-actor exchange series so the edge
+        # Prometheus TSDB stays small (upstream chart drops the same series).
+        - action: drop
+          regex: stream_exchange_.+
+          sourceLabels:
+            - __name__
+{{- end }}
+{{- end }}

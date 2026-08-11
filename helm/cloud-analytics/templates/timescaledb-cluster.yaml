@@ -10,6 +10,16 @@ metadata:
 spec:
   instances: {{ .Values.timescaledb.instances }}
 
+  {{- if .Values.monitoring.enabled }}
+  # Let the CNPG operator emit the PodMonitor itself — it stamps the exact pod
+  # selectors + `metrics` port (9187) for its built-in exporter, and the shared
+  # kube-prometheus-stack (namespace `monitoring`) discovers it. Requires the
+  # monitoring.coreos.com CRDs, which on the shared EKS are installed
+  # cluster-scoped before any per-slot release (see scripts/deploy-cloud-analytics.sh).
+  monitoring:
+    enablePodMonitor: true
+  {{- end }}
+
   # PostgreSQL 16 with the TimescaleDB extension binaries baked in. The CNPG
   # operator, not the image, provides HA/failover/backups — only the operand
   # image changes so `CREATE EXTENSION timescaledb` and continuous aggregates

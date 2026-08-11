@@ -1,0 +1,39 @@
+{{- /*
+ServiceMonitor for Redpanda broker metrics.
+
+Redpanda serves Prometheus metrics at /public_metrics on the admin port (9644,
+service port name "admin"). The bundled chart can emit its own ServiceMonitor,
+but it selects on a `monitoring.redpanda.com/enabled` label that only its
+service carries when redpanda.monitoring.enabled=true — coupling our monitoring
+toggle to a subchart value. We author our own against the standard service
+labels instead, so the single edge-stack `monitoring.enabled` flag controls
+everything.
+
+Same CRD-ordering gate as the other monitors (see risingwave-podmonitor.yaml).
+*/ -}}
+{{- if .Values.monitoring.enabled }}
+{{- if .Values.redpanda.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Release.Name }}-redpanda
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redpanda
+    release: {{ .Values.monitoring.releaseLabel | default "monitoring" }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redpanda
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  endpoints:
+    - port: admin
+      path: /public_metrics
+      interval: 30s
+      scheme: http
+{{- end }}
+{{- end }}

@@ -1,0 +1,46 @@
+{{- /*
+PodMonitor for the per-slot operator-managed RisingWave (the RisingWave CR in
+templates/risingwave-cr.yaml).
+
+Unlike the edge (standalone Helm chart), the cloud RisingWave is created by the
+cluster-scoped risingwave-operator. The operator stamps every component pod
+(meta / frontend / compute / compactor) with `risingwave/name: <crName>` and
+exposes each component's Prometheus metrics on the pod port named `metrics`.
+This is the operator's documented PodMonitor selector.
+
+The shared-cluster kube-prometheus-stack (namespace `monitoring`, installed
+cluster-scoped by scripts/deploy-cloud-analytics.sh) discovers this monitor in
+the slot namespace, so every slot's RisingWave shows up in the one Grafana with
+a namespace filter.
+
+Gated on monitoring.enabled (default true here — on the shared EKS the
+prometheus-operator CRDs are installed cluster-scoped BEFORE any per-slot
+cloud-analytics release, so unlike the edge there is no CRD-ordering hazard).
+*/ -}}
+{{- if .Values.monitoring.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ .Values.risingwave.crName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloud-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: risingwave
+    release: {{ .Values.monitoring.releaseLabel | default "monitoring" }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      risingwave/name: {{ .Values.risingwave.crName }}
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      relabelings:
+        - action: drop
+          regex: stream_exchange_.+
+          sourceLabels:
+            - __name__
+{{- end }}

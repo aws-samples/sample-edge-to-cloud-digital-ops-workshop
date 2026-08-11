@@ -111,8 +111,22 @@ EOF
     --namespace cnpg-system --create-namespace >/dev/null
   kubectl wait --for=condition=available deployment/cnpg-cloudnative-pg \
     -n cnpg-system --timeout=120s
+
+  # ── kube-prometheus-stack — ONE Prometheus + Grafana for the whole shared
+  # cluster. Installs the monitoring.coreos.com CRDs (PodMonitor/ServiceMonitor)
+  # that every per-slot cloud-analytics release then emits monitors against, so
+  # this MUST run before the first slot's `helm install`. Idempotent.
+  echo ">>> [cluster-scoped] Ensuring kube-prometheus-stack (Prometheus + Grafana)..."
+  helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null
+  helm repo update prometheus-community >/dev/null
+  helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+    --namespace monitoring --create-namespace \
+    -f "$REPO_ROOT/helm/monitoring-values-cloud.yaml" >/dev/null
+  kubectl wait --for=condition=available deployment/monitoring-grafana \
+    -n monitoring --timeout=300s || \
+    echo "    (Grafana not ready yet — Prometheus CRDs are installed regardless; continuing.)"
 else
-  echo ">>> --skip-cluster-scoped passed — assuming gp3/cert-manager/risingwave-operator/cnpg are already installed."
+  echo ">>> --skip-cluster-scoped passed — assuming gp3/cert-manager/risingwave-operator/cnpg/kube-prometheus-stack are already installed."
 fi
 
 # ── 3. MSK credentials + topics ─────────────────────────────────────────────

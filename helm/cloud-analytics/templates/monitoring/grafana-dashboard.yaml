@@ -1,0 +1,112 @@
+{{- /*
+Curated "Cloud Analytics — Health" Grafana dashboard, loaded by the shared
+kube-prometheus-stack Grafana dashboard sidecar (watches for the
+`grafana_dashboard: "1"` label in ALL namespaces).
+
+Same shape as the edge board (helm/edge-stack/templates/monitoring/
+grafana-dashboard.yaml) but the namespace template variable defaults to this
+slot's namespace, so each participant lands on their own data by default while
+still being able to switch namespaces to compare slots.
+*/ -}}
+{{- if .Values.monitoring.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-analytics-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloud-analytics.labels" . | nindent 4 }}
+    grafana_dashboard: "1"
+data:
+  cloud-analytics.json: |
+    {
+      "annotations": { "list": [] },
+      "editable": true,
+      "schemaVersion": 39,
+      "title": "Cloud Analytics — Health ({{ .Release.Namespace }})",
+      "tags": ["workshop", "cloud"],
+      "time": { "from": "now-1h", "to": "now" },
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "query": "label_values(kube_pod_info, namespace)",
+            "current": { "text": "{{ .Release.Namespace }}", "value": "{{ .Release.Namespace }}" },
+            "includeAll": false
+          },
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": { "text": "Prometheus", "value": "Prometheus" }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "row", "title": "Workload readiness", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+        },
+        {
+          "type": "stat", "title": "Ready pods",
+          "gridPos": { "h": 5, "w": 8, "x": 0, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [ { "expr": "count(kube_pod_status_ready{namespace=\"$namespace\", condition=\"true\"} == 1)", "refId": "A" } ]
+        },
+        {
+          "type": "timeseries", "title": "Container restarts (rate/5m)",
+          "gridPos": { "h": 5, "w": 16, "x": 8, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [ { "expr": "sum by (pod) (increase(kube_pod_container_status_restarts_total{namespace=\"$namespace\"}[5m]))", "refId": "A", "legendFormat": "{{`{{pod}}`}}" } ]
+        },
+        {
+          "type": "row", "title": "Resource usage", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 }
+        },
+        {
+          "type": "timeseries", "title": "CPU cores by pod",
+          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 7 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [ { "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"$namespace\", container!=\"\"}[5m]))", "refId": "A", "legendFormat": "{{`{{pod}}`}}" } ]
+        },
+        {
+          "type": "timeseries", "title": "Memory (working set) by pod",
+          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 7 },
+          "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [ { "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"$namespace\", container!=\"\"})", "refId": "A", "legendFormat": "{{`{{pod}}`}}" } ]
+        },
+        {
+          "type": "row", "title": "RisingWave", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 }
+        },
+        {
+          "type": "timeseries", "title": "Barrier latency p95 (s) — streaming freshness",
+          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 15 },
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [ { "expr": "histogram_quantile(0.95, sum by (le) (rate(meta_barrier_duration_seconds_bucket{namespace=\"$namespace\"}[5m])))", "refId": "A", "legendFormat": "p95 barrier" } ]
+        },
+        {
+          "type": "timeseries", "title": "Source rows ingested/s",
+          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 15 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [ { "expr": "sum(rate(stream_source_output_rows_counts{namespace=\"$namespace\"}[1m]))", "refId": "A", "legendFormat": "rows/s" } ]
+        },
+        {
+          "type": "row", "title": "TimescaleDB (CloudNativePG)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 }
+        },
+        {
+          "type": "timeseries", "title": "Backends (connections)",
+          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 23 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [ { "expr": "sum by (pod) (cnpg_backends_total{namespace=\"$namespace\"})", "refId": "A", "legendFormat": "{{`{{pod}}`}}" } ]
+        },
+        {
+          "type": "stat", "title": "CNPG exporter up",
+          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 23 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [ { "expr": "max(cnpg_collector_up{namespace=\"$namespace\"})", "refId": "A" } ]
+        }
+      ]
+    }
+{{- end }}

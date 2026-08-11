@@ -89,12 +89,19 @@ kubectl get jobs -n ws-slot00 -l app.kubernetes.io/component=risingwave-ddl
 
 ## Open the Dashboard
 
-The dashboard is deployed in-cluster with no public endpoint — reach it with `kubectl port-forward`. This starts the forward in the background and leaves it running (local port `8888`, since `3000` is commonly taken by other dev servers):
+The dashboard is deployed in-cluster with no public endpoint — reach it with `kubectl port-forward`. This starts the forward in the background and leaves it running (local port `8888`, since `3000` is commonly taken by other dev servers). It first clears any stale forwarder on `8888`, so it's safe to re-run if something goes wrong:
 
 ```bash
+# Clear any previous forwarder on 8888 so this is safe to re-run.
+pkill -f "port-forward.*svc/cloud-analytics-dashboard" 2>/dev/null && sleep 1
 kubectl port-forward -n ws-slot00 svc/cloud-analytics-dashboard 8888:3000 > /tmp/dashboard-pf.log 2>&1 &
 DASH_PF_PID=$!
-until grep -q "Forwarding from" /tmp/dashboard-pf.log 2>/dev/null; do sleep 1; done
+# Wait for the forward to come up, but bail if it dies (e.g. port in use, RBAC) instead of looping forever.
+for _ in $(seq 30); do
+  grep -q "Forwarding from" /tmp/dashboard-pf.log 2>/dev/null && break
+  kill -0 "$DASH_PF_PID" 2>/dev/null || { echo "port-forward failed:"; cat /tmp/dashboard-pf.log; break; }
+  sleep 1
+done
 curl -sf http://localhost:8888 | head -c 200
 echo "Port-forward running (PID $DASH_PF_PID) — open http://localhost:8888 in your browser."
 ```

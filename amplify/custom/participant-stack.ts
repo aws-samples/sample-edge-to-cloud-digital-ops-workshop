@@ -77,7 +77,9 @@ export interface ParticipantStackProps extends StackProps {
  * Deployed resources:
  *  - Edge subnet (/24) in workshop-edge VPC, private-with-egress (routes to the
  *    shared NAT gateway created in WorkshopPlatformStack; no direct IGW route)
- *  - 3× t3.medium EC2 instances with IoT Device Client, fleet provisioning by claim
+ *  - 3× t3.xlarge EC2 instances with IoT Device Client, fleet provisioning by claim
+ *    (sized to run the edge K3s data stack *and* the trimmed kube-prometheus-stack
+ *    observability release — a t3.medium node can't hold both; see Session 5 Block 5)
  *  - IoT Provisioning Template + claim cert (stored in Secrets Manager)
  *  - Pre-provisioning hook Lambda
  *  - IoT Dynamic Thing Group
@@ -874,7 +876,12 @@ systemctl start --no-block iot-post-provision-restart
 
     for (let i = 0; i < 3; i++) {
       new CfnInstance(this, `EdgeInstance${i}`, {
-        instanceType: "t3.medium",
+        // t3.xlarge (4 vCPU / 16 GiB): the edge K3s node must run the full data
+        // stack (Redpanda, RisingWave, TimescaleDB, MinIO, HMI) *and* the trimmed
+        // kube-prometheus-stack (Prometheus + Grafana + node-exporter +
+        // kube-state-metrics). t3.medium's 2 vCPU / 4 GiB can't fit both. See
+        // workshop/05-edge-infra/block-5-observability.md.
+        instanceType: "t3.xlarge",
         imageId: amiId,
         subnetId: edgeSubnet.ref,
         securityGroupIds: [edgeSg.ref],
@@ -883,7 +890,10 @@ systemctl start --no-block iot-post-provision-restart
         blockDeviceMappings: [
           {
             deviceName: "/dev/xvda",
-            ebs: { volumeSize: 30, volumeType: "gp3", deleteOnTermination: true },
+            // 60 GiB: +30 over the pre-observability size to hold Prometheus's
+            // local TSDB (short 24h retention, but node-exporter + kube-state
+            // series across the stack still need room) alongside the data PVs.
+            ebs: { volumeSize: 60, volumeType: "gp3", deleteOnTermination: true },
           },
         ],
         tags: [
