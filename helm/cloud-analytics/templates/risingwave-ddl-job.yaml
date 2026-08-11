@@ -36,10 +36,11 @@ spec:
               until pg_isready -h {{ .Values.risingwave.crName }}-frontend -p 4567 -U root; do
                 sleep 3
               done
-              echo "Substituting MSK credentials into DDL (no manual sed step — read from msk-credentials Secret env)..."
+              echo "Substituting MSK credentials + slot id into DDL (no manual sed step — creds from msk-credentials Secret env, deployment id from chart value)..."
               sed -e "s|__MSK_BOOTSTRAP__|${MSK_BOOTSTRAP_SERVERS}|g" \
                   -e "s|__MSK_USER__|${MSK_USERNAME}|g" \
                   -e "s|__MSK_PASS__|${MSK_PASSWORD}|g" \
+                  -e "s|__DEPLOYMENT_ID__|{{ .Values.deploymentId }}|g" \
                   /ddl/ddl-cloud.sql > /tmp/ddl-cloud.sql
               echo "Running DDL..."
               psql -h {{ .Values.risingwave.crName }}-frontend -p 4567 -U root -d dev -f /tmp/ddl-cloud.sql
