@@ -7,18 +7,29 @@
 #
 # Idempotent: if a destination in ENABLED state already exists for the VPC, it
 # reuses it and just re-writes the SSM parameter.
+#
+# The SSM value is only trusted after confirming the destination it points to
+# still actually exists and is ENABLED (see #202) — IoT topic rule destinations
+# can be deleted out-of-band (manual cleanup, account/VPC changes) without the
+# SSM parameter being cleared, in which case every rule referencing the stale
+# ARN silently drops every record with "Destination ... does not exist."
 
 set -euo pipefail
 
 SSM_PARAM="/workshop/platform/iot-vpc-dest-arn"
 
-# ── Short-circuit: if SSM already has a value, trust it and exit quickly ─────
-# This handles re-runs where the dest is still IN_PROGRESS but the ARN is known.
-# The topic rule will become functional once the dest eventually reaches ENABLED.
+# ── Trust the existing SSM value only if it still resolves to a real, ────────
+# ENABLED destination. Re-runs where the dest is still IN_PROGRESS are also
+# accepted here — the topic rule becomes functional once it reaches ENABLED.
 EXISTING_SSM=$(aws ssm get-parameter --name "$SSM_PARAM" --query "Parameter.Value" --output text 2>/dev/null || echo "None")
 if [[ "$EXISTING_SSM" != "None" && -n "$EXISTING_SSM" ]]; then
-  echo ">>> SSM $SSM_PARAM already set: $EXISTING_SSM. Skipping wait."
-  exit 0
+  EXISTING_SSM_STATUS=$(aws iot get-topic-rule-destination --arn "$EXISTING_SSM" \
+    --query "topicRuleDestination.status" --output text 2>/dev/null || echo "NOT_FOUND")
+  if [[ "$EXISTING_SSM_STATUS" == "ENABLED" || "$EXISTING_SSM_STATUS" == "IN_PROGRESS" ]]; then
+    echo ">>> SSM $SSM_PARAM already set and destination is $EXISTING_SSM_STATUS: $EXISTING_SSM. Skipping."
+    exit 0
+  fi
+  echo ">>> SSM $SSM_PARAM points to $EXISTING_SSM but destination status is '$EXISTING_SSM_STATUS' — treating as stale and recreating." >&2
 fi
 
 # ── Check for existing ENABLED or IN_PROGRESS destination ────────────────────
