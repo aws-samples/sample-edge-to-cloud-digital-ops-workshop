@@ -1,0 +1,100 @@
+name: Build Device Client
+
+# Builds the aws-iot-device-client binary on a Docker-capable GitHub runner and
+# publishes it as a GitHub Release asset, so environments WITHOUT Docker (e.g.
+# AgentCore Runtime sessions, where `@agentcore-claude` runs — no docker binary,
+# no daemon socket) can still obtain the binary that scripts/sandbox.sh needs.
+# See issue #173.
+#
+# WHY A GITHUB RELEASE (not S3):
+#   scripts/sandbox.sh resolves the shared S3 bucket from a CloudFormation export
+#   (workshop-platform-bucket-name) and needs live AWS creds to read it — exactly
+#   the creds a no-Docker/no-creds AgentCore session lacks. A public GitHub
+#   Release asset is fetchable over plain HTTPS with NO AWS credentials, so
+#   sandbox.sh's fetch path works in that environment. sandbox.sh still uploads
+#   the fetched binary to the shared S3 bucket for the EC2 devices to download —
+#   that upload uses the deploy's own creds and is unchanged.
+#
+# PROVENANCE: this workflow runs scripts/build-device-client.sh — the SAME
+# script sandbox.sh's Docker fallback calls — so the published binary is the
+# same pinned version (DEVICE_CLIENT_VERSION) with the same #166 keep-alive
+# patch. The release tag encodes that provenance (device-client-<ver>-<prov>),
+# which is exactly the tag sandbox.sh's fetch path downloads from.
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      # Rebuild+republish whenever the provenance (version pin / patch) or the
+      # build logic changes.
+      - scripts/build-device-client.sh
+      - .github/workflows/build-device-client.yml
+
+concurrency:
+  group: build-device-client
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # create/update the GitHub Release + upload the asset
+
+jobs:
+  build:
+    runs-on: ubuntu-latest   # Docker-capable; already linux/amd64 (matches edge EC2 arch)
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve provenance (version + patch tag)
+        id: prov
+        run: |
+          # Source the single source of truth to read the pinned version and the
+          # provenance-encoded release tag — no duplication of the version here.
+          # shellcheck disable=SC1091
+          source scripts/build-device-client.sh
+          {
+            echo "version=$DEVICE_CLIENT_VERSION"
+            echo "tag=$DEVICE_CLIENT_RELEASE_TAG"
+            echo "asset=$DEVICE_CLIENT_ASSET"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build aws-iot-device-client (Docker cross-compile)
+        run: |
+          mkdir -p dist
+          # Runs the SAME script sandbox.sh's Docker fallback uses → identical
+          # version pin + #166 keep-alive patch.
+          bash scripts/build-device-client.sh dist/aws-iot-device-client
+          file dist/aws-iot-device-client || true
+          chmod +x dist/aws-iot-device-client
+
+      - name: Publish binary to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.prov.outputs.tag }}"
+          # Idempotent: create the release if it does not exist, then upload
+          # (clobbering any prior asset of the same name for this provenance).
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "aws-iot-device-client ${{ steps.prov.outputs.version }} (${TAG})" \
+              --notes "Pre-built aws-iot-device-client ${{ steps.prov.outputs.version }} with the #166 MQTT keep-alive patch, produced by scripts/build-device-client.sh. Consumed by scripts/sandbox.sh's Docker-free fetch path (issue #173)." \
+              --latest=false
+          fi
+          gh release upload "$TAG" dist/aws-iot-device-client --clobber
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ '${{ job.status }}' = 'success' ]; then
+            {
+              echo "### Device client published"
+              echo ""
+              echo "- Version: \`${{ steps.prov.outputs.version }}\`"
+              echo "- Release tag: \`${{ steps.prov.outputs.tag }}\`"
+              echo "- Asset: \`${{ steps.prov.outputs.asset }}\`"
+              echo ""
+              echo "\`scripts/sandbox.sh\` will now fetch this without Docker."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "❌ Device client build/publish failed (status: ${{ job.status }})." >> "$GITHUB_STEP_SUMMARY"
+          fi
