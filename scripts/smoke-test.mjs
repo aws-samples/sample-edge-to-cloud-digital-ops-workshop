@@ -1,10 +1,9 @@
 #!/usr/bin/env node
-// Smoke tests: verify Amplify-deployed resources are reachable.
-// Run after `npx ampx sandbox` completes.
+// Smoke tests: verify a deployed slot's resources are reachable.
+// Run after `pnpm run sandbox <slot>` (or `sandbox:all`) completes.
 // Uses the AWS CLI so no extra SDK packages are required.
 
 import { execSync } from "child_process";
-import { existsSync } from "fs";
 
 const REGION = process.env.AWS_REGION ?? "us-east-1";
 const SLOT = process.env.WORKSHOP_TEST_SLOT ?? "ws-slot00";
@@ -36,18 +35,25 @@ function check(name, fn) {
 
 console.log(`\nSmoke tests for slot: ${SLOT} (region: ${REGION})\n`);
 
-// 1. amplify_outputs.json was generated
-check("amplify_outputs.json exists", () => {
-  if (!existsSync("amplify_outputs.json")) throw new Error("not found — run npx ampx sandbox first");
-});
-
-// 2. Cognito user pool exists (created by Amplify auth)
-check("Cognito user pool exists", () => {
+// 1. The slot's GraphQL endpoint SSM param was published by data-stack.ts.
+//    (Replaces the old amplify_outputs.json check — the nested-CDK model no
+//    longer generates that file; the per-slot SSM param is the source of truth
+//    the e2e doc-runner and frontend both read.)
+check(`GraphQL endpoint SSM param: /workshop/${SLOT}/graphql-endpoint`, () => {
   const out = execSync(
-    `aws cognito-idp list-user-pools --max-results 60 --region ${REGION} --query "UserPools[?contains(Name,'amplifyAuth')||contains(Name,'workshop')||contains(Name,'Amplify')].Name" --output text`,
+    `aws ssm get-parameter --name /workshop/${SLOT}/graphql-endpoint --region ${REGION} --query "Parameter.Value" --output text`,
     { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }
   ).trim();
-  if (!out) throw new Error("No Amplify auth user pool found");
+  if (!out || out === "None") throw new Error("param not set — was the slot deployed?");
+});
+
+// 2. Cognito user pool exists (created by auth-stack.ts — was Amplify auth).
+check(`Cognito user pool: workshop-${SLOT}`, () => {
+  const out = execSync(
+    `aws cognito-idp list-user-pools --max-results 60 --region ${REGION} --query "UserPools[?contains(Name,'workshop-${SLOT}')||contains(Name,'workshop')||contains(Name,'Amplify')].Name" --output text`,
+    { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }
+  ).trim();
+  if (!out) throw new Error("No workshop user pool found");
 });
 
 // 3. IoT provisioning template exists for the test slot

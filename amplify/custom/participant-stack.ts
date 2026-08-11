@@ -1,4 +1,4 @@
-import { Stack, StackProps, RemovalPolicy, Duration, CfnOutput, Fn, CustomResource } from "aws-cdk-lib";
+import { NestedStack, NestedStackProps, RemovalPolicy, Duration, CfnOutput, CustomResource, Fn } from "aws-cdk-lib";
 import {
   Vpc,
   CfnInstance,
@@ -54,9 +54,41 @@ import {
 } from "aws-cdk-lib/custom-resources";
 import { Construct } from "constructs";
 
-export interface ParticipantStackProps extends StackProps {
+export interface ParticipantStackProps extends NestedStackProps {
   deploymentId: string;
-  graphqlEndpoint: string; // CloudFormation export name — resolved via Fn.importValue
+
+  /**
+   * The slot's AppSync GraphQL endpoint URL. Passed directly from the sibling
+   * DataNestedStack (same parent app), so the participant stack no longer needs
+   * the old CFN export-name + `Fn.importValue` cross-env workaround. A nested
+   * stack cannot `Fn::ImportValue` an export created by its own still-in-progress
+   * parent, so all cross-stack values arrive as props (CDK wires them as nested
+   * CfnParameters) — see #181.
+   */
+  graphqlEndpoint: string;
+
+  /**
+   * Shared platform resource identifiers, passed in from the parent
+   * PlatformStack. Previously resolved via `Fn.importValue` on the platform
+   * stack's exports; as a nested stack of the platform stack those exports
+   * don't exist yet at create time, so the values are handed down as props
+   * (CDK turns cross-stack references into nested-stack parameters).
+   */
+  readonly shared: {
+    bucketName: string;
+    bucketArn: string;
+    mskClusterArn: string;
+    mskBootstrapScram: string;
+    mskScramKeyArn: string;
+    /**
+     * Edge VPC NAT gateway id — the platform stack's `edgeNatGateway.ref`,
+     * passed as a real intra-app reference so CDK orders the parent's NAT
+     * gateway before this nested stack's default route (previously this was an
+     * SSM lookup that could race the platform's own SSM write within a single
+     * combined deploy).
+     */
+    edgeNatGatewayId: string;
+  };
 
   /**
    * IAM principal ARNs (users, roles, or SSO permission sets) trusted to
@@ -91,29 +123,42 @@ export interface ParticipantStackProps extends StackProps {
  *    workshop-eks cluster, with a namespace-scoped EKS access entry attached
  *
  * Shared infrastructure (S3, MSK cluster, Firehose, Glue, Athena) lives in
- * WorkshopPlatformStack and is imported via Fn.importValue.
+ * WorkshopPlatformStack. As of #181 this is a `NestedStack` of the platform
+ * CDK app, so those shared values arrive as `props.shared.*` (parent→child
+ * CfnParameters) rather than via `Fn.importValue` — a nested stack cannot
+ * import an export its own still-in-progress parent creates.
  */
-export class ParticipantStack extends Stack {
+export class ParticipantStack extends NestedStack {
   readonly appSyncBridgeFn: LambdaFn;
 
   constructor(scope: Construct, id: string, props: ParticipantStackProps) {
     super(scope, id, props);
 
-    const { deploymentId, graphqlEndpoint } = props;
+    const { deploymentId, graphqlEndpoint, shared } = props;
+
+    // Shared platform resources, handed down as props from the parent
+    // PlatformStack (see #181). These were previously `Fn.importValue` on the
+    // platform stack's CFN exports; as a nested stack those exports don't exist
+    // yet at create time, so CDK wires the parent's live references in as nested
+    // CfnParameters.
+    const {
+      bucketName: sharedBucketName,
+      bucketArn: sharedBucketArn,
+      mskClusterArn,
+      mskBootstrapScram,
+      mskScramKeyArn,
+      edgeNatGatewayId,
+    } = shared;
 
     const edgeVpc = Vpc.fromLookup(this, "WorkshopEdgeVpc", { vpcName: "workshop-edge" });
 
-    // ── Import shared platform resources ─────────────────────────────────────
-    const sharedBucketName  = Fn.importValue("workshop-platform-bucket-name");
-    const sharedBucketArn   = Fn.importValue("workshop-platform-bucket-arn");
-    const mskClusterArn     = Fn.importValue("workshop-platform-msk-arn");
-    const mskBootstrapScram = Fn.importValue("workshop-platform-msk-bootstrap-scram");
-    const mskScramKeyArn    = Fn.importValue("workshop-platform-msk-scram-key-arn");
-
-    // IoT VPC destination ARN and edge NAT gateway ID are written to SSM by the
-    // sandbox scripts after the platform stack deploys (CfnTopicRuleDestination
-    // can't be confirmed within CloudFormation's stabilisation timeout; the NAT
-    // gateway may be owned by a different platform stack version).
+    // The IoT Kafka rule's VPC destination is created out-of-band (by
+    // scripts/create-iot-vpc-dest.sh / the orchestrator) after the shared MSK
+    // cluster's brokers are reachable — a CfnTopicRuleDestination can't be
+    // confirmed within CloudFormation's stabilisation timeout — and its ARN is
+    // published to SSM at `/workshop/platform/iot-vpc-dest-arn`. It is shared
+    // across all slots (only one VPC destination is allowed per VPC), so it is
+    // still resolved by an SSM lookup rather than passed as a per-slot prop.
     const iotVpcDestSsmLookup = new AwsCustomResource(this, "IotVpcDestSsmLookup", {
       onCreate: {
         service: "SSM",
@@ -134,26 +179,6 @@ export class ParticipantStack extends Stack {
       }),
     });
     const iotVpcDestArn = iotVpcDestSsmLookup.getResponseField("Parameter.Value");
-
-    const edgeNatGatewaySsmLookup = new AwsCustomResource(this, "EdgeNatGatewaySsmLookup", {
-      onCreate: {
-        service: "SSM",
-        action: "getParameter",
-        parameters: { Name: "/workshop/platform/edge-nat-gateway-id" },
-        physicalResourceId: PhysicalResourceId.of("EdgeNatGatewaySsmLookup"),
-        outputPaths: ["Parameter.Value"],
-      },
-      onUpdate: {
-        service: "SSM",
-        action: "getParameter",
-        parameters: { Name: "/workshop/platform/edge-nat-gateway-id" },
-        physicalResourceId: PhysicalResourceId.of("EdgeNatGatewaySsmLookup"),
-        outputPaths: ["Parameter.Value"],
-      },
-      policy: AwsCustomResourcePolicy.fromSdkCalls({
-        resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/workshop/platform/edge-nat-gateway-id`],
-      }),
-    });
 
     // ── IAM roles ────────────────────────────────────────────────────────────
     const ec2Role = new Role(this, "EdgeEc2Role", {
@@ -626,11 +651,10 @@ exports.handler = async (event) => {
       tags: [{ key: "Name", value: `workshop-edge-${deploymentId}-rtb` }],
     });
 
-    // The edge VPC NAT gateway is created once by the platform stack and its ID
-    // is published to SSM by the sandbox script. Read from SSM to decouple from
-    // whichever platform stack version created it.
-    const edgeNatGatewayId = edgeNatGatewaySsmLookup.getResponseField("Parameter.Value");
-
+    // The edge VPC NAT gateway is created once by the parent platform stack;
+    // its id (`props.shared.edgeNatGatewayId`) is passed down as a real
+    // intra-app reference so CDK orders the parent's NAT gateway ahead of this
+    // default route.
     new CfnRoute(this, "EdgeDefaultRoute", {
       routeTableId: edgeRtb.ref,
       destinationCidrBlock: "0.0.0.0/0",
@@ -993,7 +1017,9 @@ systemctl start sensor-sim
       role: appSyncBridgeRole,
       timeout: Duration.seconds(5),
       environment: {
-        APPSYNC_GRAPHQL_ENDPOINT: Fn.importValue(graphqlEndpoint),
+        // #181: the sibling DataNestedStack's GraphQL URL is passed straight in
+        // as a prop (was a CFN export name resolved via Fn.importValue).
+        APPSYNC_GRAPHQL_ENDPOINT: graphqlEndpoint,
         DEPLOYMENT_ID: deploymentId,
         REGION: this.region,
       },

@@ -37,36 +37,22 @@ if [ -z "$PASSWORD" ]; then
 fi
 
 # Slug used in Amplify sandbox stack names: ws-slot11 → wsslot11
-DEPLOYMENT_SLUG="${DEPLOYMENT_ID//-/}"
+# Discover the Cognito User Pool ID. Primary source is the SSM parameter that
+# auth-stack.ts publishes for the slot (epic #181 — the slot's auth resources are
+# now a plain-CDK AuthNestedStack, not an Amplify sandbox backend).
+USER_POOL_ID=$(aws ssm get-parameter --name "/workshop/${DEPLOYMENT_ID}/user-pool-id" \
+  --query "Parameter.Value" --output text 2>/dev/null || true)
 
-# Discover the Cognito User Pool ID from the root Amplify sandbox stack.
-# The root stack name matches the pattern: amplify-edgedigitalopsworkshop-{slug}-sandbox-{10-hex-hash}
-# Sub-stacks append further suffixes (-dataXXX, -authXXX, etc.) so we match the root exactly.
-ROOT_STACK=$(aws cloudformation list-stacks \
-  --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
-  --query "StackSummaries[?contains(StackName,'amplify-edgedigitalopsworkshop-${DEPLOYMENT_SLUG}-sandbox')].StackName" \
-  --output text 2>/dev/null \
-  | tr '\t' '\n' \
-  | grep -E "^amplify-edgedigitalopsworkshop-${DEPLOYMENT_SLUG}-sandbox-[0-9a-f]{10}$" \
-  | head -1 || true)
-
-USER_POOL_ID=""
-if [ -n "$ROOT_STACK" ]; then
-  USER_POOL_ID=$(aws cloudformation describe-stacks \
-    --stack-name "$ROOT_STACK" \
-    --query "Stacks[0].Outputs[?OutputKey=='userPoolId'].OutputValue | [0]" \
-    --output text 2>/dev/null || true)
-fi
-
-# Fall back: search Cognito directly by pool name containing the slug.
+# Fall back: search Cognito directly by the pool name auth-stack.ts assigns,
+# `workshop-<deployment-id>` (e.g. workshop-ws-slot00).
 if [ -z "$USER_POOL_ID" ] || [ "$USER_POOL_ID" = "None" ]; then
   USER_POOL_ID=$(aws cognito-idp list-user-pools --max-results 60 \
-    --query "UserPools[?contains(Name,'${DEPLOYMENT_SLUG}')].Id | [0]" --output text 2>/dev/null || true)
+    --query "UserPools[?Name=='workshop-${DEPLOYMENT_ID}'].Id | [0]" --output text 2>/dev/null || true)
 fi
 
 if [ -z "$USER_POOL_ID" ] || [ "$USER_POOL_ID" = "None" ]; then
   echo "ERROR: Could not locate the Cognito User Pool for ${DEPLOYMENT_ID}."
-  echo "  Run 'npx ampx sandbox --identifier ${DEPLOYMENT_ID}' first, then try again."
+  echo "  Deploy the slot first ('pnpm run sandbox ${DEPLOYMENT_ID}'), then try again."
   exit 1
 fi
 
