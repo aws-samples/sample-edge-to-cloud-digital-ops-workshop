@@ -395,8 +395,9 @@ Next.js Route Handler
   │  pg connection: LISTEN sensor_readings_change
   │  on NOTIFY → re-run freshness query → push as SSE event
   ▼
-TimescaleDB (trigger: notify_sensor_reading() → pg_notify, on every INSERT
-             into sensor_readings — see k8s/timescaledb-cloud-cluster.yaml)
+TimescaleDB (trigger: notify_sensor_reading() → pg_notify, once per INSERT
+             *statement* into sensor_readings, not per row — see
+             k8s/timescaledb-cloud-cluster.yaml)
 ```
 
 RisingWave's native subscription cursor and Postgres's `LISTEN`/`NOTIFY` are both wire-protocol primitives — neither needs an external broker. The browser can't hold a persistent pg connection itself, so each route keeps one open server-side and relays over SSE.
