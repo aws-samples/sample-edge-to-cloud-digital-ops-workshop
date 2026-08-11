@@ -1,0 +1,68 @@
+{{- if .Values.timescaledb.enabled }}
+# Post-install/post-upgrade Job that (re-)applies the sensor_readings_notify
+# function + trigger against an already-provisioned TimescaleDB cluster.
+#
+# #210: `postInitApplicationSQL` in timescaledb-cluster.yaml only runs once,
+# at initdb — a slot that bootstrapped before this fix keeps its old
+# FOR EACH ROW trigger forever unless something re-applies the new
+# definition on every upgrade. Mirrors the DROP+recreate pattern in
+# helm/cloud-analytics/templates/risingwave-ddl-job.yaml (#207): the SQL
+# below is CREATE OR REPLACE + DROP TRIGGER IF EXISTS + CREATE, so re-running
+# it against a slot that already has the trigger is a no-op if unchanged and
+# a real update if the definition changed.
+#
+# Runs after timescaledb-dsn-secret.yaml (hook-weight 15-20) so the
+# timescaledb-credentials Secret (TIMESCALE_DSN) it reads via envFrom already
+# exists.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "cloud-analytics.fullname" . }}-tsdb-notify-ddl
+  labels:
+    {{- include "cloud-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: timescaledb-notify-ddl
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/hook-weight": "25"
+spec:
+  backoffLimit: 5
+  template:
+    metadata:
+      labels:
+        {{- include "cloud-analytics.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: timescaledb-notify-ddl
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: ddl
+          image: postgres:16-alpine
+          envFrom:
+            - secretRef:
+                name: timescaledb-credentials
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              echo "Waiting for TimescaleDB to accept connections..."
+              until psql "$TIMESCALE_DSN" -c 'SELECT 1' >/dev/null 2>&1; do
+                sleep 3
+              done
+              echo "Re-applying sensor_readings_notify function + trigger (statement-level, #210)..."
+              psql "$TIMESCALE_DSN" <<'SQL'
+              CREATE OR REPLACE FUNCTION notify_sensor_reading() RETURNS trigger AS $notify$
+              BEGIN
+                PERFORM pg_notify('sensor_readings_change', 'batch');
+                RETURN NULL;
+              END;
+              $notify$ LANGUAGE plpgsql;
+
+              DROP TRIGGER IF EXISTS sensor_readings_notify ON sensor_readings;
+
+              CREATE TRIGGER sensor_readings_notify
+                AFTER INSERT ON sensor_readings
+                FOR EACH STATEMENT EXECUTE FUNCTION notify_sensor_reading();
+              SQL
+              echo "DDL complete."
+{{- end }}
