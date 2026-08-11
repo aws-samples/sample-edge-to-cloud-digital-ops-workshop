@@ -130,104 +130,57 @@ if [[ "$EXISTING_NAT_STATE" != "available" ]]; then
 fi
 echo ">>> SSM $EDGE_NAT_SSM points at live NAT gateway $EXISTING_NAT_SSM."
 
-# ── Build IoT Device Client binary and stage to S3 ──────────────────────────
-# Uses the official GHCR build image so EC2 user data only needs a fast S3 download.
-# The binary is cached locally after the first build; subsequent runs skip the build step.
-# Cache key suffix bumped for #166 (MQTT keep-alive patch) so a pre-existing
-# cached binary from before this fix is never reused silently.
-LOCAL_BINARY_CACHE="$HOME/.cache/workshop/aws-iot-device-client-keepalive-v1"
+# ── Obtain IoT Device Client binary and stage to S3 ─────────────────────────
+# EC2 user data only needs a fast S3 download, so the binary is staged to the
+# shared S3 bucket. It is cached locally after the first acquire; subsequent
+# runs skip both fetch and build.
+#
+# TWO acquisition paths (issue #173). Docker is NOT available everywhere this
+# script runs (e.g. AgentCore Runtime sessions have no docker binary or daemon),
+# so we PREFER a pre-built artifact and only fall back to the local Docker
+# compile:
+#   1. fetch  — download the binary CI published to a GitHub Release
+#               (build-device-client.yml). No Docker, no AWS creds needed.
+#   2. build  — the original cross-compile inside amazonlinux:2023 (Docker).
+# If neither is possible, fail with an actionable message pointing at the
+# workflow. The version pin + #166 keep-alive patch (provenance) and both
+# acquisition functions live in scripts/build-device-client.sh so the two paths
+# can never drift.
+# shellcheck source=scripts/build-device-client.sh
+source "$(dirname "$0")/build-device-client.sh"
+# Cache key encodes the provenance so a pre-existing cached binary from before
+# a version/patch bump is never reused silently.
+LOCAL_BINARY_CACHE="$HOME/.cache/workshop/aws-iot-device-client-${DEVICE_CLIENT_PROVENANCE}"
 # Resolve the bucket name from the CloudFormation export — avoids hardcoding.
 S3_BUCKET=$(aws cloudformation list-exports \
   --query "Exports[?Name=='workshop-platform-bucket-name'].Value" \
   --output text)
 
 if [[ ! -f "$LOCAL_BINARY_CACHE" ]]; then
-  echo ">>> Building AWS IoT Device Client using ECR Public amazonlinux image (one-time, ~8 min)…"
-  DC_SRC=$(mktemp -d)
-  git clone --depth 1 --branch v1.10.1 \
-    https://github.com/awslabs/aws-iot-device-client "$DC_SRC"
-  # #166: v1.10.1 never opts its MQTT socket into SO_KEEPALIVE (no call to
-  # WithTcpKeepAlive() anywhere in SharedCrtResourceManager.cpp, confirmed by
-  # reading the pinned tag's source), and Connect() is called with
-  # keepAliveTimeSecs=0, which falls back to the aws-c-mqtt SDK's hardcoded
-  # 1200s default (source/client.c: s_default_keep_alive_sec). Kernel TCP
-  # keepalive (the sysctl tuning in participant-stack.ts) only fires on
-  # sockets that have opted in via SO_KEEPALIVE, so it is inert against this
-  # socket without this patch. There is also no config-schema field to
-  # express this without a source change (PlainConfig has no keep-alive key).
-  # Patch: opt the MQTT socket into TCP keepalive so the OS-level sysctl
-  # values actually apply to it, and lower the MQTT PINGREQ interval itself
-  # below the 350s NAT idle timeout so protocol-level traffic keeps the flow
-  # warm even if TCP keepalive is ever disabled at the OS layer.
-  KEEPALIVE_PATCH_MARKER='clientConfigBuilder.WithSdkVersion(DEVICE_CLIENT_VERSION);'
-  CONNECT_PATCH_MARKER='connection->Connect(config.thingName->c_str(), false)'
-  grep -qF "$KEEPALIVE_PATCH_MARKER" "$DC_SRC/source/SharedCrtResourceManager.cpp" || {
-    echo "ERROR: #166 keep-alive patch anchor not found in SharedCrtResourceManager.cpp — upstream source has changed, update the patch." >&2
+  # 1. Try the pre-built artifact first (the Docker-free path).
+  echo ">>> Fetching pre-built IoT Device Client from GitHub Release ${DEVICE_CLIENT_RELEASE_TAG}…"
+  if fetch_prebuilt_device_client "$LOCAL_BINARY_CACHE"; then
+    echo ">>> Fetched pre-built binary → $LOCAL_BINARY_CACHE"
+  # 2. Fall back to the local Docker compile only if Docker is available.
+  elif command -v docker >/dev/null 2>&1; then
+    echo ">>> No pre-built artifact available — building with Docker (ECR Public amazonlinux, one-time, ~8 min)…"
+    build_device_client_binary "$LOCAL_BINARY_CACHE"
+    echo ">>> Binary built and cached at $LOCAL_BINARY_CACHE"
+  # 3. Neither path is possible — fail with an actionable message.
+  else
+    echo "ERROR: could not obtain the aws-iot-device-client binary." >&2
+    echo "  • No pre-built artifact was found at GitHub Release '${DEVICE_CLIENT_RELEASE_TAG}'" >&2
+    echo "    (repo ${DEVICE_CLIENT_REPO})." >&2
+    echo "  • Docker is not available on this host, so the local cross-compile" >&2
+    echo "    fallback cannot run either." >&2
+    echo "" >&2
+    echo "  Fix: publish the artifact by running the 'Build Device Client'" >&2
+    echo "  GitHub Actions workflow (.github/workflows/build-device-client.yml)" >&2
+    echo "  — e.g. 'gh workflow run build-device-client.yml' — then re-run this" >&2
+    echo "  script. On a Docker-capable host you can instead just install Docker" >&2
+    echo "  and re-run to build locally." >&2
     exit 1
-  }
-  grep -qF "$CONNECT_PATCH_MARKER" "$DC_SRC/source/SharedCrtResourceManager.cpp" || {
-    echo "ERROR: #166 keep-alive patch Connect() anchor not found in SharedCrtResourceManager.cpp — upstream source has changed, update the patch." >&2
-    exit 1
-  }
-  # Use perl (not `sed -i`) for portability: BSD/macOS sed requires an explicit
-  # backup-suffix arg after -i and does not expand `\n` in the replacement, so a
-  # GNU-style `sed -i "s|...|...\n...|"` fails on a Mac host with
-  # "invalid command code". perl -i -pe behaves identically on macOS and Linux.
-  # \Q..\E matches the anchors as literal strings (the ()/./-> chars are not
-  # treated as regex); the markers are passed via env to avoid quoting issues.
-  KP="$KEEPALIVE_PATCH_MARKER" perl -i -pe \
-    's/\Q$ENV{KP}\E/$ENV{KP}\n    clientConfigBuilder.WithTcpKeepAlive();/' \
-    "$DC_SRC/source/SharedCrtResourceManager.cpp"
-  CP="$CONNECT_PATCH_MARKER" perl -i -pe \
-    's/\Q$ENV{CP}\E/connection->Connect(config.thingName->c_str(), false, 180, 10000)/' \
-    "$DC_SRC/source/SharedCrtResourceManager.cpp"
-  # Drop the unit-test subdirectory from the build. v1.10.1's top-level
-  # CMakeLists.txt calls `add_subdirectory(test)` unconditionally, and
-  # test/CMakeLists.txt then requires gtest — either via a configure-time
-  # `git clone` of googletest (BUILD_TEST_DEPS=ON, which fails intermittently
-  # with "Could not resolve host", especially under amd64 emulation) or via
-  # `find_package(GTest REQUIRED)` (BUILD_TEST_DEPS=OFF, which errors when gtest
-  # isn't installed). We only ship the production binary, so remove the test
-  # dir entirely — no gtest needed by any path, and one less flaky network step.
-  TEST_SUBDIR_MARKER='add_subdirectory(test)'
-  grep -qF "$TEST_SUBDIR_MARKER" "$DC_SRC/CMakeLists.txt" || {
-    echo "ERROR: 'add_subdirectory(test)' not found in CMakeLists.txt — upstream layout changed, update the patch." >&2
-    exit 1
-  }
-  TS="$TEST_SUBDIR_MARKER" perl -i -pe \
-    's/^(\s*)(\Q$ENV{TS}\E)/$1# $2  # removed: production build needs no gtest/' \
-    "$DC_SRC/CMakeLists.txt"
-  # Use public.ecr.aws/amazonlinux/amazonlinux instead of the GHCR build image.
-  # Run cmake install + build steps directly inside the container.
-  # AL2023 (OpenSSL 3.x) is required — IoT Device Client v1.10.1 needs OpenSSL >= 1.1,
-  # but AL2 ships 1.0.2k. Explicit OPENSSL_*_LIBRARY paths work around cmake's
-  # FindOpenSSL module failing to locate libcrypto/libssl on this image.
-  # Pin --platform linux/amd64: the edge EC2 instances are x86_64, but on an
-  # Apple Silicon host Docker would otherwise build a linux/arm64 binary that
-  # dies on the device with "Exec format error" (status=203/EXEC). Emulated
-  # amd64 build is slower but produces the correct arch. (CI's ubuntu-latest is
-  # already amd64, so this is a no-op there.)
-  docker run --rm --platform linux/amd64 \
-    -v "$DC_SRC:/root/aws-iot-device-client" \
-    public.ecr.aws/amazonlinux/amazonlinux:2023 \
-    bash -c "
-      dnf install -y cmake gcc gcc-c++ openssl-devel \
-        libcurl-devel git make zip unzip tar && \
-      cd /root/aws-iot-device-client && \
-      cmake -B build -DCMAKE_BUILD_TYPE=Release \
-        -DBUILD_TEST_DEPS=OFF \
-        -DEXCLUDE_JOBS=OFF -DEXCLUDE_NAMED_SHADOW=OFF \
-        -DEXCLUDE_TUNNELING=ON -DEXCLUDE_DEVICE_DEFENDER=ON \
-        -DEXCLUDE_FLEET_PROVISIONING=OFF \
-        -DOPENSSL_CRYPTO_LIBRARY=/usr/lib64/libcrypto.so \
-        -DOPENSSL_SSL_LIBRARY=/usr/lib64/libssl.so && \
-      cmake --build build --target aws-iot-device-client -j\$(nproc) && \
-      chmod -R a+rwX /root/aws-iot-device-client 2>/dev/null || true
-    "
-  mkdir -p "$(dirname "$LOCAL_BINARY_CACHE")"
-  cp "$DC_SRC/build/aws-iot-device-client" "$LOCAL_BINARY_CACHE"
-  rm -rf "$DC_SRC"
-  echo ">>> Binary cached at $LOCAL_BINARY_CACHE"
+  fi
 else
   echo ">>> Using cached IoT Device Client binary."
 fi
