@@ -6,9 +6,12 @@ metadata:
     {{- include "cloud-analytics.labels" . | nindent 4 }}
     app.kubernetes.io/component: risingwave-ddl
   annotations:
-    # Run after all resources are installed; delete on next upgrade so the
-    # DDL (all CREATE ... IF NOT EXISTS) safely re-applies on every upgrade —
-    # mirrors helm/edge-stack/templates/risingwave-ddl-job.yaml.
+    # Run after all resources are installed; delete on next upgrade so the DDL
+    # re-applies on every upgrade — mirrors helm/edge-stack/templates/risingwave-ddl-job.yaml.
+    # risingwave/ddl-cloud.sql itself (#207) explicitly DROPs every source,
+    # view, MV, and subscription it defines before recreating them, so a
+    # changed definition actually reaches an already-provisioned slot instead
+    # of silently no-op'ing on CREATE ... IF NOT EXISTS.
     "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-delete-policy": before-hook-creation
     "helm.sh/hook-weight": "10"

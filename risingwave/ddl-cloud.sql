@@ -8,6 +8,18 @@
 -- from `.Values.deploymentId`, substitutes them itself, then pipes the result
 -- through psql. No manual sed/psql step (see #159).
 --
+-- #207: `CREATE ... IF NOT EXISTS` alone only guards against a re-run erroring
+-- on an already-existing NAME — it does NOT re-apply a changed DEFINITION, so
+-- on a slot where these objects were already created by an earlier version of
+-- this file, a `helm upgrade` carrying updated SQL silently no-ops forever.
+-- Confirmed live on ws-slot90: `sensors_raw_telemetry` still had its pre-#195
+-- column list (no `deployment_id`) and `mv_sensor_fleet_latest` still read
+-- straight off the unscoped sources, despite both having been fixed on `main`
+-- for hours. Every object below is now DROPped (reverse dependency order)
+-- immediately before being recreated, so a definition/schema change here
+-- always reaches an already-provisioned slot on its next upgrade, not just a
+-- fresh one.
+--
 -- To re-apply by hand for debugging, port-forward the frontend service and
 -- substitute the same placeholders yourself:
 --   kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567
@@ -31,6 +43,27 @@
 --   restart — the exact startup-backfill memory spike that caused the compute
 --   OOM fixed in PR #191. The slot filter, not a startup-mode change, is the fix
 --   for cross-slot contamination.
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- #207: drop every object this file (re)creates, in reverse dependency order,
+-- before recreating any of them below.
+--
+-- The pg_sleep after DROP SUBSCRIPTION is load-bearing, confirmed live: a
+-- subscription's teardown (its underlying streaming job) is asynchronous —
+-- DROP SUBSCRIPTION returns success immediately, but a subsequent DROP
+-- MATERIALIZED VIEW on the relation it read from can still fail with "table
+-- used by 1 other objects" for a few seconds afterward, until that teardown
+-- actually completes. Nothing else here tears down a streaming job on drop,
+-- so no further delay is needed.
+-- ─────────────────────────────────────────────────────────────────────────────
+DROP SUBSCRIPTION IF EXISTS dashboard_freshness_sub;
+SELECT pg_sleep(5);
+DROP MATERIALIZED VIEW IF EXISTS mv_fleet_1min_avg;
+DROP MATERIALIZED VIEW IF EXISTS mv_sensor_fleet_latest;
+DROP VIEW IF EXISTS telemetry_this_slot;
+DROP VIEW IF EXISTS sim_this_slot;
+DROP SOURCE IF EXISTS sensors_raw_telemetry;
+DROP SOURCE IF EXISTS sensors_raw_cloud;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Source: raw sensor telemetry from MSK (sim site — normalised sensor schema)
