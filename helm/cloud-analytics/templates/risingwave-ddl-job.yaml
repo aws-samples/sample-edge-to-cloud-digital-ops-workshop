@@ -8,9 +8,10 @@ metadata:
   annotations:
     # Run after all resources are installed; delete on next upgrade so the DDL
     # re-applies on every upgrade — mirrors helm/edge-stack/templates/risingwave-ddl-job.yaml.
-    # Sources use CREATE ... IF NOT EXISTS (stable schema); views/MVs/subscription
-    # are explicitly DROPped and recreated in risingwave/ddl-cloud.sql itself
-    # (#207) so a changed definition actually reaches an already-provisioned slot.
+    # risingwave/ddl-cloud.sql itself (#207) explicitly DROPs every source,
+    # view, MV, and subscription it defines before recreating them, so a
+    # changed definition actually reaches an already-provisioned slot instead
+    # of silently no-op'ing on CREATE ... IF NOT EXISTS.
     "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-delete-policy": before-hook-creation
     "helm.sh/hook-weight": "10"
