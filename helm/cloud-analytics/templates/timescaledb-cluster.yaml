@@ -90,4 +90,23 @@ spec:
 
   resources:
     {{- toYaml .Values.timescaledb.resources | nindent 4 }}
+---
+# A second database on the same CNPG cluster, dedicated to RisingWave's
+# metaStore (see risingwave-cr.yaml) — keeps RisingWave's catalog/cluster_id
+# out of the "edge" application database while reusing the same Postgres
+# instance and the "workshop" role/credentials CNPG already manages, instead
+# of standing up a separate CNPG Cluster just for meta.
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: {{ .Values.timescaledb.crName }}-risingwave-meta
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloud-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: risingwave
+spec:
+  name: risingwave_meta
+  owner: workshop
+  cluster:
+    name: {{ .Values.timescaledb.crName }}
 {{- end }}

@@ -17,9 +17,22 @@ spec:
       credentials:
         useServiceAccount: true
 
-  # ── Meta store: in-memory (sufficient for workshop; resets on pod restart)
+  # ── Meta store: PostgreSQL, on the same CNPG-managed cluster that backs
+  # TimescaleDB, in its own "risingwave_meta" database (created below via a
+  # CNPG Database CR). In-memory meta (the operator's default) does not
+  # survive a pod restart, but the S3 state bucket does — every meta restart
+  # then mints a fresh cluster_id while S3 still holds the previous one's
+  # hummock/cluster_id/0 marker, and meta refuses to start
+  # ("Data directory is already used by another cluster with id..."). A
+  # durable meta store keeps cluster_id (and all other catalog metadata)
+  # persisted alongside the S3 state it describes, so the two never diverge.
   metaStore:
-    memory: true
+    postgresql:
+      host: {{ printf "%s-rw.%s.svc" .Values.timescaledb.crName .Release.Namespace }}
+      port: 5432
+      database: risingwave_meta
+      credentials:
+        secretName: {{ printf "%s-app" .Values.timescaledb.crName }}
 
   # ── Component node groups — v2 schema: resources/envFrom at template.spec level
   components:
