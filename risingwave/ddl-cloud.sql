@@ -8,6 +8,14 @@
 -- from `.Values.deploymentId`, substitutes them itself, then pipes the result
 -- through psql. No manual sed/psql step (see #159).
 --
+-- #207: `CREATE ... IF NOT EXISTS` alone only guards against a re-run erroring
+-- on an already-existing NAME — it does NOT re-apply a changed DEFINITION, so
+-- on a slot where these objects were already created by an earlier version of
+-- this file, a `helm upgrade` carrying updated SQL silently no-ops forever.
+-- The views/MVs/subscription below are DROPped (reverse dependency order)
+-- immediately before being recreated so schema/logic changes here actually
+-- reach already-provisioned slots on the next upgrade, not just fresh ones.
+--
 -- To re-apply by hand for debugging, port-forward the frontend service and
 -- substitute the same placeholders yourself:
 --   kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567
@@ -79,6 +87,19 @@ WITH (
     scan.startup.mode                = 'latest'
 )
 FORMAT PLAIN ENCODE JSON;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- #207: drop the mutable downstream objects (reverse dependency order) before
+-- recreating them below, so an updated definition actually takes effect on a
+-- slot that already has them from an earlier version of this file. The two
+-- sources above are left alone (CREATE ... IF NOT EXISTS) — their schema is
+-- stable and nothing downstream needs them dropped first.
+-- ─────────────────────────────────────────────────────────────────────────────
+DROP SUBSCRIPTION IF EXISTS dashboard_freshness_sub;
+DROP MATERIALIZED VIEW IF EXISTS mv_fleet_1min_avg;
+DROP MATERIALIZED VIEW IF EXISTS mv_sensor_fleet_latest;
+DROP VIEW IF EXISTS telemetry_this_slot;
+DROP VIEW IF EXISTS sim_this_slot;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Slot-scoping views (#195). The two sources above read SHARED topics that carry
