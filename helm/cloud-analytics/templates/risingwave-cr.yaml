@@ -107,6 +107,17 @@ spec:
                             risingwave/name: {{ .Values.risingwave.crName }}
                             risingwave/component: meta
               {{- end }}
+              {{- if .Values.risingwave.compute.dedicatedNodePool.enabled }}
+              # Pin RW compute to the dedicated, non-burstable node group
+              # (amplify/custom/platform-stack.ts) so its checkpoint-barrier
+              # commit path is never CPU-starved by co-located pods — the root
+              # cause of both the ~10s freshness lag and the now()/MV-epoch
+              # clock skew (#206, #211).
+              nodeSelector:
+                {{- toYaml .Values.risingwave.compute.dedicatedNodePool.nodeSelector | nindent 16 }}
+              tolerations:
+                {{- toYaml .Values.risingwave.compute.dedicatedNodePool.tolerations | nindent 16 }}
+              {{- end }}
               envFrom:
                 - secretRef:
                     name: msk-credentials

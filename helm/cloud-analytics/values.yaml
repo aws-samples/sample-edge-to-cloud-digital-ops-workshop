@@ -81,6 +81,27 @@ risingwave:
   serviceAccountRoleArn: ""
   stateBucketRegion: us-east-1
 
+  # ── Dedicated RW-compute node pool (#211) ───────────────────────────────────
+  # RisingWave's checkpoint-barrier/watermark commit path was CPU-starved
+  # whenever compute shared a burstable t3.medium with other pods (CFS
+  # throttling observed 10-29% of periods) — that starvation dragged RW's
+  # internal now()/MV-epoch clock behind wall-clock (#206), which *is* the
+  # freshness number. amplify/custom/platform-stack.ts provisions a dedicated,
+  # non-burstable r6i.xlarge node group (label workload=risingwave-compute,
+  # taint dedicated=risingwave-compute:NoSchedule) precisely so compute is
+  # never CPU-starved again. Disable only when deploying against a cluster
+  # that lacks that node group (e.g. local/minikube smoke-testing this chart).
+  compute:
+    dedicatedNodePool:
+      enabled: true
+      nodeSelector:
+        workload: risingwave-compute
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: risingwave-compute
+          effect: NoSchedule
+
   # Checkpoint barrier interval (ms). RisingWave commits a checkpoint to the meta
   # store every barrier; too tight an interval saturates the commit path on a
   # small (1-vCPU) node, so the committed epoch — and therefore MV freshness —
@@ -88,6 +109,7 @@ risingwave:
   # RisingWave default; do not lower without profiling the commit path.
   barrierIntervalMs: 1000
 
+  # --8<-- [start:compute-sizing]
   # Memory budget RisingWave sizes its own heap/caches to, in bytes. The operator
   # otherwise defaults RW_TOTAL_MEMORY_BYTES to the *entire* container memory
   # limit, leaving nothing for jemalloc overhead, thread stacks and the Hummock
@@ -98,9 +120,13 @@ risingwave:
   # comfortably below resources.compute.limits.memory so both steady-state AND
   # the transient burst during startup source-backfill (RisingWave replays the
   # whole sensors.raw.sim topic and flushes SSTs) stay under the cgroup limit.
-  # 1.5Gi reserved under a 3Gi limit leaves ~50% headroom for that backfill spike
-  # on the workshop's t3.medium nodes (~3.4Gi allocatable).
-  computeTotalMemoryBytes: "1610612736"  # 1.5 GiB, well under the 3Gi limit below
+  #
+  # Sized for the dedicated r6i.xlarge node group (#211, compute.dedicatedNodePool
+  # above) rather than a shared t3.medium: 16 GiB reserved under a 24 GiB limit —
+  # the values proven live on ws-slot90 — gives RisingWave a much larger Hummock
+  # block cache (fewer S3 round-trips per query) while still leaving ~8 GiB of
+  # headroom under the limit for the startup-backfill spike.
+  computeTotalMemoryBytes: "17179869184"  # 16 GiB, well under the 24Gi limit below
 
   resources:
     meta:
@@ -110,15 +136,20 @@ risingwave:
       requests: { cpu: 100m, memory: 512Mi }
       limits: { cpu: 500m, memory: 1Gi }
     compute:
-      # request stays at 1Gi so the pod schedules on a ~3.4Gi t3.medium already
-      # sharing the node with timescaledb; the 3Gi limit is burst headroom (limits
-      # may oversubscribe the node, only requests must fit) to absorb the
-      # startup-backfill spike without a cgroup OOM kill.
-      requests: { cpu: 500m, memory: 1Gi }
-      limits: { cpu: 1000m, memory: 3Gi }
+      # Request sized so one slot's compute pod comfortably fits a single
+      # r6i.xlarge (4 vCPU/32 GiB, ~3.9 vCPU/~31 GiB allocatable) in the
+      # dedicated node group — non-burstable, so unlike the old t3.medium there
+      # is no CPU-credit exhaustion once requests are set closer to the node's
+      # real capacity. The 24Gi/3500m limit is burst headroom (limits may
+      # oversubscribe the node; only requests must fit) for the startup-backfill
+      # spike and Hummock block cache, without a second slot's compute pod
+      # being schedulable on the same node (forcing the node group to scale out).
+      requests: { cpu: 2000m, memory: 4Gi }
+      limits: { cpu: 3500m, memory: 24Gi }
     compactor:
       requests: { cpu: 100m, memory: 512Mi }
       limits: { cpu: 500m, memory: 1Gi }
+  # --8<-- [end:compute-sizing]
 
 # ──────────────────────────────────────────────────────────────────────────────
 # TimescaleDB (via the cluster-scoped CNPG operator)
