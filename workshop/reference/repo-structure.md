@@ -99,31 +99,38 @@ ECR — it does not build from source.
 The dashboard lifecycle, end to end:
 
 ```bash
-# 1. Build the image from cloud-dashboard/ and push it to ECR.
-#    Default tag is `latest`, and that tag is SHARED BY EVERY SLOT.
-scripts/build-cloud-dashboard.sh
-
-# 2. Roll the running Deployment so it pulls the new image.
-#    deploy-cloud-analytics.sh runs `helm upgrade` with the dashboard image set.
-scripts/deploy-cloud-analytics.sh ws-slot00
+# deploy-cloud-analytics.sh rebuilds + pushes the image under the current
+# commit's short SHA (an immutable tag), then runs `helm upgrade` pointing the
+# Deployment at that exact tag — so a redeploy always serves current code.
+scripts/deploy-cloud-analytics.sh --deployment-id ws-slot00
 ```
 
-**The shared-`latest` trap.** Because `workshop-cloud-dashboard:latest` is one tag
-shared across all slots, pushing it and rolling every slot ships your change to
-*everyone* — including uncommitted, unreviewed work. To test a change on **one**
-slot without touching the others, build a scoped tag and set it on just that slot's
-Deployment:
+**Immutable SHA tags (fix for #197).** The dashboard image is tagged by the
+current commit's short SHA, **not** the floating `:latest`. This is deliberate:
+`:latest` with `imagePullPolicy: IfNotPresent` meant a redeploy against an
+existing slot kept serving whatever image the node first pulled — a stale image
+could silently outlive the code by days (the Query Latency chart from #187 was
+missing from live slots for exactly this reason). Because each code change gets a
+distinct tag, `helm upgrade` references a never-before-seen image and Kubernetes
+is forced to pull it; `IfNotPresent` stays correct (a new SHA is never already
+present) and cheap (an unchanged SHA is cached). It also sidesteps the old
+shared-`:latest` cross-slot trap, where one tag shared across all slots meant
+pushing it shipped your change — including uncommitted, unreviewed work — to
+*everyone*.
+
+`deploy-cloud-analytics.sh` builds+pushes the SHA tag itself by default. To skip
+the rebuild (reuse an already-pushed SHA), pass `--skip-dashboard-build`; to pin
+an explicit image (e.g. a preview build), pass `--dashboard-image <repo:tag>`.
+To test a change on **one** slot without touching the others, build a scoped tag
+and point just that slot's Deployment at it:
 
 ```bash
-# Build + push under a throwaway tag (never `latest`).
+# Build + push under a scoped preview tag, then deploy that slot with it.
 scripts/build-cloud-dashboard.sh --tag slot00-preview-$(git rev-parse --short HEAD)
-
-# Point ONLY this slot's dashboard at it. Container name is `dashboard`.
-kubectl set image deployment/cloud-analytics-dashboard \
-  dashboard=<account>.dkr.ecr.<region>.amazonaws.com/workshop-cloud-dashboard:slot00-preview-<sha>
+scripts/deploy-cloud-analytics.sh --deployment-id ws-slot00 \
+  --dashboard-image <account>.dkr.ecr.<region>.amazonaws.com/workshop-cloud-dashboard:slot00-preview-<sha>
 ```
 
-Once the change is reviewed and merged, rebuild+push `latest` and roll the slots
-normally so the shared tag and the code agree again. The HMI follows the same
-pattern via `scripts/build-hmi.sh` (which side-loads the image onto the edge K3s
-nodes rather than pushing to ECR, since the edge cluster is private).
+The HMI follows the same build pattern via `scripts/build-hmi.sh` (which
+side-loads the image onto the edge K3s nodes rather than pushing to ECR, since
+the edge cluster is private).
