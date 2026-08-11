@@ -275,6 +275,60 @@ export class PlatformStack extends Stack {
     });
     eksNodegroup.addDependency(eksCluster);
 
+    // ── Dedicated RisingWave-compute node group (#211) ──────────────────────
+    // Fixes the persistent ~10s steady-state RisingWave freshness lag AND the
+    // RW now()/MV-epoch clock skew (#206) — both were the same root cause:
+    // CPU starvation. On the shared burstable workshop-nodes t3.medium, the RW
+    // compute pod was CFS-throttled ~10-29% of scheduling periods, which
+    // starved the barrier/epoch commit path and dragged RisingWave's internal
+    // watermark clock behind wall-clock (that skew *is* the freshness number).
+    // Proven live on ws-slot90: dedicated r6i.xlarge (non-burstable, so no CPU
+    // credit exhaustion) dropped throttling to 0.58%, freshness to ~2.3s avg,
+    // and the now() skew to ~1.5s.
+    //
+    // Shared-vs-per-slot: ONE shared node group for the whole cluster (not one
+    // per slot), matching workshop-nodes above. Isolation between slots' RW
+    // compute pods isn't the problem this fixes — CPU starvation from sharing
+    // with unrelated pods (TimescaleDB, dashboard, etc.) on a burstable
+    // instance is. A dedicated per-slot node group would multiply the r6i.xlarge
+    // cost by the slot count for no freshness benefit, since the taint already
+    // keeps every non-RW-compute pod off these nodes regardless of how many
+    // slots share the pool. Helm's nodeSelector/toleration (see
+    // helm/cloud-analytics) target this pool's label so every slot's RW
+    // compute lands here; the node group scales (desiredSize→maxSize) as more
+    // slots' compute pods need to schedule.
+    //
+    // r6i.xlarge (4 vCPU / 32 GiB, memory-optimized, non-burstable) sized to
+    // match the live-validated compute.resources: request ~4 GiB/2 vCPU so a
+    // slot's compute pod comfortably fits one node, limit 24 GiB/3.5 vCPU for
+    // burst headroom (startup backfill, Hummock block cache) while leaving
+    // allocatable margin below the node's ~31 GiB/~3.9 vCPU allocatable.
+    const rwComputeNodegroup = new CfnNodegroup(this, "RwComputeNodegroup", {
+      clusterName: eksCluster.ref,
+      nodegroupName: "rw-compute",
+      nodeRole: eksNodeRole.roleArn,
+      subnets: this.cloudVpc.selectSubnets({ subnetType: SubnetType.PRIVATE_WITH_EGRESS }).subnetIds,
+      instanceTypes: ["r6i.xlarge"],
+      scalingConfig: {
+        minSize: 1,
+        maxSize: 8,
+        desiredSize: 1,
+      },
+      amiType: "AL2_x86_64",
+      diskSize: 20,
+      labels: {
+        workload: "risingwave-compute",
+      },
+      taints: [
+        {
+          key: "dedicated",
+          value: "risingwave-compute",
+          effect: "NO_SCHEDULE",
+        },
+      ],
+    });
+    rwComputeNodegroup.addDependency(eksCluster);
+
     new CfnOutput(this, "EksClusterName", {
       exportName: "workshop-eks-cluster-name",
       value: eksCluster.ref,
