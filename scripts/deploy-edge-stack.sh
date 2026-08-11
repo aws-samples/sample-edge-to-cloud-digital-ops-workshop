@@ -58,7 +58,7 @@ echo ">>> Edge stack deploy — deployment ID: ${DEPLOYMENT_ID}"
 # KUBECONFIG. edge_kubeconfig_close tears the tunnel down; run it on exit.
 echo ">>> Opening SSM tunnel to the K3s server..."
 export AWS_REGION="$REGION"
-# shellcheck source=scripts/edge-kubeconfig.sh
+# shellcheck source=scripts/edge-kubeconfig.sh disable=SC1091
 source "$SCRIPT_DIR/edge-kubeconfig.sh"
 edge_kubeconfig_open "$DEPLOYMENT_ID"
 trap edge_kubeconfig_close EXIT
@@ -116,7 +116,8 @@ helm upgrade --install edge-stack "$REPO_ROOT/helm/edge-stack" \
   -f "$REPO_ROOT/helm/edge-stack-values.yaml" \
   --set deploymentId="$DEPLOYMENT_ID" \
   --set mqtt.host="$SIM_IP" \
-  --set mskBootstrapServers="$MSK_BROKERS_ESC"
+  --set mskBootstrapServers="$MSK_BROKERS_ESC" \
+  --set monitoring.enabled=false
 
 if [[ "$SKIP_MONITORING" == "true" ]]; then
   echo ">>> --skip-monitoring passed — data stack deployed, skipping kube-prometheus-stack."
