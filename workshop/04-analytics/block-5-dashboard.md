@@ -108,6 +108,22 @@ tier's `freshness_ms` **and** `query_latency_ms` in the run report's
 e2e pass — the CLI equivalent of the dashboard's freshness and query-latency
 charts.
 
+!!! warning "Measurement trap (#206): never ask RisingWave for its own `now()`"
+    It's tempting to compute freshness entirely in-SQL — `now() - MAX(ts_ms)` — the
+    way the TimescaleDB and Athena blocks below do. **Don't do this for
+    RisingWave.** RW's SQL `now()` tracks its last *committed* checkpoint epoch,
+    not wall-clock. If the checkpoint-commit path lags (the CPU-starvation failure
+    mode [#211](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/issues/211)
+    fixes), `now()` lags by the *same* amount — so `now() - MAX(ts_ms)`
+    computed **inside** RisingWave cancels the lag out and reports sub-second
+    freshness while the underlying data is minutes old. Worse, if `now()` ever lags
+    *behind* the most recent committed row's `ts_ms` (e.g. right after a barrier
+    catches back up), the subtraction goes **negative** — an unmistakable tell that
+    something is measuring against the wrong clock. The block below deliberately
+    timestamps with the CLI's own wall-clock (`date +%s%3N`) instead of RW's
+    `now()`, for the same reason the dashboard's routes use `Date.now()` (see the
+    note under [Chart 1](#chart-1-data-freshness-log-scale) for the full story).
+
 ??? example "RisingWave — freshness + query latency (port 4567)"
     ```bash
     kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567 > /tmp/rw-fresh-pf.log 2>&1 &
@@ -115,12 +131,16 @@ charts.
     until grep -q "Forwarding from" /tmp/rw-fresh-pf.log 2>/dev/null; do sleep 1; done
     # Same MV the dashboard's /api/stream/risingwave route reads. ts_ms is the
     # IoT-Core ingest timestamp (epoch-ms), so freshness is clock-skew-free.
-    # Wrap the query in epoch-ms timestamps to measure read-path latency — the
-    # metric where RisingWave's pre-aggregated in-memory MV is expected to win.
+    # Timestamp with the CLIENT's wall-clock, not RisingWave's own now() — see
+    # the measurement-trap warning above. Only ask RW for MAX(ts_ms); subtract
+    # against date +%s%3N taken just before/after the query.
     RW_T0=$(date +%s%3N)
-    IFS='|' read -r RW_FRESH RW_ROWS < <(psql -h localhost -p 4567 -U root -d dev -tA -F'|' \
-      -c "SELECT (EXTRACT(EPOCH FROM now())*1000)::bigint - MAX(ts_ms), COUNT(*) FROM mv_sensor_fleet_latest;")
-    RW_LAT=$(( $(date +%s%3N) - RW_T0 ))
+    IFS='|' read -r RW_MAX_TS RW_ROWS < <(psql -h localhost -p 4567 -U root -d dev -tA -F'|' \
+      -c "SELECT MAX(ts_ms), COUNT(*) FROM mv_sensor_fleet_latest;")
+    RW_NOW=$(date +%s%3N)
+    RW_FRESH=""
+    [ -n "$RW_MAX_TS" ] && RW_FRESH=$(( RW_NOW - RW_MAX_TS ))
+    RW_LAT=$(( RW_NOW - RW_T0 ))
     kill "$RW_PF_PID" 2>/dev/null || true
     echo "{\"tier\":\"risingwave\",\"freshness_ms\":${RW_FRESH:-null},\"query_latency_ms\":${RW_LAT},\"rows\":${RW_ROWS:-0}}"
     ```
@@ -347,13 +367,43 @@ What holds the budget as you scale:
 
     The chart's mitigation (`risingwave.podAntiAffinity` + `timescaledb.affinity`,
     both **`preferred`**) spreads RW meta, RW compute and the TimescaleDB primary
-    across separate nodes so no single node event can down the whole tier at once.
-    The deeper fix is substrate: move the analytics tier to a **dedicated,
-    memory-optimized, non-burstable node group** (an `m`-family instance sized so the
-    pods' limits fit inside allocatable) rather than sharing burstable `t`-family
-    nodes whose CPU credits and headroom the streaming/commit path exhausts. Soft
-    anti-affinity buys resilience on the cluster you have; right-sizing the node
-    group removes the flap in the first place.
+    across separate nodes so no single node event can down the whole tier at once —
+    that's the resilience layer for the pods that still share `workshop-nodes`
+    (RW meta/frontend/compactor, TimescaleDB, the dashboard). RW **compute**
+    specifically — the pod whose commit path drives both the freshness number and
+    the `now()` skew below — no longer shares that pool at all: see
+    [RW-Compute Node Sizing](#rw-compute-node-sizing) next.
+
+## RW-Compute Node Sizing
+
+[#211](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/issues/211)
+moved RisingWave **compute** off the shared, burstable `t3.medium` pool onto a
+dedicated, memory-optimized, non-burstable `r6i.xlarge` node group
+(`amplify/custom/platform-stack.ts`, node group `rw-compute`) — one shared pool
+for the whole cluster, not one per slot, since the fix is about eliminating
+CPU starvation from co-located pods, not about isolating slots from each other.
+A burstable `t`-family instance's CPU credits were the actual root cause of
+both the ~10 s steady-state freshness lag and the `now()`/MV-epoch clock skew
+(#206): compute was CFS-throttled 10–29 % of scheduling periods, which starved
+the checkpoint-barrier commit path and dragged RisingWave's internal watermark
+clock behind wall-clock — that skew *is* the freshness number. On `r6i.xlarge`
+throttling dropped to 0.58 % and freshness to ~2.3 s avg (0.9–3.9 s).
+
+`helm/cloud-analytics`'s `risingwave.compute.dedicatedNodePool` (default
+**enabled**) sets the `nodeSelector`/`tolerations` that land the compute pod on
+that node group; `computeTotalMemoryBytes` and `resources.compute` are sized to
+match:
+
+??? example "View source — compute node sizing (helm/cloud-analytics/values.yaml)"
+    [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/helm/cloud-analytics/values.yaml){ .md-button target=_blank }
+
+    ```yaml
+    --8<-- "helm/cloud-analytics/values.yaml:compute-sizing"
+    ```
+
+Disable `dedicatedNodePool.enabled` only when deploying this chart against a
+cluster that doesn't have the `rw-compute` node group (e.g. local/minikube
+smoke-testing) — on the shared workshop EKS it should always stay on.
 
 ---
 
