@@ -100,6 +100,12 @@ spec:
 
   resources:
     {{- toYaml .Values.timescaledb.resources | nindent 4 }}
+
+  {{- with .Values.timescaledb.affinity }}
+  # Keep primary + replica off the same node (#196) — CNPG-native anti-affinity.
+  affinity:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 ---
 # A second database on the same CNPG cluster, dedicated to RisingWave's
 # metaStore (see risingwave-cr.yaml) — keeps RisingWave's catalog/cluster_id

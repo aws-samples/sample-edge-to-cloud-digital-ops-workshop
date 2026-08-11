@@ -323,6 +323,38 @@ What holds the budget as you scale:
     problem (checkpoint cadence, compute sizing), not a query problem** — and a tier
     that is stale-but-fast-to-read is the signature of exactly this class of bug.
 
+!!! example "Worked example — a freshness spike to 100 s+ that is really node instability (not RisingWave)"
+    A second, distinct cause of a big freshness number: the **node** under the
+    streaming stack recycles. On the shared workshop EKS every node is a burstable
+    `t3.medium` (~3.4 Gi, ~1.9 vCPU allocatable), and the analytics pod *limits*
+    oversubscribe it (observed **163 % memory / 155 % CPU** of a single node's
+    allocatable). When one such node flaps to `NodeNotReady`, it evicts whatever
+    streaming/stateful pods share it at once — live on slot90 a single node event
+    took down RisingWave compute **and**, on another slot, TimescaleDB (failover) +
+    the redpanda-connect sink together. During the flap RisingWave's Kafka sources
+    report `AllBrokersDown`, the committed MV epoch falls far behind wall-clock, and
+    a dashboard read that lands mid-disruption shows **100 s+** (159.5 s observed).
+    Once the node stabilised the same MV read at **856 ms** — proving the spike was
+    transient node instability, not steady-state RisingWave behaviour.
+
+    Tell it apart from the checkpoint-cadence case above by looking at pod restarts
+    and node events, not just the freshness number:
+
+    ```bash
+    kubectl get events -n ws-slot00 --field-selector reason=NodeNotReady
+    kubectl get pods  -n ws-slot00 -o wide   # RESTARTS ages clustered together + shared NODE = one node took them all
+    ```
+
+    The chart's mitigation (`risingwave.podAntiAffinity` + `timescaledb.affinity`,
+    both **`preferred`**) spreads RW meta, RW compute and the TimescaleDB primary
+    across separate nodes so no single node event can down the whole tier at once.
+    The deeper fix is substrate: move the analytics tier to a **dedicated,
+    memory-optimized, non-burstable node group** (an `m`-family instance sized so the
+    pods' limits fit inside allocatable) rather than sharing burstable `t`-family
+    nodes whose CPU credits and headroom the streaming/commit path exhausts. Soft
+    anti-affinity buys resilience on the cluster you have; right-sizing the node
+    group removes the flap in the first place.
+
 ---
 
 ## Chart 2 — Fleet Free CPU & Memory
