@@ -131,6 +131,17 @@ function usePushFreshness(tier: "risingwave" | "timescaledb") {
         // ignore malformed event
       }
     });
+    // #210: the server sends this instead of silently doing nothing when a
+    // connect/query error occurs, so a transient blip is visible rather than
+    // an indefinite "—".
+    es.addEventListener("tier-error", (evt: MessageEvent) => {
+      try {
+        const { message } = JSON.parse(evt.data);
+        setError(message ?? "tier error");
+      } catch {
+        setError("tier error");
+      }
+    });
     es.onerror = () => setError("stream disconnected");
     return () => es.close();
   }, [tier]);
