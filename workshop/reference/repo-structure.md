@@ -3,11 +3,16 @@
 ```
 edge-digital-ops-workshop/
 ├── amplify/
-│   ├── backend.ts                  # Amplify Gen 2 entry point
-│   ├── auth/                       # Cognito user pool per deployment
+│   ├── data/                       # Reusable AppSync JS resolvers (publishTelemetry, onTelemetry, healthCheck)
 │   └── custom/
-│       ├── participant-stack.ts    # Per-deployment resources (IoT, MSK, S3, AppSync)
-│       └── platform-stack.ts      # Shared VPCs, subnets, route tables
+│       ├── platform-app.ts         # CDK app entry: platform + one set of nested stacks per slot (WORKSHOP_SLOTS)
+│       ├── platform-stack.ts       # Shared VPCs, subnets, route tables, EKS, MSK, Firehose, S3
+│       ├── auth-stack.ts           # Per-slot NestedStack: Cognito user pool + client + identity pool (was Amplify defineAuth)
+│       ├── data-stack.ts           # Per-slot NestedStack: AppSync GraphQL API + JS resolvers (was Amplify defineData)
+│       ├── schema.graphql          # AppSync SDL consumed by data-stack.ts
+│       ├── participant-stack.ts    # Per-slot NestedStack: EC2, IoT, MSK topics, S3, AppSync Events
+│       ├── orchestrator-app.ts     # CDK app entry for the deploy orchestrator (deployed once per account)
+│       └── orchestrator-stack.ts   # CodeBuild project that runs the async fire-and-forget deploy
 ├── frontend/                       # Amplify-hosted cloud UI (fleet view, freshness panel)
 ├── cloud-dashboard/                # Session 4 analytics dashboard (Next.js) — built into a
 │   │                               #   container image, runs on EKS via helm/cloud-analytics
@@ -31,7 +36,13 @@ edge-digital-ops-workshop/
 │   ├── create-workshop-user.sh     # Create Cognito user for the front-end UI
 │   ├── grant-ci-access.sh          # Grant a CI/facilitator role EKS + Cognito access
 │   ├── edge-kubeconfig.sh          # SSM port-forward kubectl to a slot's private K3s
-│   └── teardown.sh                 # Ordered resource cleanup
+│   ├── slot-list.sh                # SSM-backed active-slot set (/workshop/platform/active-slots) — source of truth
+│   ├── post-deploy-slot.sh         # Per-slot post-deploy tail (device wait, shadow seed, K3s + analytics pre-warm)
+│   ├── delete-slot.sh              # Remove ONE slot: runtime cleanup + drop from list + platform update
+│   ├── trigger-deploy.sh           # Fire-and-forget: start the orchestrator CodeBuild, print the build-id handle
+│   ├── poll-deploy.sh              # Poll a deploy handle (CodeBuild build id) to completion
+│   ├── gen-amplify-outputs.sh      # Rebuild frontend/amplify_outputs.json from a slot's SSM params (replaces ampx output)
+│   └── teardown.sh                 # Ordered per-slot runtime cleanup
 ├── e2e/                            # Doc-runner: executes annotated bash blocks in workshop/*.md
 │   │                               #   against a live slot; the published docs ARE the test suite
 │   ├── doc-runner.ts               # Block extraction, substitution, assert + freshness/latency capture
@@ -66,10 +77,16 @@ two distinct mechanisms:
 
 ### 1. Infrastructure — synthesized from source at deploy time (`amplify/`, CDK)
 
-The per-slot and shared stacks under `amplify/` are **synthesized directly from the
-TypeScript** every time you run `pnpm run sandbox <slot>`. Edit
-`participant-stack.ts`, re-run the sandbox for that slot, and the change is live —
-there is no intermediate artefact to rebuild. Same for the platform stack.
+The shared platform stack and every slot's nested stacks (Auth + Data +
+Participant) under `amplify/custom/` are **synthesized directly from the
+TypeScript** every time you run `pnpm run sandbox <slot>` or
+`pnpm run sandbox:all <slots>`. There is now a **single deploy target** —
+`WorkshopPlatformStack`, driven by the `WORKSHOP_SLOTS` list — rather than a
+separate `ampx sandbox` backend per slot. Edit `participant-stack.ts`, re-run the
+sandbox, and the change is live; there is no intermediate artefact to rebuild.
+Because the slot list is authoritative, the deploy scripts union the requested
+slots with the persisted active set in SSM (`scripts/slot-list.sh`) so bringing
+up one slot never tears down the others.
 
 ### 2. In-cluster apps — pre-built container images (`cloud-dashboard/`, `hmi/`)
 

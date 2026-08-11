@@ -45,13 +45,34 @@ pnpm run sandbox:all ws-slot00 ws-slot01 ws-slot02 ws-slot03 ws-slot04 \
   ws-slot05 ws-slot06 ws-slot07 ws-slot08 ws-slot09
 ```
 
-`sandbox:all` deploys the shared VPCs + EKS cluster once, then fans out one Amplify sandbox per slot in parallel. Cold deploy takes 45–60 minutes (MSK and EKS dominate). Deploy the night before.
+`sandbox:all` runs a **single** `cdk deploy` of `WorkshopPlatformStack`, which brings up the shared VPCs + EKS + MSK once and, as **nested stacks**, every slot's Auth + Data + Participant resources (driven by the `WORKSHOP_SLOTS` list). It then runs the per-slot post-deploy tail (`scripts/post-deploy-slot.sh`) in parallel. Cold deploy takes 45–60 minutes (MSK and EKS dominate). Deploy the night before.
 
 To deploy a single slot for testing:
 
 ```bash
 pnpm run sandbox ws-slot00
 ```
+
+`sandbox` unions the slot into the persisted active-slot set (`/workshop/platform/active-slots`, see `scripts/slot-list.sh`) and re-deploys the one platform stack — so adding a slot never tears down the others.
+
+### Async, fire-and-forget deploy (optional)
+
+For a 45–60 min deploy you usually don't want to hold a terminal (or a GitHub Actions runner) open. A cloud-side CodeBuild orchestrator runs the deploy for you and returns a pollable handle immediately.
+
+```bash
+# One-time per account: provision the orchestrator CodeBuild project.
+npx cdk deploy --app "npx tsx amplify/custom/orchestrator-app.ts" \
+  WorkshopDeployOrchestrator \
+  -c repoCloneUrl=https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop.git
+
+# Trigger a deploy and get back a build-id handle (returns in seconds).
+scripts/trigger-deploy.sh ws-slot00 ws-slot01
+
+# Poll the handle to completion from your laptop.
+scripts/poll-deploy.sh <build-id>
+```
+
+The GitHub `deploy.yml` workflow (`workflow_dispatch`) does the same via OIDC — it only *triggers* the orchestrator and exits, posting the build handle + a CodeBuild console link to the job summary. (CodeBuild needs a one-time GitHub source credential to clone the repo.)
 
 After all sandboxes finish, `scripts/deployment-summary.sh` runs automatically and writes **`DEPLOYMENT_SUMMARY.md`** in the repo root. It lists every slot's Deployment ID, workshop URL, S3 bucket, AppSync endpoints, and quick-command recipes.
 
@@ -67,7 +88,7 @@ scripts/deployment-summary.sh ws-slot00 ws-slot01 ws-slot02
 WORKSHOP_TEST_SLOT=ws-slot00 node scripts/smoke-test.mjs
 ```
 
-Verifies: `amplify_outputs.json`, Cognito user pool, IoT provisioning template, S3 bucket, Athena workgroup, IoT topic rule, and 3 running EC2 instances.
+Verifies: the slot's `/workshop/<id>/graphql-endpoint` SSM param, Cognito user pool, IoT provisioning template, S3 bucket, Athena workgroup, IoT topic rule, and 3 running EC2 instances.
 
 ### End-to-end tests
 
@@ -94,11 +115,19 @@ scripts/create-workshop-user.sh ws-slot00 participant@example.com
 
 ### Teardown
 
+Because a slot's resources are now **nested** inside the single `WorkshopPlatformStack` (no per-slot top-level stack), removing one slot is a platform *update*, not an independent `cdk destroy`:
+
 ```bash
-scripts/teardown.sh ws-slot00
+# Remove ONE slot: runtime cleanup, drop it from the active-slot set, then
+# re-deploy the platform so CFN deletes that slot's nested stacks. Other slots
+# and all shared infra (VPCs, EKS, MSK) are preserved.
+scripts/delete-slot.sh ws-slot00           # or: pnpm run sandbox:delete (uses WORKSHOP_DEPLOYMENT_ID)
+
+# Tear down EVERYTHING (all slots + shared platform):
+pnpm run sandbox:delete-all                # uses the persisted active-slot set if no args
 ```
 
-Removes IoT things, EC2 instances, SCRAM secrets, S3 objects, Athena workgroup, and SSM parameters for the slot. The shared VPCs and EKS cluster are preserved.
+`scripts/teardown.sh ws-slot00` still exists and does only the **runtime-artefact** cleanup (self-registered IoT things/certs, the slot's SCRAM secret + topics on the shared MSK cluster, the EKS namespace, K3s SSM params). `delete-slot.sh` calls it first, then does the platform update — run `teardown.sh` on its own only when you want to reclaim runtime state without changing the deployed slot set.
 
 ---
 
@@ -136,11 +165,16 @@ The `deploy-docs.yml` workflow runs `mkdocs gh-deploy` and Pages updates within 
 
 ```
 amplify/
-  backend.ts              # Amplify Gen 2 entry point; wires CDK stacks
-  auth/resource.ts        # Cognito user pool definition
+  data/                   # Reusable AppSync JS resolvers (publishTelemetry, onTelemetry, healthCheck)
   custom/
-    platform-stack.ts     # Shared VPCs (workshop-edge, workshop-cloud)
-    participant-stack.ts  # Per-slot resources: EC2, IoT, MSK, S3, AppSync Events
+    platform-app.ts       # CDK app entry: platform + one set of nested stacks per slot (WORKSHOP_SLOTS)
+    platform-stack.ts     # Shared VPCs (workshop-edge, workshop-cloud), EKS, MSK, Firehose, S3
+    auth-stack.ts         # Per-slot NestedStack: Cognito user pool + client + identity pool
+    data-stack.ts         # Per-slot NestedStack: AppSync GraphQL API + JS resolvers
+    schema.graphql        # AppSync SDL consumed by data-stack.ts
+    participant-stack.ts  # Per-slot NestedStack: EC2, IoT, MSK, S3, AppSync Events
+    orchestrator-app.ts   # CDK app entry for the async deploy orchestrator (once per account)
+    orchestrator-stack.ts # CodeBuild project that runs the fire-and-forget deploy
 
 job-scripts/
   telemetry-v1.sh         # Shadow-driven telemetry config, integer-precision metrics (starting point)
@@ -151,7 +185,13 @@ job-scripts/
 scripts/
   create-workshop-user.sh # Creates a Cognito participant user
   smoke-test.mjs          # Post-deploy verification
-  teardown.sh             # Per-slot resource cleanup
+  slot-list.sh            # SSM-backed active-slot set (source of truth for WORKSHOP_SLOTS)
+  post-deploy-slot.sh     # Per-slot post-deploy tail (device wait, shadows, K3s + analytics pre-warm)
+  delete-slot.sh          # Remove one slot: runtime cleanup + drop from list + platform update
+  gen-amplify-outputs.sh  # Rebuild frontend/amplify_outputs.json from a slot's SSM params (replaces ampx output)
+  trigger-deploy.sh       # Fire-and-forget: start the orchestrator CodeBuild, print the handle
+  poll-deploy.sh          # Poll a deploy handle (CodeBuild build id) to completion
+  teardown.sh             # Per-slot runtime resource cleanup
 
 docs/
   workshop-plan.md        # Full session-by-session workshop plan

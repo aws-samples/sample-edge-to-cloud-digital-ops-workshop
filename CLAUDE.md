@@ -28,11 +28,19 @@ The response's `issue_dependencies_summary` (`{"blocked_by":1,...}`) confirms it
 Root uses **pnpm** (see Package Manager rule below). `frontend/`, `hmi/`, and `e2e/` are separate workspaces with their own `package.json`.
 
 ```bash
-# Deploy — shared platform stack (VPCs, EKS, MSK, Firehose) + per-slot Amplify sandbox
-pnpm run sandbox ws-slot00                       # single slot (deploys platform first if absent)
-pnpm run sandbox:all ws-slot00 ws-slot01 ...     # platform once, then fan out slots
-pnpm run sandbox:delete-all                      # teardown all slots
-scripts/teardown.sh ws-slot00                    # per-slot cleanup (preserves shared VPC/EKS)
+# Deploy — ONE WorkshopPlatformStack (VPCs, EKS, MSK, Firehose) whose per-slot
+# Auth/Data/Participant resources are NESTED stacks, driven by WORKSHOP_SLOTS.
+pnpm run sandbox ws-slot00                       # add/redeploy one slot (unions into active-slot set, re-deploys platform)
+pnpm run sandbox:all ws-slot00 ws-slot01 ...     # one cdk deploy for all slots, then per-slot post-deploy tail
+pnpm run sandbox:delete ws-slot00                # remove ONE slot (scripts/delete-slot.sh: runtime cleanup + platform update)
+pnpm run sandbox:delete-all                      # teardown everything (all slots + shared platform)
+scripts/teardown.sh ws-slot00                    # per-slot RUNTIME cleanup only (IoT things/certs, MSK secret+topics, EKS ns)
+
+# Async, fire-and-forget deploy (cloud-side CodeBuild orchestrator, epic #182/#183)
+npx cdk deploy --app "npx tsx amplify/custom/orchestrator-app.ts" WorkshopDeployOrchestrator -c repoCloneUrl=<https>  # once/account
+scripts/trigger-deploy.sh ws-slot00 ws-slot01    # start CodeBuild, print build-id handle, EXIT (no 30-min wait)
+scripts/poll-deploy.sh <build-id>                # poll the handle to completion (batch-get-builds)
+# GitHub: `deploy.yml` (workflow_dispatch) triggers the orchestrator via OIDC and exits
 
 # Verify a deployment
 pnpm test                                        # scripts/smoke-test.mjs (needs WORKSHOP_TEST_SLOT)
@@ -60,12 +68,14 @@ cd hmi && pnpm dev                                 # edge HMI (site view, runs o
 
 ## Architecture
 
-**Two deployment tiers, built with Amplify Gen 2 wrapping raw CDK stacks:**
+**One shared CDK app with per-slot nested stacks (epic #180/#181 — the old two-tier `ampx sandbox` + top-level per-slot stack model is gone):**
 
-- `amplify/backend.ts` — entry point. Requires `WORKSHOP_DEPLOYMENT_ID` (e.g. `ws-slot00`) + `CDK_DEFAULT_ACCOUNT/REGION` in env (set by `ampx sandbox` / `scripts/sandbox.sh`). Defines auth + data, then instantiates one `ParticipantStack` per slot.
-- `amplify/custom/platform-stack.ts` (+ `platform-app.ts` standalone CDK app entry) — **shared, deployed once per account**: two VPCs (`workshop-edge` 10.0/16, `workshop-cloud` 10.1/16), EKS cluster, MSK cluster, a Firehose delivery stream (MSK → Iceberg), shared S3. Stack name is `WorkshopPlatformStackV2` or `WorkshopPlatformStack` (V2 wins); sandbox scripts detect which exists.
-- `amplify/custom/participant-stack.ts` — **per-slot, isolated**: 3× EC2 (IoT Device Client, fleet-provisioned by claim cert), IoT provisioning template + pre-provisioning Lambda, per-slot MSK topics, S3 telemetry landing, Athena workgroup, AppSync Events API, Secrets Manager claim cert. Uses `Vpc.fromLookup` (needs concrete account/region at synth — why backend.ts throws without them).
-- `amplify/data/resource.ts` — AppSync GraphQL schema (Amplify Gen 2). `publishTelemetry` mutation + `onTelemetry` subscription with JS resolvers in the same dir. Cross-stack GraphQL URL is passed by CFN export name + SSM param (`/workshop/<id>/graphql-endpoint`) to avoid CDK cross-env-stack validation.
+- `amplify/custom/platform-app.ts` — **single CDK app entry and the only deploy target.** Reads the slot list from `--context slots=` → `WORKSHOP_SLOTS` env → single `WORKSHOP_DEPLOYMENT_ID` (back-compat). Instantiates the shared `PlatformStack`, then per slot instantiates `AuthNestedStack` → `DataNestedStack` → `ParticipantStack` (all `NestedStack`s inside the platform stack). Needs `CDK_DEFAULT_ACCOUNT/REGION` at synth (for `Vpc.fromLookup`). `WORKSHOP_SLOTS` is **authoritative** — a slot absent from the list on the next deploy is removed; `scripts/slot-list.sh` persists the union in SSM so add/remove-one is safe.
+- `amplify/custom/platform-stack.ts` — **shared, deployed once per account**: two VPCs (`workshop-edge` 10.0/16, `workshop-cloud` 10.1/16), EKS cluster, MSK cluster, a Firehose delivery stream (MSK → Iceberg), shared S3. Exposes `.shared` (bucket, MSK ARN/scram/key, NAT gw id) passed to each `ParticipantStack` as props. Stack name is `WorkshopPlatformStackV2` or `WorkshopPlatformStack` (V2 wins); sandbox scripts detect which exists.
+- `amplify/custom/auth-stack.ts` (`AuthNestedStack`) — **per-slot** Cognito: user pool `workshop-<id>` (admin-create-only), user-pool client, identity pool. Publishes `/workshop/<id>/user-pool-id`, `/user-pool-client-id`, `/identity-pool-id`. Replaces Amplify `defineAuth`.
+- `amplify/custom/data-stack.ts` (`DataNestedStack`) + `schema.graphql` — **per-slot** AppSync `GraphqlApi` (IAM auth, NONE datasource, JS resolvers from `amplify/data/*.js`). Grants the identity pool's authenticated role `appsync:GraphQL`. **Publishes `/workshop/<id>/graphql-endpoint`** (the e2e doc-runner + frontend read this). Replaces Amplify `defineData`.
+- `amplify/custom/participant-stack.ts` (`ParticipantStack`, now a `NestedStack`) — **per-slot**: 3× EC2 (IoT Device Client, fleet-provisioned by claim cert), IoT provisioning template + pre-provisioning Lambda, per-slot MSK topics, S3 telemetry landing, Athena workgroup, AppSync Events API, Secrets Manager claim cert. Receives the sibling Data stack's `graphqlUrl` and the platform's `.shared` values as **props** (CDK wires them as nested-stack CfnParameters) — a nested stack can't `Fn::ImportValue` an export its own in-progress parent creates.
+- `amplify/custom/orchestrator-stack.ts` (+ `orchestrator-app.ts`) — **deployed once per account, separate from the platform lifecycle**: a CodeBuild project `workshop-deploy-orchestrator` that runs the single deploy + per-slot post-deploy tail (`buildspec-deploy.yml` → `pnpm run sandbox:all`). Triggered async via `aws codebuild start-build` (build id = pollable handle); `concurrentBuildLimit=1` serializes deploys. This is the fire-and-forget path (epic #182); `deploy.yml` triggers it (epic #183).
 
 **Data pipeline (two paths from the same MQTT publish):**
 1. Device MQTT → IoT Rules → **AppSync Events API** (SigV4 HTTP action, no Lambda hop) → browser WebSocket. ~10–80 ms live push, no database.
@@ -83,7 +93,7 @@ Keep a .md file up to date in `./tmp/progress` with the current state of acompli
 
 ## Package Manager
 
-Always use `pnpm` instead of `npm` for package installation — `pnpm install`, `pnpm add`, etc. `npx` is still fine for one-off CLI tool invocations like `npx ampx sandbox`.
+Always use `pnpm` instead of `npm` for package installation — `pnpm install`, `pnpm add`, etc. `npx` is still fine for one-off CLI tool invocations like `npx cdk deploy` or `npx tsx`.
 
 ## Workshop Docs — Embedding Code Snippets from the Repo
 
@@ -174,6 +184,8 @@ https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?index
 ## Monitoring Long-Running AWS Operations From Your Laptop
 
 Claude Code Action runs are ephemeral — nothing you background inside a run (e.g. `pnpm run sandbox:all` kicked off with `&`) keeps running or gets watched once that invocation ends, even though the underlying AWS operation (CloudFormation stack deploy, EKS/MSK provisioning, etc.) keeps going for 20–40+ minutes in the account. There's no built-in way for Claude to "wake up" when that finishes.
+
+> **Prefer the async orchestrator for deploys (epic #182/#183).** For a *deploy* specifically, the cloud-side CodeBuild orchestrator already solves the "don't block on a 20–40 min op" problem: `scripts/trigger-deploy.sh <slots>` returns a build-id handle immediately and the deploy runs in CodeBuild. Poll it with `scripts/poll-deploy.sh <build-id>` (which also has a `--once` mode for a single status check, ideal for the monitor-script pattern below — poll `aws codebuild batch-get-builds` instead of `describe-stacks`). The monitor pattern below still applies to any long AWS op that *isn't* fronted by the orchestrator.
 
 The pattern: when Claude reports it kicked off a long-running operation, it will include a small bash monitor script in its PR/issue comment. Run that script **on your own machine** (it needs your AWS CLI credentials, not Claude's CI role) — it polls AWS for completion, then uses `gh` to post a comment containing `@claude` back onto the same PR/issue, which re-triggers the Claude Code Action workflow with the result baked into the comment body.
 

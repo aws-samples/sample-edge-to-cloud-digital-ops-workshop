@@ -72,12 +72,26 @@ ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 ensure_no_orphan_nat_ssm "$PLATFORM_STACK_NAME"
 ensure_no_orphan_glue_telemetry_table "$PLATFORM_STACK_NAME"
 
-echo ">>> Deploying $PLATFORM_STACK_NAME..."
-npx cdk deploy \
+# ── Merge the requested slots into the persisted active-slot set (#181/#184) ──
+# The platform stack is now ONE stack whose per-slot nested stacks are driven by
+# WORKSHOP_SLOTS; the list is authoritative, so a deploy that omitted a slot
+# would tear it down. Union the requested slots with the already-active set so
+# adding slots never drops existing ones. See scripts/slot-list.sh.
+# shellcheck source=scripts/slot-list.sh
+source "$(dirname "$0")/slot-list.sh"
+ALL_SLOTS=$(slots_add "${DEPLOYMENT_IDS[@]}")
+echo ">>> Active slot set is now: ${ALL_SLOTS}"
+
+: "${CDK_DEFAULT_ACCOUNT:=$ACCOUNT_ID}"
+CDK_DEFAULT_REGION="${CDK_DEFAULT_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region || echo us-east-1)}}"
+export CDK_DEFAULT_ACCOUNT CDK_DEFAULT_REGION
+
+echo ">>> Deploying $PLATFORM_STACK_NAME (platform + all ${ALL_SLOTS} slots as nested stacks)..."
+WORKSHOP_SLOTS="$ALL_SLOTS" npx cdk deploy \
   --app "$PLATFORM_APP" \
   --require-approval never \
   "$PLATFORM_STACK_NAME"
-echo ">>> Platform stack deployed."
+echo ">>> Platform stack + all slots deployed."
 
 # ── Ensure raw.telemetry Kafka topic exists ───────────────────────────────────
 # IoT Kafka action can't auto-create topics. We create it idempotently via a
@@ -192,47 +206,24 @@ fi
 
 echo ">>> Uploading sensor simulator to s3://${S3_BUCKET}/simulator/sensor-sim.py..."
 aws s3 cp simulator/sensor-sim.py "s3://${S3_BUCKET}/simulator/sensor-sim.py"
+echo ">>> Uploading frac-op burst generator to s3://${S3_BUCKET}/simulator/frac-op-burst.py..."
+aws s3 cp simulator/frac-op-burst.py "s3://${S3_BUCKET}/simulator/frac-op-burst.py"
 echo ">>> Shared uploads complete."
 
-# ── Deploy one Amplify sandbox per participant (parallel) ────────────────────
-# `ampx sandbox` hardcodes its cloud-assembly dir to $PWD/.amplify/artifacts/
-# cdk.out (backend-deployer/cdk_deployer.js) with no override, so running it N
-# times in one working dir makes every synth race for the same directory.
-#
-# Instead we drive the deploy with raw `cdk deploy`, giving each slot its own
-# --output dir. `ampx sandbox --identifier <id>` is just sugar for a CDK deploy
-# of amplify/backend.ts with three context values that form the Amplify backend
-# identifier; the resulting stack name is a deterministic hash of that
-# identifier, so `cdk deploy` UPDATES the exact same stacks ampx would (verified:
-# amplify-<namespace>-<id>-sandbox-<hash>) rather than creating duplicates.
-# With the cdk.out contention gone, all slots deploy concurrently from one dir.
-#
-# amplify_outputs.json is intentionally not regenerated here — the sequential
-# ampx loop overwrote a single shared copy anyway (only the last slot survived),
-# and nothing in the bulk-deploy path consumes it. Run `npx ampx sandbox` for a
-# single slot if you need that file locally.
-BACKEND_NAMESPACE=$(node -e "console.log(require('./package.json').name)")
-: "${CDK_DEFAULT_ACCOUNT:=$ACCOUNT_ID}"
-CDK_DEFAULT_REGION="${CDK_DEFAULT_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region || echo us-east-1)}}"
-export CDK_DEFAULT_ACCOUNT CDK_DEFAULT_REGION
-
+# ── Per-slot post-deploy tail (parallel) ─────────────────────────────────────
+# The single `cdk deploy` above already brought up every slot's nested
+# Auth/Data/Participant stacks (epic #181). What remains per slot is the
+# post-deploy tail — device self-registration wait, shadow seeding, K3s + cloud
+# analytics pre-warm — factored into scripts/post-deploy-slot.sh so sandbox.sh
+# and the CI orchestrator share the exact same steps. These are independent per
+# slot, so run them concurrently.
 MAX_PARALLEL="${SANDBOX_MAX_PARALLEL:-6}"
 LOG_DIR=$(mktemp -d /tmp/sandbox-all-logs.XXXXXX)
-echo ">>> Deploying ${#DEPLOYMENT_IDS[@]} sandboxes in parallel (max ${MAX_PARALLEL} at once, logs in ${LOG_DIR})..."
+echo ">>> Running post-deploy tail for ${#DEPLOYMENT_IDS[@]} slots in parallel (max ${MAX_PARALLEL} at once, logs in ${LOG_DIR})..."
 
-# Deploy a single slot: isolated cdk.out, targets the same stacks ampx would.
-_deploy_slot() {
+_post_deploy_slot() {
   local id="$1"
-  . "$HOME/.nvm/nvm.sh" 2>/dev/null || true
-  nvm use 22 --silent 2>/dev/null || true
-  WORKSHOP_DEPLOYMENT_ID="$id" npx cdk deploy --all \
-    --app "npx tsx amplify/backend.ts" \
-    --output ".amplify/artifacts/cdk.out-${id}" \
-    --require-approval never \
-    --concurrency 5 \
-    --context amplify-backend-name="$id" \
-    --context amplify-backend-namespace="$BACKEND_NAMESPACE" \
-    --context amplify-backend-type=sandbox
+  bash "$(dirname "$0")/post-deploy-slot.sh" "$id"
 }
 
 # bash 3.2 (macOS default) has no `wait -n`, so gate concurrency by polling a
@@ -256,9 +247,9 @@ _reap_one() {
         # for an empty array under bash 3.2 (the macOS default).
         PIDS=(${PIDS[@]+"${PIDS[@]}"}); PID_IDS=(${PID_IDS[@]+"${PID_IDS[@]}"})
         if [[ $rc -eq 0 ]]; then
-          echo ">>> [$sid] Sandbox complete."
+          echo ">>> [$sid] Post-deploy tail complete."
         else
-          echo "ERROR: sandbox for $sid failed (rc=$rc) — see ${LOG_DIR}/${sid}.log" >&2
+          echo "ERROR: post-deploy tail for $sid failed (rc=$rc) — see ${LOG_DIR}/${sid}.log" >&2
           tail -n 25 "${LOG_DIR}/${sid}.log" | sed "s/^/    [$sid] /" >&2 || true
           FAILED=1
         fi
@@ -271,8 +262,8 @@ _reap_one() {
 
 for ID in "${DEPLOYMENT_IDS[@]}"; do
   while [[ ${#PIDS[@]} -ge $MAX_PARALLEL ]]; do _reap_one; done
-  echo ">>> [$ID] Starting sandbox deploy..."
-  ( _deploy_slot "$ID" ) >"${LOG_DIR}/${ID}.log" 2>&1 &
+  echo ">>> [$ID] Starting post-deploy tail..."
+  ( _post_deploy_slot "$ID" ) >"${LOG_DIR}/${ID}.log" 2>&1 &
   PIDS+=("$!")
   PID_IDS+=("$ID")
 done
@@ -281,10 +272,10 @@ done
 while [[ ${#PIDS[@]} -gt 0 ]]; do _reap_one; done
 
 if [[ $FAILED -eq 0 ]]; then
-  echo ">>> All sandboxes deployed. Generating deployment summary..."
+  echo ">>> All slots deployed. Generating deployment summary..."
   bash "$(dirname "$0")/deployment-summary.sh" "${DEPLOYMENT_IDS[@]}"
 else
-  echo ">>> One or more sandboxes failed. Full logs retained in ${LOG_DIR}" >&2
+  echo ">>> One or more slots' post-deploy tail failed. Full logs retained in ${LOG_DIR}" >&2
 fi
 
 exit $FAILED

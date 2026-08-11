@@ -1,0 +1,49 @@
+# AppSync GraphQL schema for a single workshop slot's live-telemetry push path.
+#
+# This is the plain-CDK equivalent of the Amplify Gen 2 `data/resource.ts`
+# schema (see #181 / epic #180): the same TelemetryEvent type, publishTelemetry
+# mutation, onTelemetry subscription and healthCheck query, but expressed as SDL
+# so the platform CDK app can own the AppSync API as a NestedStack rather than
+# letting `ampx sandbox` own a separate Amplify backend.
+#
+# Authorization is IAM (Cognito identity-pool authenticated role) — matching the
+# previous `defaultAuthorizationMode: 'identityPool'`. Every field is therefore
+# annotated @aws_iam.
+
+type TelemetryEvent @aws_iam {
+  thingName: String!
+  messageTimestamp: Float!
+  cpuPct: Float
+  memUsedPct: Float
+  diskUsedPct: Float
+  netIoByteSent: Int
+  netIoByteRecv: Int
+  deploymentId: String
+}
+
+type Query {
+  # AppSync requires at least one Query field. No-op health check, mirroring the
+  # Amplify schema's healthCheck query.
+  healthCheck: String @aws_iam
+}
+
+type Mutation {
+  publishTelemetry(
+    thingName: String!
+    messageTimestamp: Float!
+    cpuPct: Float
+    memUsedPct: Float
+    diskUsedPct: Float
+    netIoByteSent: Int
+    netIoByteRecv: Int
+    deploymentId: String
+  ): TelemetryEvent @aws_iam
+}
+
+type Subscription {
+  # Fired for every publishTelemetry mutation — the browser's live-push clock
+  # signal (see architecture.md, data-freshness comparison panel).
+  onTelemetry: TelemetryEvent
+    @aws_subscribe(mutations: ["publishTelemetry"])
+    @aws_iam
+}

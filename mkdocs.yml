@@ -110,6 +110,7 @@ nav:
       - Block 2 — Site View Exploration: 06-hmi/block-2-site-view.md
       - Block 3 — Digital Ops & Network Failure: 06-hmi/block-3-failure-sim.md
       - Block 4 — Compare Edge vs Cloud Freshness: 06-hmi/block-4-freshness.md
+      - Block 5 — Realistic Data Volume Burst: 06-hmi/block-5-load-burst.md
   - Session 7 — Capstone:
       - Overview: 07-capstone/index.md
       - Block 1 — Architecture Walkthrough: 07-capstone/block-1-architecture.md

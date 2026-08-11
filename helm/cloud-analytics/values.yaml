@@ -65,6 +65,20 @@ risingwave:
   # RisingWave default; do not lower without profiling the commit path.
   barrierIntervalMs: 1000
 
+  # Memory budget RisingWave sizes its own heap/caches to, in bytes. The operator
+  # otherwise defaults RW_TOTAL_MEMORY_BYTES to the *entire* container memory
+  # limit, leaving nothing for jemalloc overhead, thread stacks and the Hummock
+  # block cache — so the cgroup OOM-kills the pod (exit 137) even though
+  # RisingWave believes it is within budget. When compute OOMs, streaming
+  # barriers stop advancing and MV freshness climbs (observed ~10s spikes on the
+  # data-freshness panel between kills, then recovers — a sawtooth). Keep this
+  # comfortably below resources.compute.limits.memory so both steady-state AND
+  # the transient burst during startup source-backfill (RisingWave replays the
+  # whole sensors.raw.sim topic and flushes SSTs) stay under the cgroup limit.
+  # 1.5Gi reserved under a 3Gi limit leaves ~50% headroom for that backfill spike
+  # on the workshop's t3.medium nodes (~3.4Gi allocatable).
+  computeTotalMemoryBytes: "1610612736"  # 1.5 GiB, well under the 3Gi limit below
+
   resources:
     meta:
       requests: { cpu: 100m, memory: 512Mi }
@@ -73,8 +87,12 @@ risingwave:
       requests: { cpu: 100m, memory: 512Mi }
       limits: { cpu: 500m, memory: 1Gi }
     compute:
+      # request stays at 1Gi so the pod schedules on a ~3.4Gi t3.medium already
+      # sharing the node with timescaledb; the 3Gi limit is burst headroom (limits
+      # may oversubscribe the node, only requests must fit) to absorb the
+      # startup-backfill spike without a cgroup OOM kill.
       requests: { cpu: 500m, memory: 1Gi }
-      limits: { cpu: 1000m, memory: 2Gi }
+      limits: { cpu: 1000m, memory: 3Gi }
     compactor:
       requests: { cpu: 100m, memory: 512Mi }
       limits: { cpu: 500m, memory: 1Gi }

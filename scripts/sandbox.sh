@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
 # Usage: ./scripts/sandbox.sh [--force] [deployment-id]
 #   deployment-id defaults to ws-slot00
-#   --force bypasses the platform stack health check and always re-deploys it
+#   --force is accepted for back-compat but is now a no-op: since epic #180/#181
+#     the single WorkshopPlatformStack deploy is always run (it's idempotent and
+#     is also what adds this slot's nested stacks), so there is no health-check
+#     to bypass.
 #
-# Checks whether WorkshopPlatformStack is deployed (or in progress).
-# If not, deploys it first. Then starts the Amplify sandbox for this participant.
+# Since epic #180/#181 there is no separate per-slot Amplify sandbox. This slot's
+# auth/data/participant resources are NESTED stacks inside the one shared
+# WorkshopPlatformStack, driven by the WORKSHOP_SLOTS list. This script:
+#   1. merges this slot into the persisted active-slot set (scripts/slot-list.sh)
+#   2. runs the single `cdk deploy` of WorkshopPlatformStack for the whole set
+#      (idempotent — brings up / updates every slot's nested stacks)
+#   3. stages the IoT Device Client binary + simulator to the shared S3 bucket
+#   4. runs the per-slot post-deploy tail (scripts/post-deploy-slot.sh)
 
 set -euo pipefail
 
@@ -12,13 +21,14 @@ FORCE=false
 DEPLOYMENT_ID="ws-slot00"
 for arg in "$@"; do
   if [[ "$arg" == "--force" ]]; then
-    FORCE=true
+    FORCE=true  # retained for CLI back-compat; no longer gates anything
   else
     DEPLOYMENT_ID="$arg"
   fi
 done
 
 PLATFORM_APP="npx tsx amplify/custom/platform-app.ts"
+PLATFORM_STACK_NAME="WorkshopPlatformStack"
 
 # The platform stack now manages /workshop/platform/edge-nat-gateway-id as a CFN
 # resource. On accounts first provisioned by an older platform stack the value
@@ -65,42 +75,41 @@ ensure_no_orphan_glue_telemetry_table() {
 
 echo ">>> Deployment ID: $DEPLOYMENT_ID"
 
-# ── Check whether the platform stack is fully deployed ──────────────────────
-# Check by CloudFormation status rather than VPC presence — a rollback can
-# leave VPCs behind while other resources (S3 bucket, MSK, etc.) are missing.
-PLATFORM_STACK=""
-if [[ "$FORCE" == "false" ]]; then
-  STATUS=$(aws cloudformation describe-stacks \
-    --stack-name "WorkshopPlatformStack" \
-    --query "Stacks[0].StackStatus" \
-    --output text 2>/dev/null || echo "DOES_NOT_EXIST")
-  if [[ "$STATUS" == "CREATE_COMPLETE" || "$STATUS" == "UPDATE_COMPLETE" ]]; then
-    PLATFORM_STACK="WorkshopPlatformStack"
-    echo ">>> Platform stack is healthy ($STATUS). Skipping platform deploy."
-  fi
-else
-  echo ">>> --force passed. Skipping health check and re-deploying platform stack."
-fi
+# ── Merge this slot into the persisted active-slot set (#180/#181/#184) ──────
+# The platform stack is now ONE stack whose per-slot nested stacks are driven by
+# WORKSHOP_SLOTS; that list is authoritative, so a deploy that omitted a slot
+# would tear it down. Union this slot with the already-active set so bringing up
+# one slot never drops the others. See scripts/slot-list.sh.
+# shellcheck source=scripts/slot-list.sh
+source "$(dirname "$0")/slot-list.sh"
+ALL_SLOTS=$(slots_add "$DEPLOYMENT_ID")
+echo ">>> Active slot set is now: ${ALL_SLOTS}"
 
-if [[ -z "$PLATFORM_STACK" ]]; then
-  # The platform stack now owns the /workshop/platform/edge-nat-gateway-id SSM
-  # parameter (see platform-stack.ts). On accounts first provisioned with an
-  # older platform stack the parameter exists as an out-of-band orphan written
-  # by this script; CFN would fail to *create* the managed parameter on top of
-  # it. Delete the orphan first, but only if it isn't already a resource of the
-  # deployed platform stack (a param that's already CFN-managed must be left for
-  # the stack update to reconcile).
-  ensure_no_orphan_nat_ssm "WorkshopPlatformStack"
-  # Same reconciliation, for the workshop_telemetry Glue database/table now
-  # owned by the platform stack (Firehose → Iceberg sink) — see #128.
-  ensure_no_orphan_glue_telemetry_table "WorkshopPlatformStack"
-  echo ">>> Deploying WorkshopPlatformStack..."
-  npx cdk deploy \
-    --app "$PLATFORM_APP" \
-    --require-approval never \
-    "WorkshopPlatformStack"
-  echo ">>> Platform stack deployed."
-fi
+# ── Deploy the platform stack (always — brings up this slot's nested stacks) ──
+# cdk deploy is idempotent: if nothing changed it finishes in seconds. Since the
+# slot's auth/data/participant resources are nested inside WorkshopPlatformStack
+# (epic #181), this single deploy is what creates/updates them — there is no
+# longer a separate `ampx sandbox` step. (--force is now a no-op: the deploy is
+# unconditional and idempotent, so there's no health check to skip.)
+#
+# The platform stack now owns the /workshop/platform/edge-nat-gateway-id SSM
+# parameter and the workshop_telemetry Glue database/table (see platform-stack.ts
+# and #128). On accounts first provisioned by an older stack these can exist as
+# out-of-band orphans; CFN can't *create* a managed resource on top of an
+# unmanaged one, so delete the orphan first (but never one already CFN-managed).
+ensure_no_orphan_nat_ssm "$PLATFORM_STACK_NAME"
+ensure_no_orphan_glue_telemetry_table "$PLATFORM_STACK_NAME"
+
+: "${CDK_DEFAULT_ACCOUNT:=$(aws sts get-caller-identity --query Account --output text)}"
+CDK_DEFAULT_REGION="${CDK_DEFAULT_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region || echo us-east-1)}}"
+export CDK_DEFAULT_ACCOUNT CDK_DEFAULT_REGION
+
+echo ">>> Deploying $PLATFORM_STACK_NAME (platform + all ${ALL_SLOTS} slots as nested stacks)..."
+WORKSHOP_SLOTS="$ALL_SLOTS" npx cdk deploy \
+  --app "$PLATFORM_APP" \
+  --require-approval never \
+  "$PLATFORM_STACK_NAME"
+echo ">>> Platform stack + all slots deployed."
 
 # ── Verify edge NAT gateway ID in SSM ────────────────────────────────────────
 # The platform stack publishes /workshop/platform/edge-nat-gateway-id (tied to
@@ -223,95 +232,24 @@ else
   echo ">>> Using cached IoT Device Client binary."
 fi
 
-# ── Start Amplify sandbox for this participant ───────────────────────────────
-export WORKSHOP_DEPLOYMENT_ID="$DEPLOYMENT_ID"
-echo ">>> Starting Amplify sandbox --identifier $DEPLOYMENT_ID"
-unset npm_config_prefix
-if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
-  . "$HOME/.nvm/nvm.sh"
-  nvm install 22 --silent || true
-  nvm use 22 --silent || echo ">>> nvm use 22 failed, falling back to system node ($(node -v 2>/dev/null || echo 'not found'))."
-else
-  echo ">>> nvm not found, using system node ($(node -v 2>/dev/null || echo 'not found'))."
-fi
-AMPX_STATUS=0
-npx ampx sandbox --identifier "$DEPLOYMENT_ID" --once || AMPX_STATUS=$?
-if [[ "$AMPX_STATUS" -ne 0 ]]; then
-  echo "ERROR: ampx sandbox deploy failed (exit $AMPX_STATUS) — backend rolled back. Skipping device-registration wait, shadow seeding, and summary." >&2
-  exit "$AMPX_STATUS"
-fi
-
-# ── Upload binary and simulator to S3 after CDK creates the bucket ──────────
+# ── Upload binary and simulator to the shared S3 bucket ──────────────────────
+# The bucket is a platform-stack resource, created by the deploy above.
 echo ">>> Uploading IoT Device Client binary to s3://${S3_BUCKET}/bin/aws-iot-device-client…"
 aws s3 cp "$LOCAL_BINARY_CACHE" "s3://${S3_BUCKET}/bin/aws-iot-device-client"
 
 echo ">>> Uploading sensor simulator to s3://${S3_BUCKET}/simulator/sensor-sim.py…"
 aws s3 cp simulator/sensor-sim.py "s3://${S3_BUCKET}/simulator/sensor-sim.py"
 
+echo ">>> Uploading frac-op burst generator to s3://${S3_BUCKET}/simulator/frac-op-burst.py…"
+aws s3 cp simulator/frac-op-burst.py "s3://${S3_BUCKET}/simulator/frac-op-burst.py"
+
 echo ">>> Upload complete."
 
-# ── Seed initial device-config and $package shadows ──────────────────────────
-# EC2 instances self-register via fleet provisioning on first boot. Poll until
-# all 3 things appear in the registry, then write the initial shadows so fleet
-# indexing queries work before participants run any IoT Job.
-echo ">>> Waiting for devices to self-register via fleet provisioning..."
-IOT_ENDPOINT=$(aws iot describe-endpoint --endpoint-type iot:Data-ATS --query endpointAddress --output text)
-THING_NAMES=()
-for attempt in $(seq 1 60); do
-  THING_NAMES=()
-  while IFS= read -r line; do
-    [[ -n "$line" ]] && THING_NAMES+=("$line")
-  done < <(aws iot list-things-in-thing-group \
-    --thing-group-name "${DEPLOYMENT_ID}-devices" \
-    --query "things[]" --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true)
-  echo "  ${#THING_NAMES[@]}/3 devices registered (attempt $attempt/60)..."
-  [[ "${#THING_NAMES[@]}" -ge 3 ]] && break
-  sleep 10
-done
-
-if [[ "${#THING_NAMES[@]}" -lt 3 ]]; then
-  echo "WARNING: Only ${#THING_NAMES[@]} device(s) registered after 10 min — seeding shadows for those that exist."
-fi
-
-for THING in "${THING_NAMES[@]+"${THING_NAMES[@]}"}"; do
-  echo "  Seeding shadows for $THING..."
-  aws iot-data update-thing-shadow \
-    --endpoint-url "https://$IOT_ENDPOINT" \
-    --thing-name "$THING" \
-    --shadow-name device-config \
-    --cli-binary-format raw-in-base64-out \
-    --payload '{"state":{"desired":{"telemetry_interval_ms":5000,"metrics":["cpu_pct","mem_used_pct","disk_used_pct"],"config_version":"1.0.0"},"reported":{"telemetry_interval_ms":5000,"metrics":["cpu_pct","mem_used_pct","disk_used_pct"],"config_version":"1.0.0"}}}' \
-    /dev/null
-  aws iot-data update-thing-shadow \
-    --endpoint-url "https://$IOT_ENDPOINT" \
-    --thing-name "$THING" \
-    --shadow-name '$package' \
-    --cli-binary-format raw-in-base64-out \
-    --payload '{"state":{"reported":{"telemetry-agent":{"version":"1.0.0"}}}}' \
-    /dev/null
-done
-echo ">>> Shadow seeding complete."
-
-# ── Pre-warm the edge K3s cluster ────────────────────────────────────────────
-# Launch the K3s bootstrap IoT Job now, during the facilitator pre-deploy, so the
-# cluster is already up when attendees reach session 05 — instead of costing
-# ~20 min of live session wall-clock. Idempotent: skips if the kubeconfig already
-# exists in SSM. See scripts/launch-k3s.sh and workshop/05-edge-infra/block-2.
-if [[ "${#THING_NAMES[@]}" -ge 3 ]]; then
-  echo ">>> Pre-warming edge K3s cluster via IoT Job (runs during pre-deploy)…"
-  bash "$(dirname "$0")/launch-k3s.sh" "$DEPLOYMENT_ID"
-else
-  echo ">>> Skipping K3s pre-warm — fewer than 3 devices registered."
-fi
-
-# ── Pre-warm the cloud analytics stack ──────────────────────────────────────
-# RisingWave + TimescaleDB + Redpanda Connect + dashboard into the shared EKS
-# cluster, during the facilitator pre-deploy — so it's already up when
-# attendees reach session 04 instead of costing ~45 min of live session
-# wall-clock. Idempotent: safe to re-run against an already-deployed slot.
-# See scripts/deploy-cloud-analytics.sh and workshop/04-analytics/block-1.
-echo ">>> Pre-warming cloud analytics stack via scripts/deploy-cloud-analytics.sh…"
-bash "$(dirname "$0")/deploy-cloud-analytics.sh" --deployment-id "$DEPLOYMENT_ID"
+# ── Per-slot post-deploy tail ────────────────────────────────────────────────
+# Device self-registration wait, shadow seeding, K3s + cloud-analytics pre-warm.
+# Factored into scripts/post-deploy-slot.sh so sandbox.sh, sandbox-all.sh and the
+# CI orchestrator all run the identical steps. Idempotent.
+bash "$(dirname "$0")/post-deploy-slot.sh" "$DEPLOYMENT_ID"
 
 # ── Write deployment summary ──────────────────────────────────────────────────
 echo ">>> Generating deployment summary..."
