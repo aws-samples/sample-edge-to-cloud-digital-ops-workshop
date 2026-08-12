@@ -456,10 +456,25 @@ exports.handler = async (event) => {
     // is an account-level read that can't be scoped. Both SDK calls also require
     // GetIndexingConfiguration (per the IoT API reference), and fromSdkCalls can't
     // derive that second action, so every version's policy is built explicitly.
+    //
+    // The grants below scope to the package-wide version wildcard
+    // (`.../version/*`), NOT the single `.../version/N.0.0` ARN, ON PURPOSE.
+    // Every AwsCustomResource in this stack shares ONE singleton provider
+    // Lambda + role (CDK keys it by a fixed uuid), and each version's `policy:`
+    // creates a SEPARATE AWS::IAM::Policy attached to that one role. With
+    // per-version ARNs those 8 policies (4 create + 4 publish) are disjoint, so
+    // attaching them concurrently races IAM's eventual-consistency window: on a
+    // cold slot a provider invocation for one version fired before its own
+    // policy had propagated → non-deterministic "iot:UpdatePackageVersion ...
+    // not authorized" on whichever version lost the race (observed on a clean
+    // ws-slot42 deploy: V2/V3 published, V4 failed — #217). Scoping every grant
+    // to `version/*` makes the policies mutually redundant: once ANY one has
+    // propagated the role can act on all versions, so no single version's race
+    // can fail the deploy.
     const packageArn = `arn:aws:iot:${this.region}:${this.account}:package/${deploymentId}-telemetry-agent`;
+    const packageVersionsArn = `${packageArn}/version/*`;
     for (const versionName of telemetryAgentVersions) {
       const logicalId = `TelemetryAgentV${versionName.split(".")[0]}`;
-      const versionArn = `${packageArn}/version/${versionName}`;
 
       // The full version lifecycle is custom-resource-driven rather than using
       // the L1 CfnSoftwarePackageVersion. The L1 resource stores the version's
@@ -511,7 +526,7 @@ exports.handler = async (event) => {
           new PolicyStatement({
             effect: Effect.ALLOW,
             actions: ["iot:CreatePackageVersion", "iot:DeletePackageVersion"],
-            resources: [packageArn, versionArn],
+            resources: [packageArn, packageVersionsArn],
           }),
           new PolicyStatement({
             effect: Effect.ALLOW,
@@ -551,7 +566,7 @@ exports.handler = async (event) => {
           new PolicyStatement({
             effect: Effect.ALLOW,
             actions: ["iot:UpdatePackageVersion"],
-            resources: [packageArn, versionArn],
+            resources: [packageArn, packageVersionsArn],
           }),
           new PolicyStatement({
             effect: Effect.ALLOW,
