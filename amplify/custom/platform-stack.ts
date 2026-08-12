@@ -356,11 +356,19 @@ export class PlatformStack extends Stack {
 
     // Cluster-scoped access entries for admin/CI principals. `accessConfig.
     // bootstrapClusterCreatorAdminPermissions` only grants admin to whoever ran
-    // the very first `cdk deploy` — every other principal (a re-run CI role, a
-    // second facilitator) is invisible to the cluster's RBAC until explicitly
-    // added here. AmazonEKSAdminPolicy (not ...ClusterAdminPolicy) covers the
-    // namespace/secret/deployment/CRD-install operations block-1-deploy.md
-    // needs without granting Kubernetes RBAC-management rights.
+    // the very first `cdk deploy` — every other principal (a re-run CI role, the
+    // async deploy orchestrator's CodeBuild role, a second facilitator) is
+    // invisible to the cluster's RBAC until explicitly added here.
+    //
+    // Must be AmazonEKSClusterAdminPolicy, NOT AmazonEKSAdminPolicy (#225):
+    // AmazonEKSAdminPolicy maps to the built-in `admin` ClusterRole, which — even
+    // bound cluster-wide — CANNOT create namespaces (a cluster-scoped resource)
+    // or install CRDs/ClusterRoles. The deploy these principals run does exactly
+    // that: deploy-cloud-analytics.sh / block-1-deploy.md `kubectl create
+    // namespace`, install cert-manager + risingwave-operator + cnpg (all ship
+    // CRDs and cluster roles), and apply a gp3 StorageClass. Those need
+    // cluster-admin. The cluster creator gets it implicitly via the bootstrap
+    // flag; access-entry principals need it granted explicitly.
     (props?.eksAdminPrincipalArns ?? []).forEach((principalArn, i) => {
       const accessEntry = new CfnAccessEntry(this, `EksAdminAccessEntry${i}`, {
         clusterName: eksCluster.ref,
@@ -368,7 +376,8 @@ export class PlatformStack extends Stack {
         type: "STANDARD",
         accessPolicies: [
           {
-            policyArn: "arn:aws:eks::aws:cluster-access-policy/AmazonEKSAdminPolicy",
+            policyArn:
+              "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy",
             accessScope: { type: "cluster" },
           },
         ],
