@@ -35,9 +35,26 @@ spec:
             - -c
             - |
               set -e
-              echo "Waiting for RisingWave to be ready..."
-              until pg_isready -h {{ .Values.risingwave.crName }}-frontend -p 4567 -U root; do
+              FE={{ .Values.risingwave.crName }}-frontend
+              # (1) Frontend must accept connections.
+              echo "Waiting for RisingWave frontend to accept connections..."
+              until pg_isready -h "$FE" -p 4567 -U root; do
                 sleep 3
+              done
+              # (2) CRITICAL (#214): a frontend that accepts connections is NOT
+              # enough — the DDL DROPs then recreates every source/MV, and a
+              # CREATE MATERIALIZED VIEW fails with "no available slots in
+              # resource group default" if no COMPUTE node has registered yet
+              # (e.g. its pod is still Pending on the dedicated rw-compute node
+              # group). Combined with a psql run that used to lack ON_ERROR_STOP,
+              # that silently left the slot with its schema DROPped and nothing
+              # recreated. Gate on a registered *streaming* compute worker so the
+              # DDL never runs against a computeless cluster.
+              echo "Waiting for a streaming RisingWave compute node to register..."
+              until [ "$(psql -h "$FE" -p 4567 -U root -d dev -tA \
+                  -c "select count(*) from rw_catalog.rw_worker_nodes where type='WORKER_TYPE_COMPUTE_NODE' and is_streaming = true;" 2>/dev/null || echo 0)" -ge 1 ]; do
+                echo "  no streaming compute node yet; sleeping..."
+                sleep 5
               done
               echo "Substituting MSK credentials + slot id into DDL (no manual sed step — creds from msk-credentials Secret env, deployment id from chart value)..."
               sed -e "s|__MSK_BOOTSTRAP__|${MSK_BOOTSTRAP_SERVERS}|g" \
@@ -46,7 +63,11 @@ spec:
                   -e "s|__DEPLOYMENT_ID__|{{ .Values.deploymentId }}|g" \
                   /ddl/ddl-cloud.sql > /tmp/ddl-cloud.sql
               echo "Running DDL..."
-              psql -h {{ .Values.risingwave.crName }}-frontend -p 4567 -U root -d dev -f /tmp/ddl-cloud.sql
+              # (3) CRITICAL (#214): -v ON_ERROR_STOP=1 so a failed CREATE after
+              # the leading DROPs aborts the job with a non-zero exit instead of
+              # printing "DDL complete." and exiting 0. A real failure now surfaces
+              # (Job retries via backoffLimit) rather than silently wiping schema.
+              psql -v ON_ERROR_STOP=1 -h "$FE" -p 4567 -U root -d dev -f /tmp/ddl-cloud.sql
               echo "DDL complete."
           volumeMounts:
             - name: ddl
