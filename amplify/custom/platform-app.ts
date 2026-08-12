@@ -78,6 +78,11 @@ const env = {
 const platform = new PlatformStack(app, "WorkshopPlatformStack", {
   env,
   eksAdminPrincipalArns,
+  // One dedicated rw-compute node per active slot (no autoscaler on this
+  // cluster; one r6i.xlarge fits one slot's RW compute pod) — otherwise the
+  // 2nd+ slot's compute stays Pending and its DDL can't run (#215). At least 1
+  // so a zero-slot / shared-infra-only deploy keeps a warm node.
+  rwComputeDesiredSize: Math.max(1, slots.length),
 });
 
 for (const deploymentId of slots) {

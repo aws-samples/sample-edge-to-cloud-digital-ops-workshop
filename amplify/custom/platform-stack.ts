@@ -62,6 +62,21 @@ export interface PlatformStackProps extends StackProps {
    * namespace-scoped entry instead (see ParticipantStack).
    */
   readonly eksAdminPrincipalArns?: string[];
+
+  /**
+   * Initial node count for the dedicated `rw-compute` node group. One
+   * `r6i.xlarge` node fits exactly one slot's RisingWave compute pod (each
+   * requests ~2 vCPU and can only land here via the `workload:
+   * risingwave-compute` selector + `dedicated` taint toleration), so a deploy
+   * must provision at least one node per active slot or the 2nd+ slot's
+   * compute pod sits Pending forever — and its DDL/MVs then can't be created
+   * (#214/#215). There is no cluster-autoscaler on this cluster, so
+   * `desiredSize` is the only lever; platform-app.ts drives it from the number
+   * of slots being deployed (`max(1, slotCount)`). Defaults to 1 (zero-slot /
+   * shared-infra-only deploys still keep one warm node). Capped by the node
+   * group's `maxSize` (8).
+   */
+  readonly rwComputeDesiredSize?: number;
 }
 
 /**
@@ -312,7 +327,11 @@ export class PlatformStack extends Stack {
       scalingConfig: {
         minSize: 1,
         maxSize: 8,
-        desiredSize: 1,
+        // Driven by the active-slot count (see platform-app.ts): one r6i.xlarge
+        // fits exactly one slot's RW compute pod and there's no autoscaler, so
+        // a deploy must provision one node per slot up front or the 2nd+ slot's
+        // compute stays Pending (#215). Clamped to [1, maxSize].
+        desiredSize: Math.min(8, Math.max(1, props?.rwComputeDesiredSize ?? 1)),
       },
       amiType: "AL2_x86_64",
       diskSize: 20,
