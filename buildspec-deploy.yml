@@ -50,9 +50,11 @@ phases:
   build:
     commands:
       # Turn "ws-slot00,ws-slot01" into positional args for sandbox-all.sh.
-      - |
-        IFS=',' read -r -a SLOT_ARGS <<< "$WORKSHOP_SLOTS"
-        pnpm run sandbox:all "${SLOT_ARGS[@]}"
+      # CodeBuild runs each command under /bin/sh (dash), NOT bash, so bash-only
+      # `read -r -a`/`<<<` here-strings fail with "redirection unexpected". Slot
+      # ids are `ws-slotNN` (never contain spaces), so a POSIX `tr , ' '` +
+      # deliberate word-splitting is the shell-agnostic equivalent.
+      - pnpm run sandbox:all $(echo "$WORKSHOP_SLOTS" | tr ',' ' ')
 
   post_build:
     commands:

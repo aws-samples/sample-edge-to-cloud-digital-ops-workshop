@@ -18,10 +18,15 @@ import { OrchestratorStack } from "./orchestrator-stack";
 // (or scripts/trigger-deploy.sh), which returns a build id immediately — the
 // pollable handle. See scripts/poll-deploy.sh and .github/workflows/deploy.yml.
 //
-// NOTE: CodeBuild needs a one-time account/region GitHub source credential
-// (a PAT or the GitHub App connection, `aws codebuild import-source-credentials`
-// or the console) so the project can clone the repo. That is an account-level
-// singleton, not something this stack creates.
+// SOURCE CREDENTIAL: for a PUBLIC repo (the default aws-samples clone URL),
+// CodeBuild clones anonymously — no source credential is required, verified
+// live 2026-08-12 (a build's DOWNLOAD_SOURCE phase SUCCEEDED with
+// `list-source-credentials` empty). A one-time account/region GitHub source
+// credential (PAT or GitHub App connection via `aws codebuild
+// import-source-credentials` or the console) is only needed if you (a) point
+// repoCloneUrl at a PRIVATE fork, or (b) want CodeBuild to post build status
+// back to the PR (ReportBuildStatus). It is an account-level singleton, not
+// something this stack creates.
 
 const app = new App();
 
