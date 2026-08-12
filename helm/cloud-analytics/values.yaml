@@ -178,6 +178,49 @@ timescaledb:
 rpConnectTimescaledb:
   enabled: true
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Telegraf — MSK → Amazon Timestream for InfluxDB sink (#230/#233)
+#
+# The managed-hot-tier counterpart to the Redpanda Connect → TimescaleDB sink
+# above. Deliberately a *different* ingest tool (Telegraf, the idiomatic
+# InfluxDB agent) so Session 4 teaches line protocol + Telegraf, not just a
+# second copy of the same pipeline. Consumes the same MSK topics
+# (^sensors\.raw\., raw.telemetry) under a per-slot consumer group
+# (influxdb-sink-<deploymentId>) and writes the dimensional sensor_reading model
+# (measurement=sensor_reading, tags site_id/sensor, field value, ts=ts_ms) into
+# the shared Timestream for InfluxDB instance's per-slot bucket.
+#
+# DEFAULT ON for deployed slots, OFF for local/minikube smoke tests (same
+# convention as risingwave.compute.dedicatedNodePool.enabled) — there is no
+# InfluxDB instance to reach off-cluster, and the influxdb-credentials secret
+# (bucket + token, minted in-cluster by influxdb-provision-job.yaml) won't exist.
+telegraf:
+  enabled: true
+  image:
+    repository: docker.io/library/telegraf
+    tag: "1.32"
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+  # InfluxDB v2 auth for a Telegraf output plugin is token-based, but Amazon
+  # Timestream for InfluxDB only surfaces admin username/password (Secrets
+  # Manager, exposed on PlatformStack.shared by #229). The instance is
+  # VPC-private, so the per-slot bucket + scoped token are minted IN-CLUSTER by
+  # influxdb-provision-job.yaml, which signs in with the admin creds (the
+  # influxdb-admin secret deploy-cloud-analytics.sh creates) and writes the
+  # influxdb-credentials secret this Deployment consumes. Bucket name is keyed
+  # on the slot; 7-day retention keeps the shared instance from growing forever.
+  bucket: ""          # defaults to "workshop-<deploymentId>" when empty
+  retentionSeconds: 604800   # 7 days
+  # k8s secret (in this namespace) holding the minted per-slot InfluxDB token —
+  # written by the provisioning Job, consumed here via envFrom.
+  credentialsSecret: influxdb-credentials
+  # k8s secret holding the shared instance admin creds + endpoint — created by
+  # scripts/deploy-cloud-analytics.sh from the #229 CFN exports.
+  adminSecret: influxdb-admin
+
 rp-connect-timescaledb:
   replicaCount: 1
 
