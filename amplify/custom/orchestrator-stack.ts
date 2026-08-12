@@ -7,7 +7,12 @@ import {
   ComputeType,
   BuildEnvironmentVariableType,
 } from "aws-cdk-lib/aws-codebuild";
-import { PolicyStatement, Effect } from "aws-cdk-lib/aws-iam";
+import {
+  PolicyStatement,
+  Effect,
+  Role,
+  ServicePrincipal,
+} from "aws-cdk-lib/aws-iam";
 import { Construct } from "constructs";
 
 export interface OrchestratorStackProps extends StackProps {
@@ -64,7 +69,22 @@ export class OrchestratorStack extends Stack {
 
     const defaultBranch = props.defaultBranch ?? "main";
 
+    // Explicit CodeBuild service role so its ARN is deterministic at synth time.
+    // We need the ARN in two places: to grant it (below) and to hand it to the
+    // deploy as WORKSHOP_EKS_ADMIN_PRINCIPAL_ARNS so the platform `cdk deploy`
+    // adds a cluster-scoped EKS access entry (CfnAccessEntry) for this very role
+    // BEFORE the post-deploy tail runs kubectl/helm against workshop-eks (#223).
+    // IAM admin (granted below) lets `aws eks update-kubeconfig` succeed, but EKS
+    // Kubernetes RBAC is separate — without an access entry every kubectl call in
+    // deploy-cloud-analytics.sh 401s ("server has asked for credentials").
+    const buildRole = new Role(this, "DeployOrchestratorRole", {
+      assumedBy: new ServicePrincipal("codebuild.amazonaws.com"),
+      description:
+        "Service role for the workshop-deploy-orchestrator CodeBuild project (epic #182). Admin-equivalent; also mapped as an EKS cluster admin via CfnAccessEntry (#223).",
+    });
+
     this.project = new Project(this, "DeployOrchestrator", {
+      role: buildRole,
       projectName: "workshop-deploy-orchestrator",
       description:
         "Fire-and-forget deploy of WorkshopPlatformStack + slot nested stacks (epic #182).",
@@ -89,6 +109,14 @@ export class OrchestratorStack extends Stack {
           type: BuildEnvironmentVariableType.PLAINTEXT,
           value: "",
         },
+        // platform-app.ts reads this (csvContext) and adds a cluster-scoped EKS
+        // access entry for the deploy runner, so the post-deploy tail's kubectl/
+        // helm steps can reach workshop-eks (#223). Its own role ARN — resolved
+        // at synth from the explicit role above.
+        WORKSHOP_EKS_ADMIN_PRINCIPAL_ARNS: {
+          type: BuildEnvironmentVariableType.PLAINTEXT,
+          value: buildRole.roleArn,
+        },
       },
       // Serialize: two concurrent deploys would race the same CloudFormation
       // stack. A second dispatch waits (or fails fast) rather than corrupting
@@ -101,7 +129,7 @@ export class OrchestratorStack extends Stack {
     // Firehose/S3/CloudFormation/SSM/Secrets/Athena/Glue). Grant admin — same
     // blast radius as a facilitator's own credentials. Tightening this to a
     // least-privilege policy is tracked as follow-up (see decisions doc).
-    this.project.addToRolePolicy(
+    buildRole.addToPolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,
         actions: ["*"],
