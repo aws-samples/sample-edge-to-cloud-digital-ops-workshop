@@ -19,6 +19,11 @@
 #   2. Cognito admin write (AdminCreateUser + AdminSetUserPassword) scoped to the
 #      account's user pools — needed by scripts/create-workshop-user.sh, called
 #      from 03-state/block-3-ui.md.
+#   3. CodeBuild trigger (StartBuild + BatchGetBuilds) scoped to the async deploy
+#      orchestrator project — needed when this same role is the GitHub Actions
+#      OIDC principal that deploy.yml (#183) uses to fire the fire-and-forget
+#      deploy via scripts/trigger-deploy.sh. Without it the workflow's trigger
+#      step fails "not authorized to perform: codebuild:StartBuild".
 #
 # Idempotent: re-running is safe (create-access-entry / put-role-policy no-op or
 # overwrite in place).
@@ -82,25 +87,29 @@ run aws eks associate-access-policy --region "$REGION" --cluster-name "$EKS_CLUS
   --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
   --access-scope type=cluster
 
-# ── 2. Cognito admin write (scoped to this account's user pools) ──────────────
-echo "--- Cognito admin grant on inline policy '$POLICY_NAME' ---"
+# ── 2. Cognito admin write + CodeBuild deploy-trigger (inline policy) ─────────
+echo "--- Cognito + CodeBuild grants on inline policy '$POLICY_NAME' ---"
 POLICY_DOC=$(mktemp /tmp/ci-inline-policy-XXXXXX.json)
 trap 'rm -f "$POLICY_DOC"' EXIT
 
 if ! aws iam get-role-policy --role-name "$ROLE_NAME" --policy-name "$POLICY_NAME" \
       --query 'PolicyDocument' --output json > "$POLICY_DOC" 2>/dev/null; then
   echo "  Inline policy '$POLICY_NAME' not found on $ROLE_NAME — creating a"
-  echo "  Cognito-only policy instead."
+  echo "  fresh policy instead."
   printf '{"Version":"2012-10-17","Statement":[]}' > "$POLICY_DOC"
 fi
 
-UPDATED=$(python3 - "$POLICY_DOC" "$ACCOUNT_ID" <<'PY'
+# ARN of the async deploy orchestrator CodeBuild project (epic #182/#183).
+ORCHESTRATOR_PROJECT_ARN="arn:aws:codebuild:${REGION}:${ACCOUNT_ID}:project/workshop-deploy-orchestrator"
+
+UPDATED=$(python3 - "$POLICY_DOC" "$ACCOUNT_ID" "$ORCHESTRATOR_PROJECT_ARN" <<'PY'
 import json, sys
-path, account = sys.argv[1], sys.argv[2]
+path, account, cb_project_arn = sys.argv[1], sys.argv[2], sys.argv[3]
 doc = json.load(open(path))
 doc.setdefault("Version", "2012-10-17")
 stmts = doc.setdefault("Statement", [])
 have = {s.get("Sid") for s in stmts}
+added = []
 if "CognitoWorkshopUserAdmin" not in have:
     stmts.append({
         "Sid": "CognitoWorkshopUserAdmin",
@@ -108,6 +117,7 @@ if "CognitoWorkshopUserAdmin" not in have:
         "Resource": f"arn:aws:cognito-idp:*:{account}:userpool/*",
         "Action": ["cognito-idp:AdminCreateUser", "cognito-idp:AdminSetUserPassword"],
     })
+    added.append("CognitoWorkshopUserAdmin")
 if "CognitoListPools" not in have:
     # ListUserPools has no resource-level control — must be "*".
     stmts.append({
@@ -116,17 +126,28 @@ if "CognitoListPools" not in have:
         "Resource": "*",
         "Action": "cognito-idp:ListUserPools",
     })
+    added.append("CognitoListPools")
+if "CodeBuildDeployTrigger" not in have:
+    # Fire-and-forget deploy trigger for deploy.yml (#183): start the
+    # orchestrator build and poll it. Scoped to the one project.
+    stmts.append({
+        "Sid": "CodeBuildDeployTrigger",
+        "Effect": "Allow",
+        "Resource": cb_project_arn,
+        "Action": ["codebuild:StartBuild", "codebuild:BatchGetBuilds"],
+    })
+    added.append("CodeBuildDeployTrigger")
 json.dump(doc, open(path, "w"), indent=2)
-print("changed" if "CognitoWorkshopUserAdmin" not in have else "unchanged")
+print(",".join(added) if added else "unchanged")
 PY
 )
 
-if [[ "$UPDATED" == "changed" ]]; then
+if [[ "$UPDATED" != "unchanged" ]]; then
   run aws iam put-role-policy --role-name "$ROLE_NAME" --policy-name "$POLICY_NAME" \
     --policy-document "file://$POLICY_DOC"
-  echo "  Added Cognito statements to '$POLICY_NAME'."
+  echo "  Added statements to '$POLICY_NAME': $UPDATED"
 else
-  echo "  Cognito statements already present — no change."
+  echo "  Cognito + CodeBuild statements already present — no change."
 fi
 
 echo ""
