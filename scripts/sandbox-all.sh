@@ -195,14 +195,43 @@ S3_BUCKET=$(aws cloudformation list-exports \
   --query "Exports[?Name=='workshop-platform-bucket-name'].Value" \
   --output text)
 
-# ── Upload shared binaries and simulator to S3 ───────────────────────────────
-LOCAL_BINARY_CACHE="$HOME/.cache/workshop/aws-iot-device-client"
-if [[ -f "$LOCAL_BINARY_CACHE" ]]; then
-  echo ">>> Uploading IoT Device Client binary to s3://${S3_BUCKET}/bin/aws-iot-device-client..."
-  aws s3 cp "$LOCAL_BINARY_CACHE" "s3://${S3_BUCKET}/bin/aws-iot-device-client"
+# ── Acquire + upload shared IoT Device Client binary to S3 ───────────────────
+# Mirror scripts/sandbox.sh exactly (shared functions in build-device-client.sh
+# so the two paths can't drift): fetch the pre-built GitHub Release asset first
+# (Docker-free, no creds — works in CodeBuild), fall back to a local Docker
+# build only if Docker is present, else fail with an actionable message.
+#
+# Previously this path merely checked for a pre-existing cache and warned+skipped
+# if absent. Under the async orchestrator (CodeBuild) that cache is always empty,
+# so the binary was never uploaded → edge instances never ran the Device Client
+# → the K3s IoT Job never executed → the post-deploy tail timed out waiting 30
+# min for the kubeconfig in SSM. Acquiring it here fixes the async deploy.
+# shellcheck source=scripts/build-device-client.sh
+source "$(dirname "$0")/build-device-client.sh"
+# Provenance-suffixed cache key, matching sandbox.sh, so a stale binary from
+# before a version/patch bump is never reused silently.
+LOCAL_BINARY_CACHE="$HOME/.cache/workshop/aws-iot-device-client-${DEVICE_CLIENT_PROVENANCE}"
+if [[ ! -f "$LOCAL_BINARY_CACHE" ]]; then
+  echo ">>> Fetching pre-built IoT Device Client from GitHub Release ${DEVICE_CLIENT_RELEASE_TAG}…"
+  if fetch_prebuilt_device_client "$LOCAL_BINARY_CACHE"; then
+    echo ">>> Fetched pre-built binary → $LOCAL_BINARY_CACHE"
+  elif command -v docker >/dev/null 2>&1; then
+    echo ">>> No pre-built artifact available — building with Docker (one-time, ~8 min)…"
+    build_device_client_binary "$LOCAL_BINARY_CACHE"
+    echo ">>> Binary built and cached at $LOCAL_BINARY_CACHE"
+  else
+    echo "ERROR: could not obtain the aws-iot-device-client binary." >&2
+    echo "  • No pre-built artifact at GitHub Release '${DEVICE_CLIENT_RELEASE_TAG}' (repo ${DEVICE_CLIENT_REPO})." >&2
+    echo "  • Docker is not available, so the local cross-compile fallback can't run either." >&2
+    echo "  Fix: publish the artifact via the 'Build Device Client' workflow" >&2
+    echo "  (gh workflow run build-device-client.yml), then re-deploy." >&2
+    exit 1
+  fi
 else
-  echo ">>> WARNING: IoT Device Client binary not found at $LOCAL_BINARY_CACHE — run scripts/sandbox.sh once to build it"
+  echo ">>> Using cached IoT Device Client binary."
 fi
+echo ">>> Uploading IoT Device Client binary to s3://${S3_BUCKET}/bin/aws-iot-device-client..."
+aws s3 cp "$LOCAL_BINARY_CACHE" "s3://${S3_BUCKET}/bin/aws-iot-device-client"
 
 echo ">>> Uploading sensor simulator to s3://${S3_BUCKET}/simulator/sensor-sim.py..."
 aws s3 cp simulator/sensor-sim.py "s3://${S3_BUCKET}/simulator/sensor-sim.py"
