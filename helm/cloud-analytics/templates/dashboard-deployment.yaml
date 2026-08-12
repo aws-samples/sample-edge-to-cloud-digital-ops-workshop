@@ -36,7 +36,19 @@ spec:
               until kubectl get secret timescaledb-dashboard-env -n {{ .Release.Namespace }} >/dev/null 2>&1; do
                 sleep 5
               done
-              echo "timescaledb-dashboard-env present — starting dashboard."
+              echo "timescaledb-dashboard-env present."
+              {{- if .Values.telegraf.enabled }}
+              # The InfluxDB tier's env comes from the influxdb-credentials secret
+              # the provision Job mints (#230/#231). Wait for it too so the
+              # non-optional secretKeyRefs below can't fault the container into
+              # CreateContainerConfigError on a cold deploy.
+              echo "Waiting for {{ .Values.telegraf.credentialsSecret }} secret in namespace {{ .Release.Namespace }}..."
+              until kubectl get secret {{ .Values.telegraf.credentialsSecret }} -n {{ .Release.Namespace }} >/dev/null 2>&1; do
+                sleep 5
+              done
+              echo "{{ .Values.telegraf.credentialsSecret }} present."
+              {{- end }}
+              echo "Starting dashboard."
       containers:
         - name: dashboard
           image: "{{ .Values.dashboard.image.repository }}:{{ .Values.dashboard.image.tag }}"
@@ -67,6 +79,32 @@ spec:
               value: {{ .Values.dashboard.athenaWorkgroup | quote }}
             - name: ATHENA_TABLE
               value: {{ .Values.dashboard.athenaTable | quote }}
+            {{- end }}
+            {{- if .Values.telegraf.enabled }}
+            # InfluxDB tier (#231): url/token/org/bucket from the per-slot
+            # influxdb-credentials secret the provision Job mints (#230). The
+            # initContainer above waits for this secret, so these are NOT
+            # optional — a missing var would silently fall back to mock data.
+            - name: INFLUXDB_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.telegraf.credentialsSecret }}
+                  key: INFLUX_URL
+            - name: INFLUXDB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.telegraf.credentialsSecret }}
+                  key: INFLUX_TOKEN
+            - name: INFLUXDB_ORG
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.telegraf.credentialsSecret }}
+                  key: INFLUX_ORG
+            - name: INFLUXDB_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.telegraf.credentialsSecret }}
+                  key: INFLUX_BUCKET
             {{- end }}
           resources:
             {{- toYaml .Values.dashboard.resources | nindent 12 }}
