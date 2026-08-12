@@ -33,6 +33,19 @@ phases:
       - corepack enable
       - corepack prepare pnpm@10.28.2 --activate
       - pnpm install --frozen-lockfile
+      # The STANDARD_7_0 image ships kubectl but NOT helm, and the post-deploy
+      # tail (deploy-cloud-analytics.sh / deploy-edge-stack.sh) runs
+      # `helm upgrade --install`. Install a pinned helm v3 (matches the
+      # facilitator env) so the install can't drift build-to-build (#227).
+      - |
+        HELM_VERSION=v3.18.4
+        if ! command -v helm >/dev/null 2>&1; then
+          echo ">>> Installing helm ${HELM_VERSION}…"
+          curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" | tar -xz
+          mv linux-amd64/helm /usr/local/bin/helm
+          rm -rf linux-amd64
+        fi
+        helm version --short
 
   pre_build:
     commands:
