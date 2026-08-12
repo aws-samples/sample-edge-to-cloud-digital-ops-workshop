@@ -1,4 +1,4 @@
-# Block 5 — Live Analytics Dashboard
+# Block 6 — Live Analytics Dashboard
 
 **Duration:** 30 min
 
@@ -6,15 +6,15 @@
 
 ## What You've Been Looking At
 
-If you opened the dashboard at the start of this section (Block 1), you've already seen it: three live charts comparing the same telemetry as served by RisingWave, TimescaleDB, and Athena/Iceberg side by side.
+If you opened the dashboard at the start of this section (Block 1), you've already seen it: four live charts comparing the same telemetry as served by RisingWave, TimescaleDB, Timestream for InfluxDB, and Athena/Iceberg side by side.
 
 | Chart | Y axis | Source |
 |---|---|---|
-| **Data Freshness** | Milliseconds — **log scale** | All three tiers |
-| **Fleet Free CPU & Memory** | Percent free (higher = healthier) | Both live DBs |
-| **Time Since Last Message** | Seconds per node | Both live DBs |
+| **Data Freshness** | Milliseconds — **log scale** | All four tiers |
+| **Fleet Free CPU & Memory** | Percent free (higher = healthier) | Both self-managed live DBs |
+| **Time Since Last Message** | Seconds per node | Both self-managed live DBs |
 
-All three stores serve the same telemetry, so you can directly compare how stale each store's view of the fleet is — a live streaming MV (RisingWave), a live relational scan (TimescaleDB), and an on-demand warehouse query (Athena over the Iceberg table in S3). This block explains how each chart gets its data.
+All four stores serve the same telemetry, so you can directly compare how stale each store's view of the fleet is — a live streaming MV (RisingWave), a live relational scan (TimescaleDB), a **managed** time-series store polled on demand (Timestream for InfluxDB — [Block 5](block-5-timestream-influxdb.md)), and an on-demand warehouse query (Athena over the Iceberg table in S3). This block explains how each chart gets its data.
 
 If you don't already have it open:
 
@@ -27,21 +27,22 @@ kill "$DASH_PF_PID" 2>/dev/null || true
 ```
 <!-- e2e:assert {"contains": "<"} -->
 
-Or keep the port-forward running in a separate terminal and open `http://localhost:3000` in a browser. The RisingWave and TimescaleDB indicators show `live · push`; Athena shows `live · poll`. If either live tier shows `(mock)`, the dashboard's endpoint env vars aren't wired to a live store yet — see [Connecting to Live Databases](#connecting-to-live-databases) below.
+Or keep the port-forward running in a separate terminal and open `http://localhost:3000` in a browser. The RisingWave and TimescaleDB indicators show `live · push`; InfluxDB and Athena show `live · poll`. If any tier shows `(mock)`, the dashboard's endpoint env vars aren't wired to a live store yet — see [Connecting to Live Databases](#connecting-to-live-databases) below.
 
 ---
 
 ## Chart 1 — Data Freshness (log scale)
 
-The Y axis uses a **log₁₀ scale** because the three tiers span four orders of magnitude:
+The Y axis uses a **log₁₀ scale** because the four tiers span four orders of magnitude:
 
 | Tier | Typical freshness |
 |---|---|
 | RisingWave MV | 100 ms – 1 s (sawtooth — steps with each checkpoint barrier) |
 | TimescaleDB (windowed scan) | 100–600 ms |
+| Timestream for InfluxDB (polled) | ~1–2 s (Telegraf flush + poll cadence) |
 | Athena/S3 | tens of s up to ~300 s |
 
-A linear axis would make RisingWave and TimescaleDB indistinguishable — the log scale makes all three tiers clearly visible at once.
+A linear axis would make RisingWave, TimescaleDB, and InfluxDB indistinguishable — the log scale makes all four tiers clearly visible at once.
 
 !!! tip "Freshness vs. query latency — read [Data Store Performance Characteristics](#data-store-performance-characteristics) below"
     RisingWave and TimescaleDB land in the same freshness band, but for very
@@ -200,6 +201,49 @@ charts.
     if [ "$AT_FRESH" = "None" ]; then AT_FRESH=""; fi
     if [ "$AT_ROWS" = "None" ]; then AT_ROWS=""; fi
     echo "{\"tier\":\"athena\",\"freshness_ms\":${AT_FRESH:-null},\"query_latency_ms\":${AT_LAT},\"rows\":${AT_ROWS:-0}}"
+    ```
+    <!-- e2e:assert {"captureFreshness": true} -->
+
+??? example "Timestream for InfluxDB — freshness + query latency (port 8086)"
+    ```bash
+    # Same per-slot bucket + sensor_reading schema the dashboard's
+    # /api/freshness?tier=influxdb route queries (see Block 5). The url/token/org/
+    # bucket live in the influxdb-credentials secret the in-cluster provision Job
+    # mints; read them, port-forward to the managed instance, and run one Flux
+    # query for the newest point's timestamp. Freshness is subtracted against the
+    # CLIENT wall-clock (date +%s%3N) — same discipline as the other tiers.
+    IX_URL=$(kubectl get secret influxdb-credentials -n ws-slot00 -o jsonpath='{.data.INFLUX_URL}' | base64 -d)
+    IX_TOKEN=$(kubectl get secret influxdb-credentials -n ws-slot00 -o jsonpath='{.data.INFLUX_TOKEN}' | base64 -d)
+    IX_ORG=$(kubectl get secret influxdb-credentials -n ws-slot00 -o jsonpath='{.data.INFLUX_ORG}' | base64 -d)
+    IX_BUCKET=$(kubectl get secret influxdb-credentials -n ws-slot00 -o jsonpath='{.data.INFLUX_BUCKET}' | base64 -d)
+    IX_HOSTPORT=$(echo "$IX_URL" | sed -E 's#^https?://##')
+    IX_HOST=${IX_HOSTPORT%%:*}
+    # Tunnel to the VPC-private instance through any pod with network access.
+    kubectl run influx-tunnel-$$ -n ws-slot00 --image=alpine/socat --restart=Never --command -- \
+      socat TCP-LISTEN:8086,fork,reuseaddr "TCP:${IX_HOST}:8086" >/dev/null 2>&1 || true
+    kubectl wait --for=condition=Ready pod/influx-tunnel-$$ -n ws-slot00 --timeout=60s >/dev/null 2>&1 || true
+    kubectl port-forward -n ws-slot00 pod/influx-tunnel-$$ 8086:8086 > /tmp/ix-fresh-pf.log 2>&1 &
+    IX_PF_PID=$!
+    until grep -q "Forwarding from" /tmp/ix-fresh-pf.log 2>/dev/null; do sleep 1; done
+    # Newest point across the bucket, as epoch-ms. Flux `last()` after a wide
+    # range gives the most-recent sensor_reading; _time is RFC3339 → epoch-ms.
+    FLUX='from(bucket:"'"$IX_BUCKET"'") |> range(start:-15m) |> filter(fn:(r)=> r._measurement=="sensor_reading" and r._field=="value") |> last() |> keep(columns:["_time"]) |> max(column:"_time")'
+    IX_T0=$(date +%s%3N)
+    IX_TIME=$(curl -sf -k "https://localhost:8086/api/v2/query?org=${IX_ORG}" \
+      -H "Authorization: Token ${IX_TOKEN}" \
+      -H 'Accept: application/csv' \
+      -H 'Content-Type: application/vnd.flux' \
+      -d "$FLUX" | awk -F, 'NR>1 && $NF ~ /T/ {print $NF; exit}')
+    IX_NOW=$(date +%s%3N)
+    IX_LAT=$(( IX_NOW - IX_T0 ))
+    IX_FRESH=""
+    if [ -n "$IX_TIME" ]; then
+      IX_TS=$(date -u -d "$IX_TIME" +%s%3N 2>/dev/null || date -u -jf "%Y-%m-%dT%H:%M:%S" "${IX_TIME%%.*}" +%s000 2>/dev/null)
+      [ -n "$IX_TS" ] && IX_FRESH=$(( IX_NOW - IX_TS ))
+    fi
+    kill "$IX_PF_PID" 2>/dev/null || true
+    kubectl delete pod influx-tunnel-$$ -n ws-slot00 --wait=false >/dev/null 2>&1 || true
+    echo "{\"tier\":\"influxdb\",\"freshness_ms\":${IX_FRESH:-null},\"query_latency_ms\":${IX_LAT},\"rows\":null}"
     ```
     <!-- e2e:assert {"captureFreshness": true} -->
 
@@ -466,7 +510,7 @@ RisingWave's native subscription cursor and Postgres's `LISTEN`/`NOTIFY` are bot
     --8<-- "cloud-dashboard/src/app/api/stream/timescaledb/route.ts"
     ```
 
-**Athena stays on-demand/polled** — it's a warehouse query, not a live push, and has no subscribe primitive. The dashboard's `usePolledFreshness` hook calls `/api/freshness?tier=athena` on a 15-second `setInterval`; that's the one interval left in the app, and it's deliberate.
+**Athena and InfluxDB stay on-demand/polled** — neither exposes a subscribe primitive we use here (Athena is a warehouse query; Timestream for InfluxDB is a managed store we read with a Flux query, not a `LISTEN`/`SUBSCRIBE` cursor). The dashboard's `usePolledFreshness` hook calls `/api/freshness?tier=athena` on a 15-second `setInterval` and `/api/freshness?tier=influxdb` on a tighter 5-second one (InfluxDB's read is a fast time-series query, so it can afford a quicker cadence than the warehouse tier); those two intervals are the only ones left in the app, and they're deliberate. This is the practical contrast with the self-managed TimescaleDB tier next door — see [Block 5](block-5-timestream-influxdb.md) for why the managed store trades the push primitive for zero operational surface.
 
 ??? example "View source — dashboard page (push + poll hooks)"
     [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/cloud-dashboard/src/app/page.tsx){ .md-button target=_blank }
@@ -488,7 +532,7 @@ Both live-tier hooks and the Athena poll return the same `FreshnessPayload` shap
 
 ## Connecting to Live Databases
 
-The chart wired above by `helm/cloud-analytics` sets `RISINGWAVE_ENDPOINT` and `TIMESCALEDB_ENDPOINT` automatically from in-cluster service DNS and the CNPG-generated credentials Secret — nothing to configure for a deployed slot. The dashboard falls back to mock data (and a `⚠ Mock data` banner) only when these are unset, e.g. running the app locally outside the cluster:
+The chart wired above by `helm/cloud-analytics` sets `RISINGWAVE_ENDPOINT`, `TIMESCALEDB_ENDPOINT`, and the four `INFLUXDB_*` vars automatically from in-cluster service DNS, the CNPG-generated credentials Secret, and the per-slot `influxdb-credentials` Secret — nothing to configure for a deployed slot. The dashboard falls back to mock data (and a `⚠ Mock data` banner) only when these are unset, e.g. running the app locally outside the cluster:
 
 ```text
 # RisingWave — PostgreSQL wire protocol on port 4567
@@ -496,6 +540,13 @@ RISINGWAVE_ENDPOINT=postgres://root@risingwave-cloud-frontend.ws-slot00.svc:4567
 
 # TimescaleDB — standard Postgres on port 5432
 TIMESCALEDB_ENDPOINT=postgres://workshop:<password>@timescaledb-cloud-rw.ws-slot00.svc:5432/edge
+
+# Timestream for InfluxDB — managed hot tier (Block 5). url/token/org/bucket
+# come from the per-slot influxdb-credentials Secret the provision Job mints.
+INFLUXDB_ENDPOINT=https://<instance-endpoint>:8086
+INFLUXDB_TOKEN=<per-slot read/write token>
+INFLUXDB_ORG=workshop
+INFLUXDB_BUCKET=workshop-ws-slot00
 
 # Athena / Iceberg — the warehouse tier. Only the Glue database name is
 # required; the workgroup, table, and (optional) per-slot filter default sanely.
@@ -505,4 +556,4 @@ ATHENA_DATABASE=workshop_telemetry
 # WORKSHOP_DEPLOYMENT_ID=ws-slot00          # optional: scope to one slot's rows
 ```
 
-The Athena tier needs no endpoint — it uses the dashboard pod's IAM role to call Athena, so that role must allow `athena:StartQueryExecution` / `GetQueryExecution` / `GetQueryResults`, Glue read on `workshop_telemetry`, and read/write on the workgroup's S3 results location. When `ATHENA_DATABASE` is unset the Athena tier falls back to mock data, exactly like the two live DBs.
+The Athena tier needs no endpoint — it uses the dashboard pod's IAM role to call Athena, so that role must allow `athena:StartQueryExecution` / `GetQueryExecution` / `GetQueryResults`, Glue read on `workshop_telemetry`, and read/write on the workgroup's S3 results location. When `ATHENA_DATABASE` (or, for the managed tier, `INFLUXDB_ENDPOINT`) is unset that tier falls back to mock data, exactly like the two live DBs.

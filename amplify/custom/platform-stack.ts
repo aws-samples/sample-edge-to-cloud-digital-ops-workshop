@@ -680,6 +680,7 @@ export class PlatformStack extends Stack {
       },
     });
 
+    // --8<-- [start:influxdb-instance]
     const influxInstance = new CfnInfluxDBInstance(this, "InfluxDbInstance", {
       name: "workshop-influxdb",
       dbInstanceType: "db.influx.medium",
@@ -696,6 +697,7 @@ export class PlatformStack extends Stack {
       vpcSecurityGroupIds: [influxSg.securityGroupId],
       vpcSubnetIds: this.cloudVpc.selectSubnets({ subnetType: SubnetType.PRIVATE_WITH_EGRESS }).subnetIds.slice(0, 1),
     });
+    // --8<-- [end:influxdb-instance]
     // Let `cdk destroy` (sandbox:delete-all) cascade cleanly.
     influxInstance.applyRemovalPolicy(RemovalPolicy.DESTROY);
 
