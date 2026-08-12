@@ -79,7 +79,7 @@ curl -sf http://localhost:3000 | head -c 200
 <!-- e2e:assert {"contains": "<"} -->
 
 **Cloud dashboard** (the freshness-comparison panel from
-[Session 4, Block 5](../04-analytics/block-5-dashboard.md)):
+[Session 4, Block 5](../04-analytics/block-6-dashboard.md)):
 
 ```bash
 kubectl port-forward -n ws-slot00 svc/cloud-analytics-dashboard 3001:3000 > /tmp/dash-burst-pf.log 2>&1 &
@@ -132,12 +132,12 @@ stores diverge.
 ## Step 3 — Watch each store under load
 
 The [freshness table in Block 4](block-4-freshness.md#freshness-comparison-table)
-and the [live cloud dashboard](../04-analytics/block-5-dashboard.md) are your
+and the [live cloud dashboard](../04-analytics/block-6-dashboard.md) are your
 instruments. What to look for while the burst runs:
 
 | Store | What to watch | Why |
 |---|---|---|
-| **Edge HMI (RisingWave MV)** | Does freshness stay sub-second, or climb into seconds? | RisingWave does aggregation **at write time**; sustained high ingest can push the checkpoint-commit path behind (see the [worked checkpoint example](../04-analytics/block-5-dashboard.md#data-store-performance-characteristics)). A **stale-but-fast-to-read** tier is the signature. |
+| **Edge HMI (RisingWave MV)** | Does freshness stay sub-second, or climb into seconds? | RisingWave does aggregation **at write time**; sustained high ingest can push the checkpoint-commit path behind (see the [worked checkpoint example](../04-analytics/block-6-dashboard.md#data-store-performance-characteristics)). A **stale-but-fast-to-read** tier is the signature. |
 | **Cloud TimescaleDB CAGG** | Freshness and the "time since last message" chart | Rows arrive via Redpanda Connect's batch window + MSK; watch for ingestion lag as the row rate jumps ~900×. The windowed read stays fast; freshness is the metric that moves. |
 | **Cloud RisingWave panel** | Same freshness metric over the WAN | Compare edge vs cloud RisingWave under identical load — the WAN relay + cloud MSK hop adds propagation delay. |
 | **Athena / Iceberg tile** | Freshness stays tens-of-seconds regardless | Firehose buffers to S3 (128 MB or 300 s). A burst fills the buffer *faster*, so a flush may fire on the size threshold sooner than the 300 s timer — but it's still a batch/reporting tier, never live. |
@@ -186,7 +186,7 @@ kill "$HMI_PF_PID" "$DASH_PF_PID" 2>/dev/null || true
 
 - Which store degraded **freshness** first under the burst, and which held its
   latency budget? Map that back to the write-time vs read-time split from the
-  [performance-characteristics section](../04-analytics/block-5-dashboard.md#data-store-performance-characteristics).
+  [performance-characteristics section](../04-analytics/block-6-dashboard.md#data-store-performance-characteristics).
 - At `--devices 20 --hz 20` (~3,600 msg/s), which tier breaks the customer's
   **2-second end-to-end budget** first?
 - A real stage is minutes of sustained pumping, not a spike. Which store would

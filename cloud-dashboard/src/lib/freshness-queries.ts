@@ -32,6 +32,7 @@ function toPayload(
       risingwave_ms: source === "risingwave" && latestTs > 0 ? now - latestTs : null,
       timescaledb_ms: source === "timescaledb" && latestTs > 0 ? now - latestTs : null,
       athena_ms: null,
+      influxdb_ms: null,
     },
     // Query latency — wall-clock ms to execute this tier's read. Distinct from
     // tierFreshness (data staleness): this is the read-path cost, the metric
@@ -42,6 +43,7 @@ function toPayload(
       risingwave_ms: source === "risingwave" ? queryLatencyMs : null,
       timescaledb_ms: source === "timescaledb" ? queryLatencyMs : null,
       athena_ms: null,
+      influxdb_ms: null,
     },
     fleetResources: {
       avg_free_cpu_pct: avgFreeCpu,

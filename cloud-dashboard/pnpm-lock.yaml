@@ -11,6 +11,9 @@ importers:
       '@aws-sdk/client-athena':
         specifier: ^3.700.0
         version: 3.1104.0
+      '@influxdata/influxdb-client':
+        specifier: ^1.35.0
+        version: 1.35.0
       next:
         specifier: 15.5.21
         version: 15.5.21(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -264,6 +267,9 @@ packages:
     engines: {node: ^18.17.0 || ^20.3.0 || >=21.0.0}
     cpu: [x64]
     os: [win32]
+
+  '@influxdata/influxdb-client@1.35.0':
+    resolution: {integrity: sha512-woWMi8PDpPQpvTsRaUw4Ig+nOGS/CWwAwS66Fa1Vr/EkW+NEwxI8YfPBsdBMn33jK2Y86/qMiiuX/ROHIkJLTw==}
 
   '@next/env@15.5.21':
     resolution: {integrity: sha512-hjJI/GfrjWHgNguRIBzItjRRu0m3Nrz17GhxsjuHfjIvg9hyg3239REd2dpI+bpMTFuVrVprHzEQ19m++cDtbw==}
@@ -931,6 +937,8 @@ snapshots:
 
   '@img/sharp-win32-x64@0.34.5':
     optional: true
+
+  '@influxdata/influxdb-client@1.35.0': {}
 
   '@next/env@15.5.21': {}
 

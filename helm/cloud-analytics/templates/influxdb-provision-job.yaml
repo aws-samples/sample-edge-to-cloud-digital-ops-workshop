@@ -1,0 +1,155 @@
+{{- if .Values.telegraf.enabled }}
+{{- $bucket := .Values.telegraf.bucket | default (printf "workshop-%s" .Values.deploymentId) }}
+# Post-install/post-upgrade Job that provisions the per-slot InfluxDB bucket +
+# scoped token on the SHARED Amazon Timestream for InfluxDB instance (#229/#230),
+# then writes them into the `influxdb-credentials` Secret the Telegraf sink
+# consumes. This has to run IN-CLUSTER because the instance is VPC-private and
+# only surfaces admin username/password (Secrets Manager, via PlatformStack.shared)
+# — never a token — so the deploy script / CodeBuild can't reach it to mint one.
+#
+# Signs in with the admin creds (the influxdb-admin Secret deploy-cloud-analytics.sh
+# creates from the #229 CFN exports), creates the bucket if absent, mints a
+# read/write token, and PUTs the influxdb-credentials Secret via the k8s API.
+#
+# Idempotent + token-stable: if influxdb-credentials already exists it exits
+# without minting a new token (the API only returns a token's value at creation,
+# so re-minting every upgrade would orphan tokens and needlessly restart Telegraf).
+# Delete the Secret to force a fresh bucket/token on the next deploy.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "cloud-analytics.fullname" . }}-influxdb-provision
+  labels:
+    {{- include "cloud-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: influxdb-provision
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/hook-weight": "20"
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        {{- include "cloud-analytics.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: influxdb-provision
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ include "cloud-analytics.fullname" . }}-influxdb-provision-sa
+      containers:
+        - name: provision
+          image: alpine:3.20
+          envFrom:
+            # INFLUX_URL, INFLUX_ORG, INFLUX_ADMIN_USERNAME, INFLUX_ADMIN_PASSWORD
+            - secretRef:
+                name: {{ .Values.telegraf.adminSecret }}
+          env:
+            - name: BUCKET
+              value: {{ $bucket | quote }}
+            - name: RETENTION_SECONDS
+              value: {{ .Values.telegraf.retentionSeconds | quote }}
+            - name: CREDENTIALS_SECRET
+              value: {{ .Values.telegraf.credentialsSecret | quote }}
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              apk add --no-cache curl jq >/dev/null
+
+              NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+              KTOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+              CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+              KUBE=https://kubernetes.default.svc
+
+              # Token-stable: keep an existing secret rather than orphaning tokens.
+              code=$(curl -sS -o /dev/null -w '%{http_code}' --cacert "$CA" \
+                -H "Authorization: Bearer $KTOKEN" \
+                "$KUBE/api/v1/namespaces/$NS/secrets/$CREDENTIALS_SECRET")
+              if [ "$code" = "200" ]; then
+                echo "$CREDENTIALS_SECRET already exists — reusing bucket/token."
+                exit 0
+              fi
+
+              echo "Signing in to InfluxDB at $INFLUX_URL ..."
+              until curl -sf -k -c /tmp/cookies -X POST "$INFLUX_URL/api/v2/signin" \
+                -u "$INFLUX_ADMIN_USERNAME:$INFLUX_ADMIN_PASSWORD" >/dev/null 2>&1; do
+                echo "  waiting for InfluxDB to accept sign-in..."; sleep 5
+              done
+
+              ORG_ID=$(curl -sf -k -b /tmp/cookies "$INFLUX_URL/api/v2/orgs?org=$INFLUX_ORG" \
+                | jq -r '.orgs[0].id')
+              echo "org $INFLUX_ORG -> $ORG_ID"
+
+              EXISTING=$(curl -sf -k -b /tmp/cookies \
+                "$INFLUX_URL/api/v2/buckets?org=$INFLUX_ORG&name=$BUCKET" \
+                | jq -r '.buckets[0].id // empty')
+              if [ -z "$EXISTING" ]; then
+                echo "creating bucket $BUCKET (retention ${RETENTION_SECONDS}s)..."
+                curl -sf -k -b /tmp/cookies -X POST "$INFLUX_URL/api/v2/buckets" \
+                  -H 'Content-Type: application/json' \
+                  -d "{\"orgID\":\"$ORG_ID\",\"name\":\"$BUCKET\",\"retentionRules\":[{\"type\":\"expire\",\"everySeconds\":$RETENTION_SECONDS}]}" >/dev/null
+              else
+                echo "bucket $BUCKET already exists ($EXISTING)."
+              fi
+
+              echo "minting read/write token for $BUCKET ..."
+              TOKEN=$(curl -sf -k -b /tmp/cookies -X POST "$INFLUX_URL/api/v2/authorizations" \
+                -H 'Content-Type: application/json' \
+                -d "{\"orgID\":\"$ORG_ID\",\"description\":\"telegraf-$BUCKET\",\"permissions\":[{\"action\":\"write\",\"resource\":{\"type\":\"buckets\",\"orgID\":\"$ORG_ID\"}},{\"action\":\"read\",\"resource\":{\"type\":\"buckets\",\"orgID\":\"$ORG_ID\"}}]}" \
+                | jq -r '.token')
+              if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+                echo "ERROR: token mint failed"; exit 1
+              fi
+
+              echo "writing $CREDENTIALS_SECRET secret ..."
+              BODY=$(jq -n --arg url "$INFLUX_URL" --arg tok "$TOKEN" \
+                --arg org "$INFLUX_ORG" --arg bkt "$BUCKET" --arg n "$CREDENTIALS_SECRET" \
+                '{apiVersion:"v1",kind:"Secret",metadata:{name:$n},type:"Opaque",stringData:{INFLUX_URL:$url,INFLUX_TOKEN:$tok,INFLUX_ORG:$org,INFLUX_BUCKET:$bkt}}')
+              curl -sf --cacert "$CA" -H "Authorization: Bearer $KTOKEN" \
+                -H 'Content-Type: application/json' \
+                -X POST "$KUBE/api/v1/namespaces/$NS/secrets" -d "$BODY" >/dev/null
+              echo "InfluxDB provisioning complete for bucket $BUCKET."
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "cloud-analytics.fullname" . }}-influxdb-provision-sa
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/hook-weight": "15"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cloud-analytics.fullname" . }}-influxdb-provision-role
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/hook-weight": "15"
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cloud-analytics.fullname" . }}-influxdb-provision-rb
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/hook-weight": "15"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "cloud-analytics.fullname" . }}-influxdb-provision-role
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cloud-analytics.fullname" . }}-influxdb-provision-sa
+    namespace: {{ .Release.Namespace }}
+{{- end }}

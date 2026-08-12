@@ -11,6 +11,7 @@ import type { FreshnessPayload } from "./api/freshness/route";
 const COLOUR_RW     = "#6366f1"; // indigo — RisingWave
 const COLOUR_TSDB   = "#10b981"; // emerald — TimescaleDB
 const COLOUR_ATHENA = "#f59e0b"; // amber — Athena
+const COLOUR_INFLUX = "#06b6d4"; // cyan — Timestream for InfluxDB
 const COLOUR_CPU    = "#3b82f6"; // blue
 const COLOUR_MEM    = "#a855f7"; // purple
 
@@ -36,21 +37,23 @@ interface FreshnessBarDatum {
   rw: number | null;
   tsdb: number | null;
   athena: number | null;
+  influx: number | null;
 }
 
 // A single log-scale grouped bar chart of a per-tier ms metric. Shared by the
 // freshness chart (data staleness) and the query-latency chart (read-path cost)
-// — same three tiers, same log axis, different metric.
+// — same four tiers, same log axis, different metric.
 function TierMsBarChart({
-  title, blurb, axisLabel, rw, tsdb, athena,
+  title, blurb, axisLabel, rw, tsdb, athena, influx,
 }: {
   title: string; blurb: string; axisLabel: string;
-  rw: number | null; tsdb: number | null; athena: number | null;
+  rw: number | null; tsdb: number | null; athena: number | null; influx: number | null;
 }) {
   const chartData: FreshnessBarDatum[] = [
-    { tier: "RisingWave",  rw: logVal(rw),  tsdb: null,          athena: null          },
-    { tier: "TimescaleDB", rw: null,        tsdb: logVal(tsdb),  athena: null          },
-    { tier: "Athena/S3",   rw: null,        tsdb: null,          athena: logVal(athena) },
+    { tier: "RisingWave",  rw: logVal(rw),  tsdb: null,          athena: null,           influx: null           },
+    { tier: "TimescaleDB", rw: null,        tsdb: logVal(tsdb),  athena: null,           influx: null           },
+    { tier: "InfluxDB",    rw: null,        tsdb: null,          athena: null,           influx: logVal(influx) },
+    { tier: "Athena/S3",   rw: null,        tsdb: null,          athena: logVal(athena), influx: null           },
   ];
 
   const CustomTooltip = ({ active, payload, label }: any) => {
@@ -82,12 +85,14 @@ function TierMsBarChart({
           <Tooltip content={<CustomTooltip />} cursor={{ fill: "rgba(255,255,255,0.05)" }} />
           <Bar dataKey="rw"     name="RisingWave"  fill={COLOUR_RW}     radius={[4,4,0,0]} />
           <Bar dataKey="tsdb"   name="TimescaleDB" fill={COLOUR_TSDB}   radius={[4,4,0,0]} />
+          <Bar dataKey="influx" name="InfluxDB"    fill={COLOUR_INFLUX} radius={[4,4,0,0]} />
           <Bar dataKey="athena" name="Athena/S3"   fill={COLOUR_ATHENA} radius={[4,4,0,0]} />
         </BarChart>
       </ResponsiveContainer>
-      <div style={{ display: "flex", gap: "1.5rem", marginTop: "0.5rem", fontSize: "0.85rem", color: "#94a3b8" }}>
+      <div style={{ display: "flex", gap: "1.5rem", marginTop: "0.5rem", fontSize: "0.85rem", color: "#94a3b8", flexWrap: "wrap" }}>
         <span><span style={{ color: COLOUR_RW,     fontWeight: 600 }}>● </span>RisingWave: {msLabel(rw)}</span>
         <span><span style={{ color: COLOUR_TSDB,   fontWeight: 600 }}>● </span>TimescaleDB: {msLabel(tsdb)}</span>
+        <span><span style={{ color: COLOUR_INFLUX, fontWeight: 600 }}>● </span>InfluxDB: {msLabel(influx)}</span>
         <span><span style={{ color: COLOUR_ATHENA, fontWeight: 600 }}>● </span>Athena: {msLabel(athena)}</span>
       </div>
     </div>
@@ -98,15 +103,16 @@ function TierMsBarChart({
 // Read-path cost per tier — the metric where RisingWave's pre-aggregated
 // in-memory MV is expected to beat TimescaleDB's relational scan, and both beat
 // Athena's warehouse round-trip. Orthogonal to freshness (data staleness).
-function LatencyChart({ rw, tsdb, athena }: { rw: FreshnessPayload | null; tsdb: FreshnessPayload | null; athena: FreshnessPayload | null }) {
+function LatencyChart({ rw, tsdb, athena, influx }: { rw: FreshnessPayload | null; tsdb: FreshnessPayload | null; athena: FreshnessPayload | null; influx: FreshnessPayload | null }) {
   return (
     <TierMsBarChart
       title="Query Latency (log scale)"
-      blurb="Wall-clock time to run each tier's read query. Lower is better. This is the read-path cost — in-memory MV vs relational scan vs warehouse round-trip — independent of how stale the data is."
+      blurb="Wall-clock time to run each tier's read query. Lower is better. This is the read-path cost — in-memory MV vs relational scan vs managed-TSDB query vs warehouse round-trip — independent of how stale the data is."
       axisLabel="latency (log)"
       rw={rw?.tierLatency.risingwave_ms ?? null}
       tsdb={tsdb?.tierLatency.timescaledb_ms ?? null}
       athena={athena?.tierLatency.athena_ms ?? null}
+      influx={influx?.tierLatency.influxdb_ms ?? null}
     />
   );
 }
@@ -149,9 +155,10 @@ function usePushFreshness(tier: "risingwave" | "timescaledb") {
   return { data, error };
 }
 
-// ── poll hook: Athena has no push primitive — it's an on-demand warehouse
-// query, so it stays on setInterval (#160 keeps this tier as-is).
-function usePolledFreshness(tier: "athena", intervalMs: number) {
+// ── poll hook: Athena (on-demand warehouse query) and InfluxDB (managed TSDB,
+// no subscribe primitive we use here) have no push path, so they stay on
+// setInterval (#160 keeps Athena as-is; #231 adds InfluxDB the same way).
+function usePolledFreshness(tier: "athena" | "influxdb", intervalMs: number) {
   const [data, setData] = useState<FreshnessPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -178,15 +185,16 @@ function usePolledFreshness(tier: "athena", intervalMs: number) {
 // ── chart 1 component ─────────────────────────────────────────────────────────
 // Data freshness = now − MAX(ts): how stale the newest row is (ingestion-lag,
 // not read cost). See LatencyChart for the orthogonal read-path metric.
-function FreshnessChart({ rw, tsdb, athena }: { rw: FreshnessPayload | null; tsdb: FreshnessPayload | null; athena: FreshnessPayload | null }) {
+function FreshnessChart({ rw, tsdb, athena, influx }: { rw: FreshnessPayload | null; tsdb: FreshnessPayload | null; athena: FreshnessPayload | null; influx: FreshnessPayload | null }) {
   return (
     <TierMsBarChart
       title="Data Freshness (log scale)"
-      blurb="How stale is the most recent message in each store. Lower is better. RisingWave and TimescaleDB update by push; Athena updates on its own poll cadence."
+      blurb="How stale is the most recent message in each store. Lower is better. RisingWave and TimescaleDB update by push; InfluxDB and Athena update on their own poll cadence."
       axisLabel="staleness (log)"
       rw={rw?.tierFreshness.risingwave_ms ?? null}
       tsdb={tsdb?.tierFreshness.timescaledb_ms ?? null}
       athena={athena?.tierFreshness.athena_ms ?? null}
+      influx={influx?.tierFreshness.influxdb_ms ?? null}
     />
   );
 }
@@ -355,7 +363,7 @@ function LatencyMapRow({
   );
 }
 
-function LatencyMap({ rw, tsdb, athena }: { rw: FreshnessPayload | null; tsdb: FreshnessPayload | null; athena: FreshnessPayload | null }) {
+function LatencyMap({ rw, tsdb, athena, influx }: { rw: FreshnessPayload | null; tsdb: FreshnessPayload | null; athena: FreshnessPayload | null; influx: FreshnessPayload | null }) {
   return (
     <div className="card">
       <h2 style={{ marginBottom: "0.25rem", fontSize: "1rem" }}>Edge → Cloud Latency Map</h2>
@@ -371,6 +379,11 @@ function LatencyMap({ rw, tsdb, athena }: { rw: FreshnessPayload | null; tsdb: F
         label="TimescaleDB" color={COLOUR_TSDB} storeLabel="TimescaleDB CAGG" pushMode="push"
         ingestMs={tsdb?.tierFreshness.timescaledb_ms ?? null}
         queryMs={tsdb?.tierLatency.timescaledb_ms ?? null}
+      />
+      <LatencyMapRow
+        label="InfluxDB" color={COLOUR_INFLUX} storeLabel="Timestream InfluxDB" pushMode="poll"
+        ingestMs={influx?.tierFreshness.influxdb_ms ?? null}
+        queryMs={influx?.tierLatency.influxdb_ms ?? null}
       />
       <LatencyMapRow
         label="Athena/S3" color={COLOUR_ATHENA} storeLabel="Iceberg/Athena" pushMode="poll"
@@ -401,8 +414,12 @@ export default function DashboardPage() {
   // Athena/Iceberg is the slow warehouse tier — a query takes seconds, and it
   // has no push/subscribe primitive, so it stays on a slow poll (#160).
   const { data: athenaData, error: athenaError } = usePolledFreshness("athena", 15000);
+  // Timestream for InfluxDB is a managed hot store fed by Telegraf off the same
+  // MSK topics (#230). No subscribe primitive we use here, so it polls like
+  // Athena — but it's a fast time-series read, so a tighter 5s cadence (#231).
+  const { data: influxData, error: influxError } = usePolledFreshness("influxdb", 5000);
 
-  const isMock = rwData?.source === "mock" || tsdbData?.source === "mock" || athenaData?.source === "mock";
+  const isMock = rwData?.source === "mock" || tsdbData?.source === "mock" || athenaData?.source === "mock" || influxData?.source === "mock";
 
   return (
     <div className="page">
@@ -411,24 +428,25 @@ export default function DashboardPage() {
         <div style={{ display: "flex", gap: "1rem", fontSize: "0.82rem", color: "#94a3b8" }}>
           <span><Pulse active={!rwError && rwData != null} />RisingWave {rwError ? `(${rwError})` : rwData?.source === "mock" ? "(mock)" : "live · push"}</span>
           <span><Pulse active={!tsdbError && tsdbData != null} />TimescaleDB {tsdbError ? `(${tsdbError})` : tsdbData?.source === "mock" ? "(mock)" : "live · push"}</span>
+          <span><Pulse active={!influxError && influxData != null} />InfluxDB {influxError ? `(${influxError})` : influxData?.source === "mock" ? "(mock)" : "live · poll"}</span>
           <span><Pulse active={!athenaError && athenaData != null} />Athena {athenaError ? `(${athenaError})` : athenaData?.source === "mock" ? "(mock)" : "live · poll"}</span>
           {isMock && (
             <span style={{ color: "#f59e0b" }}>
-              ⚠ Mock data — set RISINGWAVE_ENDPOINT, TIMESCALEDB_ENDPOINT, and ATHENA_DATABASE env vars to connect to live sources
+              ⚠ Mock data — set RISINGWAVE_ENDPOINT, TIMESCALEDB_ENDPOINT, ATHENA_DATABASE, and INFLUXDB_ENDPOINT env vars to connect to live sources
             </span>
           )}
         </div>
       </div>
 
-      <FreshnessChart  rw={rwData}   tsdb={tsdbData} athena={athenaData} />
+      <FreshnessChart  rw={rwData}   tsdb={tsdbData} athena={athenaData} influx={influxData} />
       <div style={{ height: "1rem" }} />
-      <LatencyChart    rw={rwData}   tsdb={tsdbData} athena={athenaData} />
+      <LatencyChart    rw={rwData}   tsdb={tsdbData} athena={athenaData} influx={influxData} />
       <div style={{ height: "1rem" }} />
       <ResourceChart   rw={rwData}   tsdb={tsdbData} />
       <div style={{ height: "1rem" }} />
       <NodeAgeChart    rw={rwData}   tsdb={tsdbData} />
       <div style={{ height: "1rem" }} />
-      <LatencyMap      rw={rwData}   tsdb={tsdbData} athena={athenaData} />
+      <LatencyMap      rw={rwData}   tsdb={tsdbData} athena={athenaData} influx={influxData} />
     </div>
   );
 }

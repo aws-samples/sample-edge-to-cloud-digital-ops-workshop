@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { queryRisingWaveFreshness, queryTimescaleDbFreshness } from "../../../lib/freshness-queries";
 
-// Returned by GET /api/freshness?tier=risingwave|timescaledb|athena
-// Contains all three chart datasets in one call. The two live tiers are also
+// Returned by GET /api/freshness?tier=risingwave|timescaledb|athena|influxdb
+// Contains all four chart datasets in one call. The two live tiers are also
 // pushed incrementally over /api/stream/{risingwave,timescaledb} (see #160) —
 // this endpoint remains the source of truth for the initial page load and for
-// the Athena tier, which has no push mechanism (on-demand warehouse query).
+// the polled tiers (Athena, InfluxDB), which have no push mechanism (on-demand
+// warehouse query / no InfluxDB subscribe primitive — see #231/#233).
 export interface FreshnessPayload {
   // Chart 1 — data freshness per tier (single numbers, ms).
   // Freshness = now − MAX(ts): how stale the newest row is (a property of the
@@ -14,15 +15,17 @@ export interface FreshnessPayload {
     risingwave_ms: number | null;
     timescaledb_ms: number | null;
     athena_ms: number | null;
+    influxdb_ms: number | null;
   };
   // Chart 1b — query latency per tier (single numbers, ms). Wall-clock to run
   // this tier's read. Distinct axis from freshness: this is the read-path cost
-  // (in-memory MV vs relational scan vs warehouse round-trip), independent of
-  // how stale the data is.
+  // (in-memory MV vs relational scan vs warehouse round-trip vs managed-TSDB
+  // query), independent of how stale the data is.
   tierLatency: {
     risingwave_ms: number | null;
     timescaledb_ms: number | null;
     athena_ms: number | null;
+    influxdb_ms: number | null;
   };
   // Chart 2 — fleet-wide free CPU and memory (percentage)
   fleetResources: {
@@ -31,31 +34,37 @@ export interface FreshnessPayload {
   };
   // Chart 3 — per-node time since last message (seconds)
   nodeAge: Array<{ site_id: string; age_seconds: number }>;
-  source: "risingwave" | "timescaledb" | "athena" | "mock";
+  source: "risingwave" | "timescaledb" | "athena" | "influxdb" | "mock";
   sampled_at: number; // epoch ms on server
 }
 
-function mockPayload(source: "risingwave" | "timescaledb" | "athena" | "mock"): FreshnessPayload {
+function mockPayload(source: "risingwave" | "timescaledb" | "athena" | "influxdb" | "mock"): FreshnessPayload {
   const now = Date.now();
   const rw_ms = source === "risingwave" ? 350 + Math.random() * 200 : null;
   const ts_ms = source === "timescaledb" ? 1500 + Math.random() * 800 : null;
   const at_ms = source === "athena" ? 28000 + Math.random() * 5000 : null;
+  // InfluxDB is a managed hot store fed by Telegraf on a 1s flush — fresh, but
+  // polled (no subscribe primitive), so a touch behind the pushed live tiers.
+  const ix_ms = source === "influxdb" ? 1200 + Math.random() * 600 : null;
   // Mock query latency: RW's in-memory MV is fastest, TSDB's scan a bit slower,
   // Athena's warehouse round-trip slowest — the ordering the read-path axis
-  // is meant to show.
+  // is meant to show. InfluxDB's time-series query sits between TSDB and Athena.
   const rw_lat = source === "risingwave" ? 3 + Math.random() * 5 : null;
   const ts_lat = source === "timescaledb" ? 15 + Math.random() * 20 : null;
   const at_lat = source === "athena" ? 1200 + Math.random() * 800 : null;
+  const ix_lat = source === "influxdb" ? 20 + Math.random() * 40 : null;
   return {
     tierFreshness: {
       risingwave_ms: rw_ms,
       timescaledb_ms: ts_ms,
       athena_ms: at_ms,
+      influxdb_ms: ix_ms,
     },
     tierLatency: {
       risingwave_ms: rw_lat,
       timescaledb_ms: ts_lat,
       athena_ms: at_lat,
+      influxdb_ms: ix_lat,
     },
     fleetResources: {
       avg_free_cpu_pct: 85 + Math.random() * 10,
@@ -70,7 +79,7 @@ function mockPayload(source: "risingwave" | "timescaledb" | "athena" | "mock"): 
 }
 
 export async function GET(req: NextRequest) {
-  const tier = req.nextUrl.searchParams.get("tier") as "risingwave" | "timescaledb" | "athena" | null;
+  const tier = req.nextUrl.searchParams.get("tier") as "risingwave" | "timescaledb" | "athena" | "influxdb" | null;
 
   if (tier === "risingwave") {
     const endpoint = process.env.RISINGWAVE_ENDPOINT;
@@ -211,11 +220,13 @@ export async function GET(req: NextRequest) {
           risingwave_ms: null,
           timescaledb_ms: null,
           athena_ms: latestTs > 0 ? now - latestTs : null,
+          influxdb_ms: null,
         },
         tierLatency: {
           risingwave_ms: null,
           timescaledb_ms: null,
           athena_ms: Date.now() - queryT0,
+          influxdb_ms: null,
         },
         fleetResources: {
           avg_free_cpu_pct: avgFreeCpu,
@@ -233,5 +244,92 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  return NextResponse.json({ error: "tier param must be risingwave, timescaledb, or athena" }, { status: 400 });
+  if (tier === "influxdb") {
+    // The managed hot-tier: Amazon Timestream for InfluxDB, fed by Telegraf off
+    // the SAME MSK topics as TimescaleDB (#230). Its counterpart to the
+    // self-managed TimescaleDB-on-EKS leg — same freshness basis (ts_ms), so the
+    // numbers compare apples-to-apples. InfluxDB has no subscribe primitive we
+    // use here, so this tier is polled on demand (like Athena). Falls back to
+    // mock when INFLUXDB_ENDPOINT is unset (local dev / telegraf disabled).
+    const endpoint = process.env.INFLUXDB_ENDPOINT;
+    const token = process.env.INFLUXDB_TOKEN;
+    const org = process.env.INFLUXDB_ORG;
+    const bucket = process.env.INFLUXDB_BUCKET;
+    if (!endpoint || !token || !org || !bucket) {
+      return NextResponse.json(mockPayload("influxdb"));
+    }
+
+    try {
+      const { InfluxDB } = await import("@influxdata/influxdb-client");
+      const queryApi = new InfluxDB({ url: endpoint, token }).getQueryApi(org);
+      const now = Date.now();
+      const queryT0 = Date.now();
+
+      // Latest point per (site_id, sensor) over the last 15m — enough to compute
+      // freshness (now − MAX(ts)), per-node age, and fleet free CPU/mem, all off
+      // the one dimensional sensor_reading schema Telegraf writes (see #230).
+      const flux = `
+        from(bucket: "${bucket}")
+          |> range(start: -15m)
+          |> filter(fn: (r) => r._measurement == "sensor_reading" and r._field == "value")
+          |> group(columns: ["site_id", "sensor"])
+          |> last()
+      `;
+
+      type Row = { site_id?: string; sensor?: string; _value?: number; _time?: string };
+      const rows: Row[] = await queryApi.collectRows(flux);
+      const queryMs = Date.now() - queryT0;
+
+      // Freshness = now − newest point across all series.
+      let latestTs = 0;
+      // Per-node latest timestamp (age) keyed by site_id.
+      const nodeLatest = new Map<string, number>();
+      // Fleet free CPU/mem: free = 100 − used, averaged across nodes.
+      const cpuFree: number[] = [];
+      const memFree: number[] = [];
+
+      for (const r of rows) {
+        const tsMs = r._time ? Date.parse(r._time) : 0;
+        if (tsMs > latestTs) latestTs = tsMs;
+        const site = r.site_id ?? "unknown";
+        if (tsMs > (nodeLatest.get(site) ?? 0)) nodeLatest.set(site, tsMs);
+        if (typeof r._value === "number") {
+          if (r.sensor === "cpu_pct") cpuFree.push(100 - r._value);
+          if (r.sensor === "mem_used_pct") memFree.push(100 - r._value);
+        }
+      }
+
+      const avg = (xs: number[]) => (xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : null);
+
+      const payload: FreshnessPayload = {
+        tierFreshness: {
+          risingwave_ms: null,
+          timescaledb_ms: null,
+          athena_ms: null,
+          influxdb_ms: latestTs > 0 ? now - latestTs : null,
+        },
+        tierLatency: {
+          risingwave_ms: null,
+          timescaledb_ms: null,
+          athena_ms: null,
+          influxdb_ms: queryMs,
+        },
+        fleetResources: {
+          avg_free_cpu_pct: avg(cpuFree),
+          avg_free_mem_pct: avg(memFree),
+        },
+        nodeAge: [...nodeLatest.entries()]
+          .filter(([, ts]) => ts > 0)
+          .map(([site_id, ts]) => ({ site_id, age_seconds: (now - ts) / 1000 }))
+          .sort((a, b) => a.site_id.localeCompare(b.site_id)),
+        source: "influxdb",
+        sampled_at: now,
+      };
+      return NextResponse.json(payload);
+    } catch (e: any) {
+      return NextResponse.json({ error: e.message }, { status: 500 });
+    }
+  }
+
+  return NextResponse.json({ error: "tier param must be risingwave, timescaledb, athena, or influxdb" }, { status: 400 });
 }
