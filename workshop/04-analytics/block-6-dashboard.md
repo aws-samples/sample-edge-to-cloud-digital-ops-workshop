@@ -128,6 +128,24 @@ charts.
     routes use `Date.now()` (see the note under
     [Chart 1](#chart-1-data-freshness-log-scale) for the full story).
 
+!!! note "Why the CLI blocks below use a warm `psql \timing` reading for query latency"
+    Wrapping the whole `psql` invocation between two wall-clock reads — the way
+    `time psql ...` or the naive `$(epoch_ms)` … `$(epoch_ms)` pattern would —
+    bundles process spawn, TCP connect, and the `kubectl port-forward` tunnel's
+    own round-trip in with the query itself. On a live slot that's ~1 s of setup
+    dwarfing the actual read, and it makes RisingWave's in-memory MV lookup look
+    as slow as a warehouse scan
+    ([#239](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/issues/239)).
+    The RisingWave and TimescaleDB blocks below instead open **one** `psql`
+    session with `\timing on`, run the read query once as a discarded warm-up,
+    run it again, and parse the **second** (warm) `Time: <n> ms` line —
+    `\timing` reports only server-side execution plus one round-trip on an
+    already-open connection, the same thing the live dashboard's
+    `/api/stream/*` routes measure by timing `pool.query(...)` alone, inside the
+    pod. Treat this CLI reading as a sanity check: the dashboard's **Query
+    latency** chart, driven by that same server-side timing, is the canonical
+    number.
+
 ??? example "RisingWave — freshness + query latency (port 4567)"
     ```bash
     kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567 > /tmp/rw-fresh-pf.log 2>&1 &
@@ -136,18 +154,22 @@ charts.
     # Same MV the dashboard's /api/stream/risingwave route reads. ts_ms is the
     # IoT-Core ingest timestamp (epoch-ms), so freshness is clock-skew-free.
     # Timestamp with the CLIENT's wall-clock, not RisingWave's own now() — see
-    # the measurement-trap warning above. Only ask RW for MAX(ts_ms); subtract
-    # against a portable epoch-ms helper (works identically on GNU/Linux and
-    # BSD/macOS, unlike a GNU-only millisecond `date` flag) taken just
-    # before/after the query.
+    # the measurement-trap warning above. One session, \timing on, a discarded
+    # warm-up SELECT then the measured SELECT — this isolates engine read
+    # latency from psql-spawn + connect/auth + tunnel cost (see the note above).
     epoch_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
-    RW_T0=$(epoch_ms)
-    IFS='|' read -r RW_MAX_TS RW_ROWS < <(psql -h localhost -p 4567 -U root -d dev -tA -F'|' \
-      -c "SELECT MAX(ts_ms), COUNT(*) FROM mv_sensor_fleet_latest;")
+    RW_RAW=$(psql -h localhost -p 4567 -U root -d dev -tA -F'|' <<'SQL'
+    \timing on
+    SELECT MAX(ts_ms), COUNT(*) FROM mv_sensor_fleet_latest;
+    SELECT MAX(ts_ms), COUNT(*) FROM mv_sensor_fleet_latest;
+    SQL
+    )
     RW_NOW=$(epoch_ms)
+    IFS='|' read -r RW_MAX_TS RW_ROWS < <(echo "$RW_RAW" | grep -v '^Time:' | tail -1)
+    RW_LAT=$(echo "$RW_RAW" | grep '^Time:' | tail -1 | awk '{print $2}')
+    RW_LAT=$(printf '%.0f' "${RW_LAT:-0}")
     RW_FRESH=""
     [ -n "$RW_MAX_TS" ] && RW_FRESH=$(( RW_NOW - RW_MAX_TS ))
-    RW_LAT=$(( RW_NOW - RW_T0 ))
     kill "$RW_PF_PID" 2>/dev/null || true
     echo "{\"tier\":\"risingwave\",\"freshness_ms\":${RW_FRESH:-null},\"query_latency_ms\":${RW_LAT},\"rows\":${RW_ROWS:-0}}"
     ```
@@ -165,13 +187,18 @@ charts.
     # it lets TimescaleDB do chunk exclusion (skip every chunk older than the window)
     # instead of scanning the whole raw hypertable on every read. Without it this
     # aggregates all history and grows unbounded — tens of seconds once the table
-    # hits millions of rows — and, because freshness is `now - MAX(ts_ms)` sampled
-    # AFTER the query returns, the query's own runtime inflates the freshness number.
-    epoch_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
-    TS_T0=$(epoch_ms)
-    IFS='|' read -r TS_FRESH TS_ROWS < <(PGPASSWORD="$TSDB_PASS" psql -h localhost -p 5432 -U workshop -d edge -tA -F'|' \
-      -c "SELECT (EXTRACT(EPOCH FROM now())*1000)::bigint - MAX(ts_ms), COUNT(*) FROM sensor_readings WHERE partition_time > now() - interval '15 minutes';")
-    TS_LAT=$(( $(epoch_ms) - TS_T0 ))
+    # hits millions of rows. One session, \timing on, a discarded warm-up SELECT
+    # then the measured SELECT — same isolation as the RisingWave block above;
+    # freshness still comes from the (warm) query's own now() - MAX(ts_ms).
+    TS_RAW=$(PGPASSWORD="$TSDB_PASS" psql -h localhost -p 5432 -U workshop -d edge -tA -F'|' <<'SQL'
+    \timing on
+    SELECT (EXTRACT(EPOCH FROM now())*1000)::bigint - MAX(ts_ms), COUNT(*) FROM sensor_readings WHERE partition_time > now() - interval '15 minutes';
+    SELECT (EXTRACT(EPOCH FROM now())*1000)::bigint - MAX(ts_ms), COUNT(*) FROM sensor_readings WHERE partition_time > now() - interval '15 minutes';
+    SQL
+    )
+    IFS='|' read -r TS_FRESH TS_ROWS < <(echo "$TS_RAW" | grep -v '^Time:' | tail -1)
+    TS_LAT=$(echo "$TS_RAW" | grep '^Time:' | tail -1 | awk '{print $2}')
+    TS_LAT=$(printf '%.0f' "${TS_LAT:-0}")
     kill "$TSDB_PF_PID" 2>/dev/null || true
     echo "{\"tier\":\"timescaledb\",\"freshness_ms\":${TS_FRESH:-null},\"query_latency_ms\":${TS_LAT},\"rows\":${TS_ROWS:-0}}"
     ```
