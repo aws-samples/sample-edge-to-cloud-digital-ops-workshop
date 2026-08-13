@@ -15,6 +15,19 @@ if [[ ${#DEPLOYMENT_IDS[@]} -eq 0 ]]; then
   exit 1
 fi
 
+# Validate every requested slot name BEFORE any CDK/AWS call. slot-list.sh's
+# normaliser (_slots_normalise) silently drops anything that doesn't match
+# this same pattern when merging into WORKSHOP_SLOTS — without this check a
+# typo'd slot would vanish from the deploy set while the post-deploy tail
+# below still ran for it against a stack that was never created.
+SLOT_NAME_RE='^ws-slot[0-9]{2}$'
+for id in "${DEPLOYMENT_IDS[@]}"; do
+  if [[ ! "$id" =~ $SLOT_NAME_RE ]]; then
+    echo "ERROR: invalid slot name '$id' — slot names must match ${SLOT_NAME_RE} (e.g. ws-slot00)." >&2
+    exit 1
+  fi
+done
+
 PLATFORM_APP="npx tsx amplify/custom/platform-app.ts"
 PLATFORM_STACK_NAME="WorkshopPlatformStack"
 
