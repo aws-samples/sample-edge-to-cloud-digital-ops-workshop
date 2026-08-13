@@ -14,7 +14,7 @@ Every real-time sensor pipeline is a variation of the same four-layer model:
 | Message Broker | Lightweight pub/sub; forwards to streaming service | AWS IoT Core, EMQX |
 | Streaming Service | Durable, ordered log; multiple consumers; replay on reconnect | MSK (cloud), Redpanda (edge) |
 | In-Memory Store | Materialized views; continuous queries; sub-50 ms latency | RisingWave |
-| Disk-Based Store | High-throughput writes; continuous aggregates; compression | TimescaleDB |
+| Disk-Based Store | High-throughput writes; continuous aggregates; compression | TimescaleDB (self-managed), Timestream for InfluxDB (managed) |
 | Object Storage | Raw stream archive; unlimited capacity; batch-read | S3 (Apache Iceberg) |
 
 ---
@@ -40,9 +40,11 @@ Edge — K3s / K3s
 Cloud — AWS
   Amazon MSK (Provisioned, SASL/SCRAM)
     │
-    ├─► Cloud RisingWave (EKS) ──► ALB SSE ──► Cloud UI
+    ├─► Cloud RisingWave (EKS) ─────────────► ALB SSE ──► Cloud UI
     │
-    └─► Cloud TimescaleDB (EKS) ──► ALB SSE ──► Cloud UI
+    ├─► Redpanda Connect ─► Cloud TimescaleDB (EKS, self-managed) ──► ALB SSE ──► Cloud UI
+    │
+    └─► Telegraf (EKS) ──► Timestream for InfluxDB (managed hot tier) ──► poll ──► Cloud UI
 
   Amazon Data Firehose (Iceberg destination) ──► S3 (Apache Iceberg) ──► Athena
     ▲ (fed directly by an IoT Rule Firehose action — no MSK hop)
@@ -57,4 +59,5 @@ Amplify (hosted cloud UI)
   ← AppSync Events (WebSocket — device shadows, live push)
   ← ALB SSE (RisingWave aggregation panels)
   ← ALB SSE (TimescaleDB CAGG panels)
+  ← HTTP poll (Timestream for InfluxDB freshness panel)
 ```

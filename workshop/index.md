@@ -87,7 +87,8 @@ flowchart TD
         IoTRule["IoT Rules Engine<br>(Kafka action)"]
         MSK["Amazon MSK<br>(Multi-AZ, Provisioned)"]
         RW_cloud["Cloud RisingWave<br>(fleet analytics)"]
-        TSDB_cloud["Cloud TimescaleDB<br>(hot history, business joins)"]
+        TSDB_cloud["Cloud TimescaleDB<br>(self-managed hot tier)"]
+        Influx_cloud["Timestream for InfluxDB<br>(managed hot tier, polled)"]
     end
 
     Sensor -->|MQTT publish| MQTTBroker
@@ -108,7 +109,8 @@ flowchart TD
     IoTRule -->|"Kafka action (VPC destination)"| MSK
 
     MSK --> RW_cloud
-    MSK --> TSDB_cloud
+    MSK -->|"Redpanda Connect"| TSDB_cloud
+    MSK -->|"Telegraf"| Influx_cloud
 
     classDef sensor fill:#FED7AA,stroke:#C2410C,color:#1a1a1a
     classDef broker fill:#FEF08A,stroke:#A16207,color:#1a1a1a
@@ -121,7 +123,7 @@ flowchart TD
     class MQTTBroker,IoTCore,IoTRule,IoTRuleFH broker
     class RPC_relay,RP,MSK,Firehose streaming
     class RW_edge,RW_cloud inmem
-    class TSDB,TSDB_cloud tsdb
+    class TSDB,TSDB_cloud,Influx_cloud tsdb
     class MinIO,S3,Athena object
 ```
 
@@ -135,7 +137,8 @@ flowchart TD
 | **Amazon Data Firehose** | Receives telemetry directly from an IoT Rule (Firehose action) and writes it into the pre-created Iceberg table in the Glue Data Catalog | Session 1 |
 | **Amazon Athena** | Query engine over the Iceberg table; measures the archive-tier freshness | Session 1 |
 | **Cloud RisingWave** | Fleet analytics; continuously maintained materialized views; sub-100 ms query latency | Session 4 |
-| **Cloud TimescaleDB** | Hot-tier history (days–weeks); continuous aggregates; ad-hoc SQL; business data joins | Session 4 |
+| **Cloud TimescaleDB** | Self-managed hot-tier history (days–weeks); continuous aggregates; ad-hoc SQL; business data joins | Session 4 |
+| **Timestream for InfluxDB** | Managed hot tier serving the same telemetry via Telegraf from MSK; dimensional model, polled freshness — the managed counterpart to TimescaleDB | Session 4 |
 | **Redpanda @ Edge** | Durable stream buffer at the edge; offline replay when WAN is down | Sessions 5–7 |
 | **Redpanda Connect (ingest)** | Bridges MQTT → Redpanda at the edge | Sessions 5–7 |
 | **Redpanda Connect (relay)** | Forwards edge Redpanda → Cloud MSK; resumes from committed offset after WAN recovery | Sessions 5–7 |
@@ -181,7 +184,7 @@ Both paths in the architecture diagram land in the same MSK cluster and feed the
 
 ## Which Storage Tier to Query
 
-Three query tiers serve different access patterns. Choosing the wrong tier costs latency (Athena for live queries) or unnecessary complexity (RisingWave for raw history).
+These query tiers serve different access patterns. Choosing the wrong tier costs latency (Athena for live queries) or unnecessary complexity (RisingWave for raw history).
 
 | Query Pattern | Right Tier | Why |
 |---|---|---|
@@ -189,6 +192,7 @@ Three query tiers serve different access patterns. Choosing the wrong tier costs
 | Fleet-wide aggregate right now (e.g. total pump rate) | **RisingWave** | MV spans all devices; returns instantly regardless of fleet size |
 | Last 7/30/180-day trend chart (hourly buckets) | **TimescaleDB** | Continuous aggregates precompute buckets on write; query scans tiny aggregate table, not raw rows |
 | "What happened on this device in the last 48 hours?" | **TimescaleDB** | Hypertable chunk pruning; targeted scan is fast even on raw rows |
+| Same hot-tier query, but with zero cluster ops to run | **Timestream for InfluxDB** | Managed counterpart to TimescaleDB — same telemetry, no pod/PVC/operator to operate; trades a push primitive for polled freshness |
 | ML training — months of raw sensor history | **Iceberg / Athena** | Full dataset; batch-optimized; cost-effective at scale |
 | Compliance audit — raw records since a specific date | **Iceberg / Athena** | Immutable archive; query by time range |
 
@@ -205,6 +209,7 @@ The workshop makes this ladder directly observable — each tier is wired to a p
 | Cloud RisingWave MV | SSE via ALB → Next.js SUBSCRIBE cursor | ~300–650 ms | Flat — incremental MV update |
 | Edge TimescaleDB CAGG | AppSync Event triggers HTTP request → Next.js Route Handler → Edge TimescaleDB CAGG | ~100–400 ms (LAN) | Flat — edge fleet is fixed at 3 devices |
 | Cloud TimescaleDB CAGG | AppSync Event triggers HTTP query → CAGG + live scan | ~100 ms–3 s | Grows: live scan over un-materialized tail |
+| Timestream for InfluxDB (managed) | AppSync Event triggers HTTP poll → Flux `last()` over the fleet's series | ~1–2 s | Grows: query groups all series |
 | Iceberg / Athena | Firehose buffering interval + Iceberg commit | tens of s up to ~300 s | Grows with data volume |
 
 !!! tip "Why does TimescaleDB freshness grow with fleet size?"

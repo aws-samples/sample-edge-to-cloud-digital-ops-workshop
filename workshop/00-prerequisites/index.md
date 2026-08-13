@@ -44,6 +44,7 @@ flowchart TB
         subgraph cloud_vpc["VPC workshop-cloud · 10.1.0.0/16"]
             msk["MSK Provisioned\nkafka.t3.small × 2 brokers\nSASL/SCRAM + IAM"]
             firehose["Amazon Data Firehose\nIceberg Destination"]
+            influxdb["Timestream for InfluxDB\nshared, private (managed hot tier)"]
         end
         iot_vpc_dest["IoT VPC Destination\nshared across all slots"]
         s3["S3 Bucket\nIceberg data · Athena results\nworkshop assets"]
@@ -66,6 +67,7 @@ flowchart TB
     athena -.->|"Glue catalog"| glue
     kms -.->|"encrypts"| msk_secret
     msk_secret -.->|"SCRAM auth"| msk
+    msk -.->|"Telegraf sink (Session 4)"| influxdb
 ```
 
 ## What Gets Deployed
@@ -82,6 +84,7 @@ Each participant slot gets a unique **`DEPLOYMENT_ID`** (e.g., `ws-a1b2c3`). All
 | IoT Provisioning Template | 1× per deployment | Claim cert embedded via Secrets Manager |
 | IoT Thing Group | 1× per deployment | Dynamic group: `deploymentId = ws-slot00` |
 | MSK Provisioned cluster | 1× per deployment | `kafka.t3.small` × 2 brokers; SASL/SCRAM |
+| Timestream for InfluxDB instance | 1× per account, shared | Managed hot tier; private in `workshop-cloud` VPC; per-slot bucket + token; Session 4 |
 | EKS cluster | 1× per deployment | In `workshop-cloud` VPC; 2× `t3.medium` nodes; Session 4 |
 | IoT Rule (S3) | 1× per deployment | Routes `edge/ws-slot00/+/telemetry` → S3 JSON; Athena sessions 1–3 |
 | IoT Rule (MSK) | 1× per deployment | Same topic → Lambda → MSK `raw.telemetry`; Session 4 |
