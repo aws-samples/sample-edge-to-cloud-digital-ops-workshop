@@ -12,6 +12,9 @@
     ```sql
     SELECT
       thing_name,
+      max_by(cpu_pct, ingest_ts)             AS latest_cpu_pct,
+      max_by(mem_used_pct, ingest_ts)        AS latest_mem_used_pct,
+      max_by(disk_used_pct, ingest_ts)       AS latest_disk_used_pct,
       from_unixtime(MAX(ingest_ts) / 1000)  AS latest_edge_ts,
       current_timestamp                      AS query_ts,
       date_diff('second',
@@ -24,11 +27,13 @@
     ORDER BY freshness_seconds DESC;
     ```
 
+    The `latest_*` columns pull each metric from the most-recent row per device, so the 3-decimal precision (e.g. `12.45`) is visible directly in the result.
+
     ??? example "AWS CLI equivalent"
         ```bash
         QUERY_ID=$(aws athena start-query-execution \
           --work-group workshop-shared \
-          --query-string "SELECT thing_name, from_unixtime(MAX(ingest_ts)/1000) AS latest_edge_ts, current_timestamp AS query_ts, date_diff('second', from_unixtime(MAX(ingest_ts)/1000), current_timestamp) AS freshness_seconds, COUNT(*) AS row_count FROM workshop_telemetry.telemetry WHERE deployment_id='ws-slot00' GROUP BY thing_name ORDER BY freshness_seconds DESC" \
+          --query-string "SELECT thing_name, max_by(cpu_pct, ingest_ts) AS latest_cpu_pct, max_by(mem_used_pct, ingest_ts) AS latest_mem_used_pct, max_by(disk_used_pct, ingest_ts) AS latest_disk_used_pct, from_unixtime(MAX(ingest_ts)/1000) AS latest_edge_ts, current_timestamp AS query_ts, date_diff('second', from_unixtime(MAX(ingest_ts)/1000), current_timestamp) AS freshness_seconds, COUNT(*) AS row_count FROM workshop_telemetry.telemetry WHERE deployment_id='ws-slot00' GROUP BY thing_name ORDER BY freshness_seconds DESC" \
           --query QueryExecutionId --output text)
 
         for _i in $(seq 1 20); do
