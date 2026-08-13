@@ -76,8 +76,8 @@ export async function GET(): Promise<Response> {
       while (!closed) {
         const now = Date.now();
         send("freshness", {
-          tierFreshness: { risingwave_ms: null, timescaledb_ms: 1500 + Math.random() * 800, athena_ms: null },
-          tierLatency: { risingwave_ms: null, timescaledb_ms: 15 + Math.random() * 20, athena_ms: null },
+          tierFreshness: { risingwave_ms: null, timescaledb_ms: 1500 + Math.random() * 800, athena_ms: null, influxdb_ms: null },
+          tierLatency: { risingwave_ms: null, timescaledb_ms: 15 + Math.random() * 20, athena_ms: null, influxdb_ms: null },
           fleetResources: { avg_free_cpu_pct: 85 + Math.random() * 10, avg_free_mem_pct: 60 + Math.random() * 10 },
           nodeAge: ["ws-slot00-edge-0", "ws-slot00-edge-1", "ws-slot00-edge-2"].map((id, i) => ({
             site_id: id,

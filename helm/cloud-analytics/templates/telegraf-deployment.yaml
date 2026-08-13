@@ -1,0 +1,114 @@
+{{- if .Values.telegraf.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cloud-analytics.fullname" . }}-telegraf
+  labels:
+    {{- include "cloud-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: telegraf
+spec:
+  replicas: {{ .Values.telegraf.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "cloud-analytics.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: telegraf
+  template:
+    metadata:
+      labels:
+        {{- include "cloud-analytics.labels" . | nindent 8 }}
+        app.kubernetes.io/component: telegraf
+    spec:
+      serviceAccountName: {{ include "cloud-analytics.fullname" . }}-telegraf
+      initContainers:
+        # Block startup until the per-slot InfluxDB token exists. envFrom on a
+        # missing secret would otherwise leave the pod in CreateContainerConfigError
+        # until the post-install provisioning Job runs — this makes the ordering
+        # explicit (mirrors the dashboard's wait-for-timescaledb-dashboard-env).
+        - name: wait-for-influxdb-credentials
+          image: bitnami/kubectl:latest
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for {{ .Values.telegraf.credentialsSecret }} secret in namespace {{ .Release.Namespace }}..."
+              until kubectl get secret {{ .Values.telegraf.credentialsSecret }} -n {{ .Release.Namespace }} >/dev/null 2>&1; do
+                sleep 5
+              done
+              echo "{{ .Values.telegraf.credentialsSecret }} present — starting Telegraf."
+      containers:
+        - name: telegraf
+          image: "{{ .Values.telegraf.image.repository }}:{{ .Values.telegraf.image.tag }}"
+          imagePullPolicy: {{ .Values.telegraf.image.pullPolicy }}
+          envFrom:
+            # MSK SASL/SCRAM creds + bootstrap list (deploy-cloud-analytics.sh).
+            - secretRef:
+                name: msk-credentials
+            # Minted per-slot InfluxDB url/token/org/bucket (provisioning Job).
+            - secretRef:
+                name: {{ .Values.telegraf.credentialsSecret }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              # Telegraf `brokers` is a TOML array and Telegraf does not split a
+              # comma-separated string the way Redpanda Connect's seed_brokers
+              # does. Turn the MSK bootstrap list into a quoted TOML array and
+              # substitute it into the mounted config template; Telegraf expands
+              # the remaining ${...} env refs (creds) itself.
+              BROKERS=$(echo "$MSK_BOOTSTRAP_SERVERS" | awk -F, '{ for (i=1;i<=NF;i++) printf "%s\"%s\"", (i>1?", ":""), $i }')
+              sed "s|@@BROKERS@@|$BROKERS|g" /etc/telegraf/telegraf.conf.tmpl > /tmp/telegraf.conf
+              exec telegraf --config /tmp/telegraf.conf
+          resources:
+            {{- toYaml .Values.telegraf.resources | nindent 12 }}
+          volumeMounts:
+            - name: telegraf-config
+              mountPath: /etc/telegraf/telegraf.conf.tmpl
+              subPath: telegraf.conf.tmpl
+      volumes:
+        - name: telegraf-config
+          configMap:
+            name: {{ include "cloud-analytics.fullname" . }}-telegraf-config
+---
+# ServiceAccount + RBAC for the wait-for-influxdb-credentials initContainer.
+# Long-lived (not a Helm hook) because the Deployment may reschedule the pod at
+# any time and must always be able to poll for the secret.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "cloud-analytics.fullname" . }}-telegraf
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloud-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: telegraf
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cloud-analytics.fullname" . }}-telegraf-secret-reader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloud-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: telegraf
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cloud-analytics.fullname" . }}-telegraf-secret-reader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloud-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: telegraf
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "cloud-analytics.fullname" . }}-telegraf-secret-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cloud-analytics.fullname" . }}-telegraf
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -185,6 +185,41 @@ print("TOPICS:", sorted(admin.list_topics()))
 PYEOF
 kubectl -n "$DEPLOYMENT_ID" delete pod kafka-admin >/dev/null
 
+# ── 3b. Timestream for InfluxDB admin credentials (#229/#230) ───────────────
+# The shared managed hot tier. Surface its endpoint + admin creds into an
+# in-cluster `influxdb-admin` Secret that the chart's influxdb-provision-job
+# uses to mint the per-slot bucket + token (the instance is VPC-private, so
+# that minting can't run here). If the #229 platform exports aren't present yet
+# (a platform stack deployed before this epic), skip InfluxDB cleanly and turn
+# the Telegraf sink off for this slot rather than failing the whole deploy.
+TELEGRAF_ENABLED=true
+INFLUX_ENDPOINT=$(aws cloudformation list-exports \
+  --query "Exports[?Name=='workshop-platform-influxdb-endpoint'].Value" --output text 2>/dev/null || true)
+if [[ -z "$INFLUX_ENDPOINT" || "$INFLUX_ENDPOINT" == "None" ]]; then
+  echo ">>> WARN: workshop-platform-influxdb-endpoint export not found — the platform"
+  echo "          stack predates epic #233. Deploying with the Telegraf/InfluxDB tier OFF."
+  TELEGRAF_ENABLED=false
+else
+  INFLUX_ADMIN_SECRET_ARN=$(aws cloudformation list-exports \
+    --query "Exports[?Name=='workshop-platform-influxdb-admin-secret-arn'].Value" --output text)
+  INFLUX_ORG=$(aws cloudformation list-exports \
+    --query "Exports[?Name=='workshop-platform-influxdb-org'].Value" --output text)
+  INFLUX_ADMIN_JSON=$(aws secretsmanager get-secret-value \
+    --secret-id "$INFLUX_ADMIN_SECRET_ARN" --query SecretString --output text)
+  INFLUX_ADMIN_USER=$(echo "$INFLUX_ADMIN_JSON" | python3 -c 'import sys,json; print(json.load(sys.stdin)["username"])')
+  INFLUX_ADMIN_PASS=$(echo "$INFLUX_ADMIN_JSON" | python3 -c 'import sys,json; print(json.load(sys.stdin)["password"])')
+  # attrEndpoint is a bare host; the InfluxDB v2 API is HTTPS on 8086.
+  INFLUX_URL="https://${INFLUX_ENDPOINT}:8086"
+  echo ">>> Creating influxdb-admin secret (endpoint ${INFLUX_URL}, org ${INFLUX_ORG})..."
+  kubectl create secret generic influxdb-admin \
+    --namespace "$DEPLOYMENT_ID" \
+    --from-literal=INFLUX_URL="$INFLUX_URL" \
+    --from-literal=INFLUX_ORG="$INFLUX_ORG" \
+    --from-literal=INFLUX_ADMIN_USERNAME="$INFLUX_ADMIN_USER" \
+    --from-literal=INFLUX_ADMIN_PASSWORD="$INFLUX_ADMIN_PASS" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+fi
+
 # ── 4. RisingWave S3 state bucket + IRSA role lookup ────────────────────────
 # The service account itself (with the IRSA role-arn annotation) is created
 # by the chart (helm/cloud-analytics/templates/risingwave-cr.yaml) — Helm must
@@ -298,6 +333,7 @@ helm upgrade --install cloud-analytics "$REPO_ROOT/helm/cloud-analytics" \
   --set dashboard.image.repository="$DASHBOARD_REPO" \
   --set dashboard.image.tag="$DASHBOARD_TAG" \
   --set risingwave.serviceAccountRoleArn="$RISINGWAVE_S3_ROLE_ARN" \
+  --set telegraf.enabled="$TELEGRAF_ENABLED" \
   --set-file risingwaveDdl="$REPO_ROOT/risingwave/ddl-cloud.sql" \
   --timeout 15m
 
@@ -330,6 +366,12 @@ kubectl create secret generic timescaledb-dashboard-env -n "$DEPLOYMENT_ID" \
 echo ">>> Waiting for cloud-analytics workloads to become ready..."
 kubectl rollout status -n "$DEPLOYMENT_ID" deploy/cloud-analytics-dashboard --timeout=10m
 kubectl rollout status -n "$DEPLOYMENT_ID" deploy/cloud-analytics-redpanda-connect --timeout=10m
+if [[ "$TELEGRAF_ENABLED" == "true" ]]; then
+  # Telegraf blocks in its wait-for-influxdb-credentials initContainer until the
+  # post-install provisioning Job mints the per-slot bucket/token — give that
+  # hook time to run before we assert the sink is up.
+  kubectl rollout status -n "$DEPLOYMENT_ID" deploy/cloud-analytics-telegraf --timeout=10m
+fi
 
 echo ">>> Cloud analytics deploy complete for ${DEPLOYMENT_ID}."
 echo ">>> Port-forward the dashboard with:"

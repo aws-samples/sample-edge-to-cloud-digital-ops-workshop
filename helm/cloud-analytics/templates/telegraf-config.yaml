@@ -1,0 +1,122 @@
+{{- if .Values.telegraf.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cloud-analytics.fullname" . }}-telegraf-config
+  labels:
+    {{- include "cloud-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: telegraf
+data:
+  # Mounted at /etc/telegraf/telegraf.conf.tmpl. The Deployment's entrypoint
+  # substitutes the @@BROKERS@@ placeholder (MSK bootstrap is a comma-separated
+  # string in the secret, but Telegraf `brokers` is a TOML array — Telegraf does
+  # NOT split on commas the way Redpanda Connect's seed_brokers does) and then
+  # execs telegraf, which expands the remaining ${...} env refs itself.
+  telegraf.conf.tmpl: |
+    # --8<-- [start:telegraf-config]
+    # ──────────────────────────────────────────────────────────────────────────
+    # Telegraf: MSK (sensors.raw.*, raw.telemetry) → Amazon Timestream for InfluxDB
+    #
+    # Managed-hot-tier counterpart to the Redpanda Connect → TimescaleDB sink.
+    # Both message shapes are normalised to ONE dimensional model:
+    #   measurement = sensor_reading
+    #   tags        = site_id, sensor      (metric identity — NOT one measurement
+    #                                        per metric; keeps cardinality sane and
+    #                                        lets InfluxQL/SQL GROUP BY sensor)
+    #   field       = value                (the reading)
+    #   time        = ts_ms                (IoT-Core ingest epoch-ms — same basis
+    #                                        as every other tier, so the freshness
+    #                                        comparison is clock-skew-free)
+    # ──────────────────────────────────────────────────────────────────────────
+    [agent]
+      # kafka_consumer is a streaming service input, so `interval` doesn't gate
+      # ingest; flush_interval is what bounds end-to-end freshness on the InfluxDB
+      # tier. Keep it tight (1s) so the polled dashboard tier sees fresh points.
+      interval = "10s"
+      flush_interval = "1s"
+      round_interval = false
+      metric_batch_size = 1000
+      metric_buffer_limit = 100000
+      omit_hostname = true
+
+    # ── Input A: pre-normalised industrial sensor messages ────────────────────
+    # sensors.raw.* already carry {sensor, site_id, value, unit, ts_ms} → map
+    # straight onto the sensor_reading model.
+    [[inputs.kafka_consumer]]
+      brokers = [@@BROKERS@@]
+      topic_regexps = ["^sensors\\.raw\\."]
+      # Per-slot consumer group: all slots read the SAME shared MSK topics, so a
+      # shared group would split partitions across slots and a fresh slot could
+      # see none. A per-slot group gives each slot its own full-topic cursor.
+      consumer_group = "influxdb-sink-{{ .Values.deploymentId }}"
+      sasl_mechanism = "SCRAM-SHA-512"
+      sasl_username = "${MSK_USERNAME}"
+      sasl_password = "${MSK_PASSWORD}"
+      enable_tls = true
+      data_format = "json_v2"
+      [[inputs.kafka_consumer.json_v2]]
+        measurement_name = "sensor_reading"
+        timestamp_path = "ts_ms"
+        timestamp_format = "unix_ms"
+        [[inputs.kafka_consumer.json_v2.tag]]
+          path = "sensor"
+        [[inputs.kafka_consumer.json_v2.tag]]
+          path = "site_id"
+        [[inputs.kafka_consumer.json_v2.field]]
+          path = "value"
+          type = "float"
+
+    # ── Input B: flat IoT node telemetry ──────────────────────────────────────
+    # raw.telemetry carries {thing_name, cpu_pct, mem_used_pct, ..., ingest_ts}.
+    # Parse the 5 numeric metrics as fields on a temporary "node_telemetry"
+    # measurement tagged by thing_name; the starlark processor below fans it out
+    # into one sensor_reading point per metric (so all three edge NODES land in
+    # InfluxDB under the same dimensional schema as the sensors above).
+    [[inputs.kafka_consumer]]
+      brokers = [@@BROKERS@@]
+      topics = ["raw.telemetry"]
+      consumer_group = "influxdb-sink-{{ .Values.deploymentId }}-node"
+      sasl_mechanism = "SCRAM-SHA-512"
+      sasl_username = "${MSK_USERNAME}"
+      sasl_password = "${MSK_PASSWORD}"
+      enable_tls = true
+      name_override = "node_telemetry"
+      tag_keys = ["thing_name"]
+      json_time_key = "ingest_ts"
+      json_time_format = "unix_ms"
+      fieldpass = ["cpu_pct", "mem_used_pct", "disk_used_pct", "net_io_bytes_sent", "net_io_bytes_recv"]
+      data_format = "json"
+
+    # Fan node_telemetry out into the dimensional sensor_reading model. Pass
+    # already-shaped sensor_reading points through untouched. (The starlark body
+    # is indented to this ConfigMap's block-scalar base; YAML strips that base so
+    # Telegraf receives it at column 0 — the indent starlark's parser expects.)
+    [[processors.starlark]]
+      source = '''
+    def apply(metric):
+        if metric.name != "node_telemetry":
+            return metric
+        out = []
+        site = metric.tags.get("thing_name", "unknown")
+        for k, v in metric.fields.items():
+            m = Metric("sensor_reading")
+            m.tags["site_id"] = site
+            m.tags["sensor"] = k
+            m.fields["value"] = float(v)
+            m.time = metric.time
+            out.append(m)
+        return out
+    '''
+
+    # ── Output: the shared instance's per-slot bucket ─────────────────────────
+    # URL/token/org/bucket come from the influxdb-credentials secret (minted
+    # in-cluster by influxdb-provision-job.yaml) via envFrom. insecure_skip_verify
+    # because we connect to the raw Timestream endpoint host.
+    [[outputs.influxdb_v2]]
+      urls = ["${INFLUX_URL}"]
+      token = "${INFLUX_TOKEN}"
+      organization = "${INFLUX_ORG}"
+      bucket = "${INFLUX_BUCKET}"
+      insecure_skip_verify = true
+    # --8<-- [end:telegraf-config]
+{{- end }}

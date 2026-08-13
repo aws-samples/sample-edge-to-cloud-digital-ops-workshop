@@ -1,7 +1,7 @@
 # Session 4 — Analytics: Cloud Telemetry Plane
 
 **Duration:** 4 hours  
-**Goal:** Deploy RisingWave and TimescaleDB into the cloud EKS cluster, wire them to MSK, and compare live data freshness across three storage tiers.
+**Goal:** Deploy RisingWave, TimescaleDB, and Timestream for InfluxDB into the cloud telemetry plane, wire them to MSK, and compare live data freshness across four storage tiers — including managed vs. self-managed hot stores side by side.
 
 ---
 
@@ -13,7 +13,8 @@
 | [Block 2](block-2-risingwave.md) | 45 min | Create RisingWave Materialized Views |
 | [Block 3](block-3-appsync.md) | 60 min | AppSync Resolvers & Data Freshness Comparison |
 | [Block 4](block-4-timescaledb.md) | 45 min | TimescaleDB Continuous Aggregates |
-| [Block 5](block-5-dashboard.md) | 30 min | Live Analytics Dashboard |
+| [Block 5](block-5-timestream-influxdb.md) | 45 min | Timestream for InfluxDB (Managed Hot Tier) |
+| [Block 6](block-6-dashboard.md) | 30 min | Live Analytics Dashboard |
 | Wrap-up | 15 min | Recap + preview Sessions 5–7 |
 
 ---
@@ -41,4 +42,5 @@ Session 4 is the first session you drive from your own laptop against the shared
 | Live push (IoT → AppSync) | No database — direct WebSocket push | ~10–80 ms |
 | RisingWave MV | Incremental streaming compute (50 ms barrier) | ~300–600 ms |
 | TimescaleDB (live scan) | Redpanda Connect 1 s batch + direct query | ~1–3 s |
+| Timestream for InfluxDB (managed) | Telegraf flush + on-demand poll | ~1–2 s |
 | Iceberg / Athena | Firehose buffering interval + Iceberg commit | tens of s up to ~300 s |

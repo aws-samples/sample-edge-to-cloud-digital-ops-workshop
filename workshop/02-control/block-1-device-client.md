@@ -50,64 +50,66 @@ Review how AWS IoT Device Client works as a `systemd` service alongside the EC2 
 
 1. Navigate to [**Systems Manager → Session Manager**](https://console.aws.amazon.com/systems-manager/session-manager/sessions) → start a session on one of the 3 EC2 instances (no SSH required)
 2. Inspect the Device Client service:
-   ```bash
-   systemctl status aws-iot-device-client
-   sudo journalctl -u aws-iot-device-client -n 50
-   ```
 
-   Or, from your own machine, run the same commands via `aws ssm send-command` instead of an interactive session:
+    ```bash
+    systemctl status aws-iot-device-client
+    sudo journalctl -u aws-iot-device-client -n 50
+    ```
 
-   ```bash
-   EDGE_INSTANCE=$(aws ec2 describe-instances \
-     --filters "Name=tag:Name,Values=workshop-ws-slot00-edge-0" \
-               "Name=instance-state-name,Values=running" \
-     --query "Reservations[0].Instances[0].InstanceId" --output text)
+    ??? example "From your own machine — run the same commands via `aws ssm send-command`"
 
-   CMD_ID=$(aws ssm send-command \
-     --instance-ids "$EDGE_INSTANCE" \
-     --document-name "AWS-RunShellScript" \
-     --parameters 'commands=["systemctl status aws-iot-device-client", "journalctl -u aws-iot-device-client -n 50"]' \
-     --query "Command.CommandId" --output text)
+        ```bash
+        EDGE_INSTANCE=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=workshop-ws-slot00-edge-0" \
+                    "Name=instance-state-name,Values=running" \
+          --query "Reservations[0].Instances[0].InstanceId" --output text)
 
-   for _i in $(seq 1 12); do
-     STATUS=$(aws ssm get-command-invocation \
-       --command-id "$CMD_ID" --instance-id "$EDGE_INSTANCE" \
-       --query "Status" --output text)
-     [ "$STATUS" != "InProgress" ] && [ "$STATUS" != "Pending" ] && break
-     sleep 5
-   done
-   aws ssm get-command-invocation \
-     --command-id "$CMD_ID" --instance-id "$EDGE_INSTANCE" \
-     --query "StandardOutputContent" --output text
-   ```
-   <!-- e2e:assert {"contains": "aws-iot-device-client"} -->
+        CMD_ID=$(aws ssm send-command \
+          --instance-ids "$EDGE_INSTANCE" \
+          --document-name "AWS-RunShellScript" \
+          --parameters 'commands=["systemctl status aws-iot-device-client", "journalctl -u aws-iot-device-client -n 50"]' \
+          --query "Command.CommandId" --output text)
+
+        for _i in $(seq 1 12); do
+          STATUS=$(aws ssm get-command-invocation \
+            --command-id "$CMD_ID" --instance-id "$EDGE_INSTANCE" \
+            --query "Status" --output text)
+          [ "$STATUS" != "InProgress" ] && [ "$STATUS" != "Pending" ] && break
+          sleep 5
+        done
+        aws ssm get-command-invocation \
+          --command-id "$CMD_ID" --instance-id "$EDGE_INSTANCE" \
+          --query "StandardOutputContent" --output text
+        ```
+        <!-- e2e:assert {"contains": "aws-iot-device-client"} -->
 3. Inspect the job handler directory:
-   ```bash
-   ls /etc/aws-iot-device-client/jobs/
-   cat /etc/aws-iot-device-client/jobs/run-script.sh
-   ```
 
-   Via `aws ssm send-command`:
+    ```bash
+    ls /etc/aws-iot-device-client/jobs/
+    cat /etc/aws-iot-device-client/jobs/run-script.sh
+    ```
 
-   ```bash
-   CMD_ID=$(aws ssm send-command \
-     --instance-ids "$EDGE_INSTANCE" \
-     --document-name "AWS-RunShellScript" \
-     --parameters 'commands=["ls /etc/aws-iot-device-client/jobs/", "cat /etc/aws-iot-device-client/jobs/run-script.sh"]' \
-     --query "Command.CommandId" --output text)
+    ??? example "From your own machine — run the same commands via `aws ssm send-command`"
 
-   for _i in $(seq 1 12); do
-     STATUS=$(aws ssm get-command-invocation \
-       --command-id "$CMD_ID" --instance-id "$EDGE_INSTANCE" \
-       --query "Status" --output text)
-     [ "$STATUS" != "InProgress" ] && [ "$STATUS" != "Pending" ] && break
-     sleep 5
-   done
-   aws ssm get-command-invocation \
-     --command-id "$CMD_ID" --instance-id "$EDGE_INSTANCE" \
-     --query "StandardOutputContent" --output text
-   ```
-   <!-- e2e:assert {"contains": "run-script.sh"} -->
+        ```bash
+        CMD_ID=$(aws ssm send-command \
+          --instance-ids "$EDGE_INSTANCE" \
+          --document-name "AWS-RunShellScript" \
+          --parameters 'commands=["ls /etc/aws-iot-device-client/jobs/", "cat /etc/aws-iot-device-client/jobs/run-script.sh"]' \
+          --query "Command.CommandId" --output text)
+
+        for _i in $(seq 1 12); do
+          STATUS=$(aws ssm get-command-invocation \
+            --command-id "$CMD_ID" --instance-id "$EDGE_INSTANCE" \
+            --query "Status" --output text)
+          [ "$STATUS" != "InProgress" ] && [ "$STATUS" != "Pending" ] && break
+          sleep 5
+        done
+        aws ssm get-command-invocation \
+          --command-id "$CMD_ID" --instance-id "$EDGE_INSTANCE" \
+          --query "StandardOutputContent" --output text
+        ```
+        <!-- e2e:assert {"contains": "run-script.sh"} -->
 4. Walk through the `run-script.sh` handler — it reads `$2` (the S3 URI passed as a positional argument), downloads the script, and runs it
 
 ---

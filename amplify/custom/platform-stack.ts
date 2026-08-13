@@ -47,6 +47,8 @@ import { CfnDeliveryStream } from "aws-cdk-lib/aws-kinesisfirehose";
 import { LogGroup, LogStream, RetentionDays } from "aws-cdk-lib/aws-logs";
 import { CfnDatabase, CfnTable } from "aws-cdk-lib/aws-glue";
 import { CfnWorkGroup } from "aws-cdk-lib/aws-athena";
+import { CfnInfluxDBInstance } from "aws-cdk-lib/aws-timestream";
+import { Secret } from "aws-cdk-lib/aws-secretsmanager";
 import { StringParameter } from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 
@@ -109,6 +111,9 @@ export class PlatformStack extends Stack {
     mskBootstrapScram: string;
     mskScramKeyArn: string;
     edgeNatGatewayId: string;
+    influxEndpoint: string;
+    influxAdminSecretArn: string;
+    influxOrg: string;
   };
 
   constructor(scope: Construct, id: string, props?: PlatformStackProps) {
@@ -632,6 +637,86 @@ export class PlatformStack extends Stack {
       value: mskBootstrapLookup.getResponseField("BootstrapBrokerStringSaslScram"),
     });
 
+    // ── Shared Amazon Timestream for InfluxDB instance (#229/#233) ───────────
+    // A managed hot-storage tier placed next to the self-managed TimescaleDB, so
+    // the Session-4 freshness comparison can show AWS-managed vs self-managed.
+    // ONE shared instance (per-slot *bucket*, provisioned in-cluster by #230 —
+    // the instance is private, so bucket/token minting runs from inside the
+    // cloud VPC, not from the deploy script). Mirrors the MSK precedent: shared
+    // infra here, per-slot isolation via naming.
+    const influxSg = new SecurityGroup(this, "InfluxSg", {
+      vpc: this.cloudVpc,
+      description: "workshop-influxdb shared instance",
+      allowAllOutbound: true,
+    });
+    // EKS-managed node groups (no launch template) attach the auto-created EKS
+    // cluster SG, not a construct handle we hold — so, exactly as MSK does above,
+    // admit the whole cloud VPC CIDR on the InfluxDB port rather than a source SG.
+    influxSg.addIngressRule(
+      Peer.ipv4(this.cloudVpc.vpcCidrBlock),
+      Port.tcp(8086),
+      "InfluxDB HTTP API from cloud VPC (EKS pods: Telegraf sink + dashboard)",
+    );
+
+    // Admin credentials. Timestream for InfluxDB stores {organization, bucket,
+    // username, password} in an auto-created secret (attrInfluxAuthParametersSecretArn),
+    // but we also need to *supply* the password at create time — so generate one
+    // here and expose THIS secret (deterministic name, we control its contents).
+    // Default (AWS-managed) Secrets Manager encryption on purpose: the deploy
+    // script reads it with plain secretsmanager:GetSecretValue, avoiding the
+    // kms:Decrypt / CreateGrant IAM races a CMK would add (see #102, #123 notes).
+    const influxOrg = "workshop";
+    const influxAdminSecret = new Secret(this, "InfluxAdminSecret", {
+      secretName: "workshop-platform-influxdb-admin",
+      description: "Timestream for InfluxDB shared admin credentials (username/password)",
+      removalPolicy: RemovalPolicy.DESTROY,
+      generateSecretString: {
+        secretStringTemplate: JSON.stringify({ username: "workshopadmin", organization: influxOrg }),
+        generateStringKey: "password",
+        // InfluxDB admin password: >= 8 chars; keep it punctuation-free so it is
+        // safe to pass through shell/env in the in-cluster provisioning job.
+        excludePunctuation: true,
+        passwordLength: 32,
+      },
+    });
+
+    // --8<-- [start:influxdb-instance]
+    const influxInstance = new CfnInfluxDBInstance(this, "InfluxDbInstance", {
+      name: "workshop-influxdb",
+      dbInstanceType: "db.influx.medium",
+      allocatedStorage: 20,
+      dbStorageType: "InfluxIOIncludedT1",
+      deploymentType: "SINGLE_AZ", // production HA (WITH_MULTIAZ_STANDBY) is a documented knob; off for cost
+      networkType: "IPV4",
+      port: 8086,
+      publiclyAccessible: false,
+      organization: influxOrg,
+      bucket: "workshop-init", // initial bucket; per-slot buckets are created in-cluster (#230)
+      username: "workshopadmin",
+      password: influxAdminSecret.secretValueFromJson("password").unsafeUnwrap(),
+      vpcSecurityGroupIds: [influxSg.securityGroupId],
+      vpcSubnetIds: this.cloudVpc.selectSubnets({ subnetType: SubnetType.PRIVATE_WITH_EGRESS }).subnetIds.slice(0, 1),
+    });
+    // --8<-- [end:influxdb-instance]
+    // Let `cdk destroy` (sandbox:delete-all) cascade cleanly.
+    influxInstance.applyRemovalPolicy(RemovalPolicy.DESTROY);
+
+    // Exposed as CFN exports (list-exports) so scripts/deploy-cloud-analytics.sh
+    // resolves them the same way it resolves the MSK ARN — the endpoint is the
+    // bare host; consumers connect on https://<endpoint>:8086.
+    new CfnOutput(this, "InfluxDbEndpoint", {
+      exportName: "workshop-platform-influxdb-endpoint",
+      value: influxInstance.attrEndpoint,
+    });
+    new CfnOutput(this, "InfluxDbAdminSecretArn", {
+      exportName: "workshop-platform-influxdb-admin-secret-arn",
+      value: influxAdminSecret.secretArn,
+    });
+    new CfnOutput(this, "InfluxDbOrg", {
+      exportName: "workshop-platform-influxdb-org",
+      value: influxOrg,
+    });
+
     // ── IoT VPC Destination role + security group + outputs ─────────────────
     // CfnTopicRuleDestination stays IN_PROGRESS until IoT successfully attaches
     // ENIs — this can exceed CloudFormation's stabilisation timeout. Instead, we
@@ -1022,6 +1107,9 @@ export class PlatformStack extends Stack {
       mskBootstrapScram: mskBootstrapLookup.getResponseField("BootstrapBrokerStringSaslScram"),
       mskScramKeyArn: mskScramKey.keyArn,
       edgeNatGatewayId: edgeNatGateway.ref,
+      influxEndpoint: influxInstance.attrEndpoint,
+      influxAdminSecretArn: influxAdminSecret.secretArn,
+      influxOrg,
     };
   }
 }

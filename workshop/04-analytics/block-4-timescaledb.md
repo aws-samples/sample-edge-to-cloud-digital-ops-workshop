@@ -146,6 +146,170 @@ SELECT MAX(bucket) AS latest_bucket FROM cpu_hourly;
 
 ---
 
+## Under the hood — when is data read from cache vs disk?
+
+The table above says RisingWave reads are "low latency" and TimescaleDB reads are
+"higher." *Why* is the whole point of this workshop's freshness panel. The answer
+is not "one is in RAM and the other is on disk" — TimescaleDB's hot data is in RAM
+too. The real difference is **when the aggregation work happens**: TimescaleDB
+does it at *query time*, RisingWave does it at *ingest time*.
+
+### TimescaleDB is Postgres — so it has a two-layer cache
+
+TimescaleDB is a Postgres extension, so a read goes through Postgres's normal
+storage path. There are **two** caches in front of the physical disk, and **both
+are in memory**:
+
+```mermaid
+flowchart TD
+    Q["Query needs a data page<br/>(heap / index / chunk)"]
+    SB{"In shared_buffers?<br/>────────────<br/>Postgres's own cache<br/>cloud: 512MB · edge: 256MB"}
+    OS{"In OS page cache?<br/>────────────<br/>Linux filesystem cache<br/>rest of the 1–2 GiB pod"}
+    DISK["Physical disk read<br/>────────────<br/>EBS volume — slow<br/>(only on a miss at BOTH layers)"]
+    HIT["Return page (RAM speed)"]
+
+    Q --> SB
+    SB -- hit --> HIT
+    SB -- miss --> OS
+    OS -- hit --> HIT
+    OS -- "miss (cold data)" --> DISK
+    DISK --> HIT
+
+    style Q fill:#BFDBFE,stroke:#1D4ED8,color:#1a1a1a
+    style SB fill:#A5F3FC,stroke:#0E7490,color:#1a1a1a
+    style OS fill:#A5F3FC,stroke:#0E7490,color:#1a1a1a
+    style DISK fill:#FECACA,stroke:#B91C1C,color:#1a1a1a
+    style HIT fill:#BBF7D0,stroke:#15803D,color:#1a1a1a
+```
+
+- **`shared_buffers`** — Postgres's own in-process cache of 8 KB pages (this
+  cluster: `512MB` cloud / `256MB` edge, set in the CNPG cluster spec). This is
+  "the database cache."
+- **OS page cache** — Postgres uses buffered I/O, so even a "disk" read usually
+  comes from the kernel's filesystem cache in whatever RAM is left of the pod's
+  1–2 GiB limit. `effective_cache_size` (`1536MB` cloud) is the planner's *estimate*
+  of these two layers combined — a hint, not an allocation.
+- A **true physical (EBS) disk read** happens only on a miss at *both* layers —
+  i.e. for **cold data** that hasn't been touched recently.
+
+So for a hot time-series workload (the last few seconds/minutes of telemetry), the
+pages are almost always already in RAM. **"Is the cache in memory?" — yes, both
+layers are.**
+
+### When you run an aggregation, is the disk always read?
+
+No. But caching only decides whether the *input pages* are in RAM — it does **not**
+remove the per-query CPU work of aggregating the rows. That distinction is the
+crux. There are three read shapes:
+
+```mermaid
+flowchart LR
+    subgraph raw["① Raw GROUP BY over the hypertable"]
+        direction TB
+        R1["Scan every row in range"] --> R2["Aggregate N rows<br/>at query time"] --> R3["Result"]
+    end
+    subgraph cagg["② Continuous aggregate (materialized_only=false)"]
+        direction TB
+        C1["Read pre-computed<br/>buckets (few rows)"] --> C2["UNION ALL live scan<br/>of un-refreshed tail"] --> C3["Result"]
+    end
+    subgraph rw["③ RisingWave MV"]
+        direction TB
+        W1["Point-read current<br/>MV value (1 row)"] --> W2["Result"]
+    end
+
+    style raw fill:#FEF3C7,stroke:#A16207,color:#1a1a1a
+    style cagg fill:#DBEAFE,stroke:#1D4ED8,color:#1a1a1a
+    style rw fill:#E9D5FF,stroke:#6D28D9,color:#1a1a1a
+```
+
+- **① Raw `GROUP BY time_bucket(...)`** — Postgres scans every underlying row in
+  the range and aggregates them *on every query*. Whether the scan touches disk
+  depends on caching (recent = cached = fast; old = cold = disk), **but the CPU
+  cost of aggregating N rows is paid every single time regardless.** Caching removes
+  the I/O, not the compute.
+- **② Continuous aggregate** (`cpu_hourly` above) — reads the already-materialized
+  buckets (few rows), then `materialized_only=false` UNIONs a *live scan of only the
+  un-refreshed tail*. Far less compute than ①, but freshness lags by up to the
+  refresh interval, and the tail-scan cost is still real.
+- **③ RisingWave MV** — the value is already computed; a read is a single point
+  lookup. No scan, no aggregation at read time.
+
+!!! warning "The other disk-read path: `work_mem` spills"
+    A large raw `GROUP BY` also builds its hash/sort table in memory up to
+    `work_mem` (`8MB` cloud / `4MB` edge). Exceed that and Postgres **spills the
+    aggregation to temp files on disk** — a disk read that has nothing to do with
+    whether the *input* was cached. Big ad-hoc aggregations hit this; RisingWave
+    never does, because it doesn't build a transient hash at read time.
+
+### RisingWave computes at ingest, not at read
+
+RisingWave is not caching the same query — it *eliminates* the query. It maintains
+each materialized view **incrementally**: every arriving row updates the aggregate
+in its (memory-backed) state store, so the current answer is always already sitting
+there. Work is amortized across the ingest stream instead of paid per query.
+
+```mermaid
+flowchart LR
+    subgraph tsdb["TimescaleDB — work at QUERY time"]
+        direction LR
+        I1["write<br/>(cheap append)"] --> ST1[("chunks<br/>on disk")]
+        ST1 -- "every query:<br/>scan + aggregate" --> QR1["answer"]
+    end
+    subgraph rwv["RisingWave — work at INGEST time"]
+        direction LR
+        I2["write"] --> OP["streaming operator graph<br/>updates aggregate incrementally"] --> STATE[("current MV value<br/>in memory state store")]
+        STATE -- "every query:<br/>point read" --> QR2["answer"]
+    end
+
+    style tsdb fill:#A5F3FC,stroke:#0E7490,color:#1a1a1a
+    style rwv fill:#E9D5FF,stroke:#6D28D9,color:#1a1a1a
+    style OP fill:#DDD6FE,stroke:#6D28D9,color:#1a1a1a
+```
+
+| | TimescaleDB | RisingWave |
+|---|---|---|
+| Aggregate computed **when**? | At query time (raw), or at refresh time (CAGG) | At ingest time, incrementally, per event |
+| What's held in memory? | *Input pages* (shared_buffers + OS cache) | *The materialized result* + operator state |
+| Cost of one read | Scan + aggregate, or read CAGG rows | Point read of the current value |
+| Cost of one write | Near-zero (append) | Higher — propagates through the MV graph |
+
+### So when is RisingWave's in-memory model actually superior?
+
+Not simply "because it's in RAM." It wins specifically when:
+
+1. **You need continuous freshness *and* cheap reads at once.** TimescaleDB forces
+   a trade-off — raw is fresh but expensive per read; a CAGG is cheap per read but
+   stale by the refresh interval. RisingWave gives both, because the work is
+   already done at ingest.
+2. **Reads are frequent.** The freshness panel fires a query on *every* incoming
+   event (the AppSync-as-clock pattern). TimescaleDB pays the scan/aggregate cost
+   per fire; RisingWave already holds the answer.
+3. **The aggregation is complex or the raw range is large** — exactly the case
+   where a cached-but-still-huge scan (or a `work_mem` spill) bites.
+
+**TimescaleDB wins** for ad-hoc historical queries over ranges nobody
+pre-declared (RisingWave only maintains the MVs you defined up front), rich SQL /
+joins / indexing, compression, and being the durable system of record. RisingWave's
+memory footprint also grows with the *state* it must keep (group cardinality × window
+size), so a huge keyspace costs RAM.
+
+!!! example "See it in the numbers"
+    The dashboard's freshness query (`cloud-dashboard/src/lib/freshness-queries.ts`)
+    against the raw `sensor_readings` hypertable dropped from **~1.8 s** (full scan of
+    ~6.9 M rows, dragging cold chunks off disk) to **~11 ms** just by adding
+    `WHERE partition_time > now() - interval '15 minutes'` — which keeps the scan
+    inside recent, *cached* chunks. That 150× swing **is** the cache-vs-disk story.
+    RisingWave's side of the same panel reads the pre-collapsed `mv_sensor_fleet_latest`
+    in a point read — so its latency **doesn't** swing, because there's no scan to
+    cache.
+
+**The one-liner:** TimescaleDB caches the *data* and aggregates on demand;
+RisingWave caches the *answer* and updates it on arrival. Caching in Postgres
+removes disk I/O but not per-query compute — RisingWave removes the per-query
+compute entirely by shifting it to ingest.
+
+---
+
 ## Wrap-Up
 
 Recap the three-tier freshness ladder: **RisingWave** (sub-second) → **TimescaleDB** (seconds) → **Iceberg/Athena** (tens of seconds up to ~300 seconds, set by Firehose's buffering interval).

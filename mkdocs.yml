@@ -96,7 +96,8 @@ nav:
       - Block 2 — RisingWave Materialized Views: 04-analytics/block-2-risingwave.md
       - Block 3 — AppSync Resolvers & Freshness: 04-analytics/block-3-appsync.md
       - Block 4 — TimescaleDB Continuous Aggregates: 04-analytics/block-4-timescaledb.md
-      - Block 5 — Live Analytics Dashboard: 04-analytics/block-5-dashboard.md
+      - Block 5 — Timestream for InfluxDB (Managed Hot Tier): 04-analytics/block-5-timestream-influxdb.md
+      - Block 6 — Live Analytics Dashboard: 04-analytics/block-6-dashboard.md
   - Session 5 — Edge Infrastructure:
       - Overview: 05-edge-infra/index.md
       - Block 1 — Edge Stack Architecture: 05-edge-infra/block-1-architecture.md

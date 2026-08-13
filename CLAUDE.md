@@ -140,6 +140,34 @@ The path in `--8<-- "..."` is resolved relative to `base_path: [workshop, .]` in
 - **Never duplicate code** from `job-scripts/`, `amplify/`, or `frontend/` inline in docs. Always use `--8<-- "..."`.
 - The `check_paths: true` setting in `mkdocs.yml` means a missing snippet path is a build error — this is intentional. If you rename or delete a tagged file, update the docs at the same time.
 
+### 4. Collapsing a code block by default (`??? example`)
+
+Use a **collapsible admonition** to hide a code block until the reader clicks it. This is the right treatment for secondary/alternative commands — e.g. a "run it from your own machine via `aws ssm send-command`" variant sitting next to the primary interactive commands — so the happy path stays uncluttered.
+
+- `???` renders **collapsed** by default; `???+` renders **expanded** but still collapsible. Prefer plain `???` for hide-by-default.
+- The title after the type goes in quotes: `??? example "From your own machine — …"`. Inline code in the title (backticks) renders fine.
+- The admonition body — including any fenced code block — must be indented **4 spaces** relative to the `???` marker, with a blank line after the title.
+
+**Nesting inside a numbered/bulleted list — the indentation gotcha.** A code block indented 4 spaces past a list item's content baseline is parsed as a *literal indented code block* (you'll see the raw ` ```bash ` and `??? example` text render verbatim instead of an admonition — see [workshop/02-control/block-1-device-client.md](workshop/02-control/block-1-device-client.md) for a worked example). The fix is to put the **whole list item on standard 4-space content indentation**, then the admonition marker sits at +4 and its body at +8:
+
+~~~markdown
+2. Inspect the service:
+
+    ```bash
+    systemctl status aws-iot-device-client   # visible, primary path — 4-space indent
+    ```
+
+    ??? example "From your own machine — run the same commands via `aws ssm send-command`"
+
+        ```bash
+        aws ssm send-command ...              # collapsed variant — 8-space indent
+        ```
+        <!-- e2e:assert {"contains": "aws-iot-device-client"} -->
+~~~
+
+- The `e2e:assert` comment stays indented with the fenced block (same 8-space level) so the doc-runner still extracts and asserts against it — collapsing a block does **not** exempt it from e2e.
+- Always confirm rendering with `mkdocs build --strict` and eyeball the generated HTML for `class="admonition example"` — a mis-indented block builds *without error* but renders as a literal code dump.
+
 ## Progress Files
 
 Keep a running progress log at `./tmp/progress/YYYY-MM-DD-PROGRESS.md` (one file per day, date-prefixed). Update it as work completes or blockers change. Do not write progress files anywhere else in the repo.
