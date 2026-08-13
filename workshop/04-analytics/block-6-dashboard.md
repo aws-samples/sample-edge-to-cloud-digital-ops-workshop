@@ -121,9 +121,12 @@ charts.
     *behind* the most recent committed row's `ts_ms` (e.g. right after a barrier
     catches back up), the subtraction goes **negative** — an unmistakable tell that
     something is measuring against the wrong clock. The block below deliberately
-    timestamps with the CLI's own wall-clock (`date +%s%3N`) instead of RW's
-    `now()`, for the same reason the dashboard's routes use `Date.now()` (see the
-    note under [Chart 1](#chart-1-data-freshness-log-scale) for the full story).
+    timestamps with the CLI's own wall-clock (a portable epoch-ms helper —
+    `python3 -c 'import time; print(int(time.time()*1000))'`, which behaves
+    identically on GNU/Linux and BSD/macOS, unlike a millisecond-precision
+    `date` flag) instead of RW's `now()`, for the same reason the dashboard's
+    routes use `Date.now()` (see the note under
+    [Chart 1](#chart-1-data-freshness-log-scale) for the full story).
 
 ??? example "RisingWave — freshness + query latency (port 4567)"
     ```bash
@@ -134,11 +137,14 @@ charts.
     # IoT-Core ingest timestamp (epoch-ms), so freshness is clock-skew-free.
     # Timestamp with the CLIENT's wall-clock, not RisingWave's own now() — see
     # the measurement-trap warning above. Only ask RW for MAX(ts_ms); subtract
-    # against date +%s%3N taken just before/after the query.
-    RW_T0=$(date +%s%3N)
+    # against a portable epoch-ms helper (works identically on GNU/Linux and
+    # BSD/macOS, unlike a GNU-only millisecond `date` flag) taken just
+    # before/after the query.
+    epoch_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
+    RW_T0=$(epoch_ms)
     IFS='|' read -r RW_MAX_TS RW_ROWS < <(psql -h localhost -p 4567 -U root -d dev -tA -F'|' \
       -c "SELECT MAX(ts_ms), COUNT(*) FROM mv_sensor_fleet_latest;")
-    RW_NOW=$(date +%s%3N)
+    RW_NOW=$(epoch_ms)
     RW_FRESH=""
     [ -n "$RW_MAX_TS" ] && RW_FRESH=$(( RW_NOW - RW_MAX_TS ))
     RW_LAT=$(( RW_NOW - RW_T0 ))
@@ -161,10 +167,11 @@ charts.
     # aggregates all history and grows unbounded — tens of seconds once the table
     # hits millions of rows — and, because freshness is `now - MAX(ts_ms)` sampled
     # AFTER the query returns, the query's own runtime inflates the freshness number.
-    TS_T0=$(date +%s%3N)
+    epoch_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
+    TS_T0=$(epoch_ms)
     IFS='|' read -r TS_FRESH TS_ROWS < <(PGPASSWORD="$TSDB_PASS" psql -h localhost -p 5432 -U workshop -d edge -tA -F'|' \
       -c "SELECT (EXTRACT(EPOCH FROM now())*1000)::bigint - MAX(ts_ms), COUNT(*) FROM sensor_readings WHERE partition_time > now() - interval '15 minutes';")
-    TS_LAT=$(( $(date +%s%3N) - TS_T0 ))
+    TS_LAT=$(( $(epoch_ms) - TS_T0 ))
     kill "$TSDB_PF_PID" 2>/dev/null || true
     echo "{\"tier\":\"timescaledb\",\"freshness_ms\":${TS_FRESH:-null},\"query_latency_ms\":${TS_LAT},\"rows\":${TS_ROWS:-0}}"
     ```
@@ -176,7 +183,8 @@ charts.
     # /api/freshness?tier=athena route queries. Both freshness AND query latency
     # here include the warehouse round-trip, so both are tens of seconds even
     # when the underlying data is recent. Time the full submit→poll→fetch cycle.
-    AT_T0=$(date +%s%3N)
+    epoch_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
+    AT_T0=$(epoch_ms)
     QUERY_ID=$(aws athena start-query-execution \
       --work-group workshop-shared \
       --query-string "SELECT CAST(to_unixtime(now())*1000 AS bigint) - MAX(message_timestamp) AS freshness_ms, COUNT(*) AS n FROM workshop_telemetry.telemetry WHERE deployment_id='ws-slot00'" \
@@ -196,7 +204,7 @@ charts.
       --query 'ResultSet.Rows[1].Data[0].VarCharValue' --output text)
     AT_ROWS=$(aws athena get-query-results --query-execution-id "$QUERY_ID" \
       --query 'ResultSet.Rows[1].Data[1].VarCharValue' --output text)
-    AT_LAT=$(( $(date +%s%3N) - AT_T0 ))
+    AT_LAT=$(( $(epoch_ms) - AT_T0 ))
     # aws CLI renders a SQL NULL as the literal "None" in text output — normalise it.
     if [ "$AT_FRESH" = "None" ]; then AT_FRESH=""; fi
     if [ "$AT_ROWS" = "None" ]; then AT_ROWS=""; fi
@@ -211,7 +219,9 @@ charts.
     # bucket live in the influxdb-credentials secret the in-cluster provision Job
     # mints; read them, port-forward to the managed instance, and run one Flux
     # query for the newest point's timestamp. Freshness is subtracted against the
-    # CLIENT wall-clock (date +%s%3N) — same discipline as the other tiers.
+    # CLIENT wall-clock (a portable epoch-ms helper) — same discipline as the
+    # other tiers.
+    epoch_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
     IX_URL=$(kubectl get secret influxdb-credentials -n ws-slot00 -o jsonpath='{.data.INFLUX_URL}' | base64 -d)
     IX_TOKEN=$(kubectl get secret influxdb-credentials -n ws-slot00 -o jsonpath='{.data.INFLUX_TOKEN}' | base64 -d)
     IX_ORG=$(kubectl get secret influxdb-credentials -n ws-slot00 -o jsonpath='{.data.INFLUX_ORG}' | base64 -d)
@@ -228,17 +238,26 @@ charts.
     # Newest point across the bucket, as epoch-ms. Flux `last()` after a wide
     # range gives the most-recent sensor_reading; _time is RFC3339 → epoch-ms.
     FLUX='from(bucket:"'"$IX_BUCKET"'") |> range(start:-15m) |> filter(fn:(r)=> r._measurement=="sensor_reading" and r._field=="value") |> last() |> keep(columns:["_time"]) |> max(column:"_time")'
-    IX_T0=$(date +%s%3N)
+    IX_T0=$(epoch_ms)
     IX_TIME=$(curl -sf -k "https://localhost:8086/api/v2/query?org=${IX_ORG}" \
       -H "Authorization: Token ${IX_TOKEN}" \
       -H 'Accept: application/csv' \
       -H 'Content-Type: application/vnd.flux' \
       -d "$FLUX" | awk -F, 'NR>1 && $NF ~ /T/ {print $NF; exit}')
-    IX_NOW=$(date +%s%3N)
+    IX_NOW=$(epoch_ms)
     IX_LAT=$(( IX_NOW - IX_T0 ))
     IX_FRESH=""
     if [ -n "$IX_TIME" ]; then
-      IX_TS=$(date -u -d "$IX_TIME" +%s%3N 2>/dev/null || date -u -jf "%Y-%m-%dT%H:%M:%S" "${IX_TIME%%.*}" +%s000 2>/dev/null)
+      # Portable RFC3339 -> epoch-ms parse (no GNU-only date-parsing flag).
+      # Pads/truncates the fractional-seconds component to exactly 6 digits so
+      # fromisoformat accepts InfluxDB's nanosecond-precision _time on any
+      # Python 3.7+.
+      IX_TS=$(python3 -c '
+import datetime, re, sys
+s = sys.argv[1].strip().replace("Z", "+00:00")
+s = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], s)
+print(int(datetime.datetime.fromisoformat(s).timestamp() * 1000))
+' "$IX_TIME" 2>/dev/null)
       [ -n "$IX_TS" ] && IX_FRESH=$(( IX_NOW - IX_TS ))
     fi
     kill "$IX_PF_PID" 2>/dev/null || true
