@@ -741,6 +741,14 @@ IOT_ENDPOINT=$(aws iot describe-endpoint \
 aws s3 cp "s3://${sharedBucketName}/bin/aws-iot-device-client" /usr/local/bin/aws-iot-device-client --region ${this.region}
 chmod +x /usr/local/bin/aws-iot-device-client
 
+# #244: persistent MQTT publisher, installed once at boot. The telemetry loop
+# (below) hands it JSON payloads over a bash coprocess pipe instead of
+# shelling out to \`aws iot-data publish\` per message.
+python3 -m ensurepip --upgrade
+pip3 install awsiotsdk
+aws s3 cp "s3://${sharedBucketName}/bin/mqtt-publisher.py" /usr/local/bin/mqtt-publisher.py --region ${this.region}
+chmod +x /usr/local/bin/mqtt-publisher.py
+
 mkdir -p /etc/aws-iot-device-client/jobs
 chmod 700 /etc/aws-iot-device-client/certs
 
@@ -795,9 +803,22 @@ ln -sfn /etc/aws-iot-device-client/jobs /root/.aws-iot-device-client/jobs
 cat > /etc/aws-iot-device-client/jobs/publish-telemetry.sh <<'TELEMETRY'
 #!/bin/bash
 INSTANCE_ID=$(ec2-metadata --instance-id | cut -d' ' -f2)
+AZ=$(ec2-metadata --availability-zone | cut -d' ' -f2)
+REGION="\${AZ%?}"
 DEPLOYMENT_ID=$DEPLOYMENT_ID
 IOT_ENDPOINT=$(aws iot describe-endpoint --endpoint-type iot:Data-ATS --query endpointAddress --output text)
 INTERVAL_S=5
+
+# #244: one persistent MQTT connection for the life of this process, instead
+# of a new \`aws iot-data publish\` process (+ fresh TLS handshake) per message.
+# The client id must differ from the device's own Thing name -- AWS IoT drops
+# the OLDER connection on a client-id collision, which would kick the device
+# client's Jobs/shadow session offline every time this loop restarts.
+coproc MQTT_PUB { python3 /usr/local/bin/mqtt-publisher.py \
+  --endpoint "$IOT_ENDPOINT" \
+  --region "$REGION" \
+  --topic "edge/$DEPLOYMENT_ID/$INSTANCE_ID/telemetry" \
+  --client-id "\${INSTANCE_ID}-telemetry-pub"; }
 
 while true; do
   TS=$(date -u +%s%3N)
@@ -809,12 +830,7 @@ while true; do
     '{"thing_name":"%s","message_timestamp":%s,"cpu_pct":%s,"mem_used_pct":%s,"disk_used_pct":%s}' \
     "$INSTANCE_ID" "$TS" "$CPU" "$MEM" "$DISK")
 
-  aws iot-data publish \
-    --endpoint-url "https://$IOT_ENDPOINT" \
-    --topic "edge/$DEPLOYMENT_ID/$INSTANCE_ID/telemetry" \
-    --payload "$PAYLOAD" \
-    --cli-binary-format raw-in-base64-out \
-    2>/dev/null || true
+  echo "$PAYLOAD" >&"\${MQTT_PUB[1]}" || true
 
   sleep $INTERVAL_S
 done

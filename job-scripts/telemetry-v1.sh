@@ -66,6 +66,17 @@ SLEEP_S=$(awk "BEGIN {printf \"%.3f\", $INTERVAL_MS / 1000}")
 PREV_SENT=0
 PREV_RECV=0
 
+# #244: one persistent MQTT connection for the life of this process, instead
+# of a new `aws iot-data publish` process (+ fresh TLS handshake) per message.
+# The client id must differ from the device's own Thing name -- AWS IoT drops
+# the OLDER connection on a client-id collision, which would kick the device
+# client's Jobs/shadow session offline every time this loop restarts.
+coproc MQTT_PUB { python3 /usr/local/bin/mqtt-publisher.py \
+  --endpoint "$IOT_ENDPOINT" \
+  --region "$REGION" \
+  --topic "edge/$DEPLOYMENT_ID/$INSTANCE_ID/telemetry" \
+  --client-id "${INSTANCE_ID}-telemetry-pub"; }
+
 while true; do
   # Collect measurements; top -bn1 takes ~100ms to sample CPU
   CPU=$(top -bn1 | grep "Cpu(s)" | awk '{printf "%d", $2+0}')
@@ -97,12 +108,7 @@ while true; do
   done
   PAYLOAD="{\"thing_name\":\"${INSTANCE_ID}\",\"message_timestamp\":${TS}${METRICS_FIELDS}}"
 
-  aws iot-data publish \
-    --endpoint-url "https://$IOT_ENDPOINT" \
-    --topic "edge/$DEPLOYMENT_ID/$INSTANCE_ID/telemetry" \
-    --payload "$PAYLOAD" \
-    --cli-binary-format raw-in-base64-out \
-    2>/dev/null || true
+  echo "$PAYLOAD" >&"${MQTT_PUB[1]}" || true
 
   sleep "$SLEEP_S"
 done
