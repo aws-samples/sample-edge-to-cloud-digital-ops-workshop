@@ -702,6 +702,26 @@ set -euxo pipefail
 yum install -y amazon-ssm-agent 2>/dev/null || true
 systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent
 
+# #248: scripts/sandbox.sh|sandbox-all.sh upload boot-time artifacts (device
+# client binary, mqtt-publisher.py) to S3 as a step in the same deploy that
+# creates this instance -- on a fresh account (or a CodeBuild orchestrator run)
+# that upload can still be in flight when this UserData reaches its \`aws s3 cp\`.
+# Retry with backoff instead of letting one racy \`aws s3 cp\` take down the rest
+# of boot under \`set -e\`; fail loud (non-zero, aborting boot) after exhausting
+# retries rather than silently continuing without the persistent MQTT publisher.
+s3_cp_retry() {
+  local src="$1" dst="$2" attempt
+  for attempt in 1 2 3 4 5 6 7 8; do
+    if aws s3 cp "$src" "$dst" --region ${this.region}; then
+      return 0
+    fi
+    echo "WARN: aws s3 cp $src -> $dst failed (attempt $attempt/8) -- retrying in 15s" >&2
+    sleep 15
+  done
+  echo "ERROR: aws s3 cp $src -> $dst failed after 8 attempts -- aborting boot" >&2
+  return 1
+}
+
 # #166: the edge VPC's NAT Gateway reaps idle flows after 350s. The device
 # client's MQTT socket sits idle between telemetry publishes (those go over
 # the HTTPS data plane, not this socket), so with no keepalive traffic below
@@ -738,7 +758,7 @@ IOT_ENDPOINT=$(aws iot describe-endpoint \
   --endpoint-type iot:Data-ATS \
   --query endpointAddress --output text)
 
-aws s3 cp "s3://${sharedBucketName}/bin/aws-iot-device-client" /usr/local/bin/aws-iot-device-client --region ${this.region}
+s3_cp_retry "s3://${sharedBucketName}/bin/aws-iot-device-client" /usr/local/bin/aws-iot-device-client
 chmod +x /usr/local/bin/aws-iot-device-client
 
 # #244: persistent MQTT publisher, installed once at boot. The telemetry loop
@@ -746,7 +766,7 @@ chmod +x /usr/local/bin/aws-iot-device-client
 # shelling out to \`aws iot-data publish\` per message.
 python3 -m ensurepip --upgrade
 pip3 install awsiotsdk
-aws s3 cp "s3://${sharedBucketName}/bin/mqtt-publisher.py" /usr/local/bin/mqtt-publisher.py --region ${this.region}
+s3_cp_retry "s3://${sharedBucketName}/bin/mqtt-publisher.py" /usr/local/bin/mqtt-publisher.py
 chmod +x /usr/local/bin/mqtt-publisher.py
 
 mkdir -p /etc/aws-iot-device-client/jobs
