@@ -60,6 +60,7 @@ DROP SUBSCRIPTION IF EXISTS dashboard_freshness_sub;
 SELECT pg_sleep(5);
 DROP MATERIALIZED VIEW IF EXISTS mv_fleet_1min_avg;
 DROP MATERIALIZED VIEW IF EXISTS mv_sensor_fleet_latest;
+DROP MATERIALIZED VIEW IF EXISTS mv_device_hop_latency;
 DROP VIEW IF EXISTS telemetry_this_slot;
 DROP VIEW IF EXISTS sim_this_slot;
 DROP SOURCE IF EXISTS sensors_raw_telemetry;
@@ -191,6 +192,27 @@ FROM (
     SELECT 'net_io_bytes_recv' AS sensor, thing_name AS site_id, net_io_bytes_recv::DOUBLE AS value, ingest_ts AS ts_ms FROM telemetry_this_slot
 ) combined
 GROUP BY sensor, site_id, (ts_ms / 60000);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Materialized view: device→ingest hop latency (#245). ingest_ts is stamped by
+-- the IoT Rule on arrival; message_timestamp is stamped by the device
+-- immediately before publish (see job-scripts/telemetry-v*.sh). The delta is
+-- the device-side MQTT publish + network hop -- upstream of any data store,
+-- and currently the dominant segment of the sensor→dashboard budget (#246).
+-- Bounded to a recent window (temporal filter, mirrors the TSDB 15-min
+-- freshness window in cloud-dashboard/src/lib/freshness-queries.ts) so the
+-- number reflects current behaviour rather than a lifetime average, and so
+-- this MV's state stays bounded. Degrades to NULL (not an error) when no row
+-- in the window carries message_timestamp -- e.g. older payloads or a
+-- sim-only slot with no device telemetry.
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_device_hop_latency AS
+SELECT
+    AVG(ingest_ts - message_timestamp) AS avg_device_hop_ms,
+    COUNT(*)                            AS sample_count
+FROM telemetry_this_slot
+WHERE message_timestamp IS NOT NULL
+  AND to_timestamp(ingest_ts / 1000) > now() - INTERVAL '15' MINUTE;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Subscription: change feed on mv_sensor_fleet_latest for the cloud dashboard's

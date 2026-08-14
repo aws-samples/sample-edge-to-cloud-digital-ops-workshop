@@ -45,6 +45,15 @@ function toPayload(
       athena_ms: null,
       influxdb_ms: null,
     },
+    // Device→ingest hop (#245) — populated by queryRisingWaveFreshness after
+    // this function returns; both stores see the same device hop, but only
+    // the RisingWave leg computes it today (risingwave/ddl-cloud.sql).
+    deviceHopLatency: {
+      risingwave_ms: null,
+      timescaledb_ms: null,
+      athena_ms: null,
+      influxdb_ms: null,
+    },
     fleetResources: {
       avg_free_cpu_pct: avgFreeCpu,
       avg_free_mem_pct: avgFreeMem,
@@ -70,7 +79,19 @@ export async function queryRisingWaveFreshness(pool: Pool): Promise<FreshnessPay
     GROUP BY site_id
     ORDER BY site_id
   `);
-  return toPayload(rows, "risingwave", Date.now() - t0);
+  const payload = toPayload(rows, "risingwave", Date.now() - t0);
+
+  // Device→ingest hop (#245): mv_device_hop_latency is a single-row bounded-
+  // window aggregate (risingwave/ddl-cloud.sql) — AVG is NULL when no recent
+  // row carries message_timestamp, which the FreshnessPayload contract treats
+  // as "no data" rather than an error.
+  const { rows: hopRows } = await pool.query<{ avg_device_hop_ms: string | null }>(
+    `SELECT avg_device_hop_ms FROM mv_device_hop_latency`
+  );
+  payload.deviceHopLatency.risingwave_ms =
+    hopRows[0]?.avg_device_hop_ms != null ? parseFloat(hopRows[0].avg_device_hop_ms) : null;
+
+  return payload;
 }
 
 export async function queryTimescaleDbFreshness(pool: Pool): Promise<FreshnessPayload> {
