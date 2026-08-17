@@ -20,6 +20,18 @@ TELEMETRY_SCRIPT=/etc/aws-iot-device-client/jobs/publish-telemetry.sh
 # Ensure jq is available for shadow JSON parsing
 command -v jq >/dev/null 2>&1 || yum install -y jq || dnf install -y jq
 
+# Ensure the persistent MQTT publisher + its SDK are present (#248). Boot-time
+# UserData installs these on a device's first boot, but this job handler must
+# not depend on that having succeeded -- install them here too if missing, so
+# re-pushing this job (scripts/push-telemetry-job.sh) is self-sufficient
+# regardless of what any individual device's UserData run did or didn't do.
+python3 -c "import awsiot" >/dev/null 2>&1 || { python3 -m ensurepip --upgrade >/dev/null 2>&1 || true; pip3 install awsiotsdk; }
+if [[ ! -x /usr/local/bin/mqtt-publisher.py ]]; then
+  MQTT_PUB_BUCKET=$(aws cloudformation list-exports --region "$REGION" --query "Exports[?Name=='workshop-platform-bucket-name'].Value" --output text)
+  aws s3 cp "s3://${MQTT_PUB_BUCKET}/bin/mqtt-publisher.py" /usr/local/bin/mqtt-publisher.py --region "$REGION"
+  chmod +x /usr/local/bin/mqtt-publisher.py
+fi
+
 # ── Read desired config from shadow (job handler scope) ───────────────────────
 # We read it here so we can echo the actual applied values back in the reported shadow.
 SHADOW_TMP=$(mktemp)
