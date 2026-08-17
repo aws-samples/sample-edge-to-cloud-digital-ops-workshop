@@ -64,7 +64,39 @@ mkdocs build --strict                             # CI gate — broken snippet t
 # Front-end apps (Next.js)
 cd frontend && pnpm dev                            # cloud UI (fleet view + freshness panel)
 cd hmi && pnpm dev                                 # edge HMI (site view, runs on EKS via Helm)
+
+# Screenshot the live cloud-analytics dashboard (freshness + query-latency panels)
+cd e2e && node screenshot-dashboard.mjs --slot ws-slot42 --out /tmp/dash.png
+WORKSHOP_TEST_SLOT=ws-slot42 pnpm --filter e2e screenshot:dashboard   # same, via npm script
 ```
+
+## Screenshotting the Cloud-Analytics Dashboard
+
+`e2e/screenshot-dashboard.mjs` (Playwright) captures the per-slot dashboard —
+Data Freshness, Query Latency, Fleet Free CPU/Mem, Time-Since-Last-Message, and
+the Edge→Cloud latency map — and **also dumps the panels' visible text to stdout**
+so you can read the numbers without OCR. Use it to confirm a live change (e.g. a
+RisingWave tuning tweak) shows up on the dashboard the participants actually see.
+
+- **Prereqs:** `kubectl` context on the workshop EKS cluster, and Playwright's
+  Chromium. Playwright is a declared `devDependency` of the `e2e` workspace; if
+  the browser is missing (`Executable doesn't exist … chromium_headless_shell`),
+  run `cd e2e && npx playwright install chromium` (the browser build must match
+  the installed Playwright version — a mismatched cached build is the usual cause).
+- **Self-contained:** the script spawns its own `kubectl port-forward` to the
+  in-cluster `cloud-analytics-dashboard` service (no public endpoint) and tears it
+  down on exit; if a forwarder is already bound to the chosen port it reuses it.
+- **Flags:** `--slot <id>` (or `WORKSHOP_TEST_SLOT`), `--out <png>`, `--port <n>`
+  (default 8899), `--settle <ms>` (default 12000 — how long to let the freshness
+  panels poll before the shot).
+- **Gotcha:** the dashboard holds persistent SSE connections (the RisingWave/
+  TimescaleDB push path), so Playwright's `networkidle` **never fires** — the
+  script waits on `domcontentloaded` + the `--settle` delay instead. Don't switch
+  it back to `networkidle` or `goto` will always time out.
+- **Freshness is a sawtooth:** a single screenshot catches one random phase of the
+  RisingWave freshness sawtooth, so it is **not** a reliable A/B signal on its own.
+  To compare configs, sample the freshness number repeatedly (e.g. poll
+  `Date.now() - MAX(ts_ms)` over ~20 points per setting) and compare distributions.
 
 ## Architecture
 

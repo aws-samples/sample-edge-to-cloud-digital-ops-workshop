@@ -1,47 +1,55 @@
-# Block 4 — TimescaleDB Continuous Aggregates
+# Block 4 — TimescaleDB: Cheap Writes, Continuous Aggregates, and the Read-Time Bargain
 
 **Duration:** 45 min
 
+TimescaleDB is the "on-disk time-series" substrate from the [Block 1](block-1-storage.md)
+storage tour. Its whole personality is one trade-off: it keeps the **write** path
+trivially cheap (an append — nothing is pre-computed) and defers all the aggregation
+work to **read** time. This block is about that bargain, and about the one knob —
+the *continuous aggregate* — that lets you shift the complexity back toward write
+time when a read gets too expensive. Contrast it with [Block 2](block-2-risingwave.md)
+(RisingWave), which makes the opposite choice.
+
 ---
 
-## Connect to TimescaleDB
+## The data model in one table
 
-The CNPG primary (read-write) service is `timescaledb-cloud-rw` and the workshop database is `edge` (created by the cluster's `bootstrap.initdb`). The password is in the CNPG-generated `timescaledb-cloud-app` Secret:
+All telemetry lands in a single hypertable:
+
+```
+sensor_readings(ts_ms, sensor, site_id, value, unit, partition_time)
+```
+
+One row per metric per reading. CPU readings arrive as rows where `sensor = 'cpu_pct'`,
+with `site_id` the reporting thing name. This is the "cheap write" in action — the
+device just appends narrow rows; nothing is rolled up, indexed into a cube, or
+propagated through a compute graph on the way in. Everything interesting happens
+later, when you query.
+
+## Connect and query
+
+With a port-forward to the cluster's read-write service open, connect with `psql`:
 
 ```bash
-TSDB_PASS=$(kubectl get secret timescaledb-cloud-app -n ws-slot00 \
-  -o jsonpath='{.data.password}' | base64 -d)
-kubectl port-forward -n ws-slot00 svc/timescaledb-cloud-rw 5432:5432 > /tmp/tsdb-cloud-pf.log 2>&1 &
-TSDB_PF_PID=$!
-# Wait until the forward is actually bound — kubectl logs "Forwarding from" once
-# the local port is listening. A fixed `sleep` races a slow control plane.
-until grep -q "Forwarding from" /tmp/tsdb-cloud-pf.log 2>/dev/null; do sleep 1; done
+kubectl port-forward -n ws-slot00 svc/timescaledb-cloud-rw 5432:5432 &
 PGPASSWORD="$TSDB_PASS" psql -h localhost -p 5432 -U workshop -d edge -c "SELECT 1;"
-kill "$TSDB_PF_PID" 2>/dev/null || true
 ```
 <!-- e2e:assert {"contains": "1 row"} -->
-
-Or keep the port-forward running in a separate terminal and connect interactively with `PGPASSWORD="$TSDB_PASS" psql -h localhost -p 5432 -U workshop -d edge`.
 
 !!! tip "Port 5432 already in use?"
     If you have a local PostgreSQL running, `psql -h localhost -p 5432` connects to *it*, not the forward. Map the forward to a free local port instead — `kubectl port-forward … 15432:5432` — and connect with `-p 15432`.
 
----
+## Create a Continuous Aggregate — buying back read cost
 
-!!! info "This cluster runs the real TimescaleDB extension"
-    `k8s/timescaledb-cloud-cluster.yaml` uses a CloudNativePG-compatible operand
-    image with the `timescaledb` extension baked in and `create_hypertable()`
-    already applied to `sensor_readings` — so the continuous-aggregate SQL below
-    runs as-is. CNPG (not the image) still owns HA, failover, and backups; only
-    the container image changed. All telemetry lands in one table,
-    `sensor_readings(ts_ms, sensor, site_id, value, unit, partition_time)`, with
-    one row per metric — CPU readings arrive as rows where `sensor = 'cpu_pct'`
-    and `site_id` is the reporting thing name.
-
-## Create a Continuous Aggregate
+A raw `GROUP BY time_bucket(...)` re-scans and re-aggregates every underlying row
+*on every query* — that's the read-time cost of cheap writes. A **continuous
+aggregate (CAGG)** is TimescaleDB's lever to move that complexity back toward write
+time: it pre-materialises the buckets and keeps them current with a background
+refresh policy, so the read becomes a flat lookup of a few rows instead of a scan
+of thousands.
 
 ```sql
--- Hourly CPU summary (pre-computes on new data)
+-- Hourly CPU summary — pre-computes buckets so reads don't re-aggregate raw rows
 CREATE MATERIALIZED VIEW cpu_hourly
 WITH (timescaledb.continuous) AS
 SELECT
@@ -53,23 +61,17 @@ FROM sensor_readings
 WHERE sensor = 'cpu_pct'
 GROUP BY bucket, site_id;
 
--- Add a refresh policy
+-- Refresh policy — this is where the deferred write-time work is scheduled
 SELECT add_continuous_aggregate_policy('cpu_hourly',
   start_offset      => INTERVAL '3 hours',
   end_offset        => INTERVAL '1 hour',
   schedule_interval => INTERVAL '30 minutes');
 ```
 
-Apply it against the deployed cluster (safe to re-run — `CREATE ... IF NOT EXISTS`
-and `add_continuous_aggregate_policy(..., if_not_exists => true)`):
+Run it against the cluster with `psql` (`IF NOT EXISTS` / `if_not_exists => true`
+make it safe to re-run):
 
 ```bash
-TSDB_PASS=$(kubectl get secret timescaledb-cloud-app -n ws-slot00 \
-  -o jsonpath='{.data.password}' | base64 -d)
-kubectl port-forward -n ws-slot00 svc/timescaledb-cloud-rw 5432:5432 > /tmp/tsdb-cagg-pf.log 2>&1 &
-TSDB_PF_PID=$!
-# Wait for the forward to bind rather than racing it with a fixed sleep.
-until grep -q "Forwarding from" /tmp/tsdb-cagg-pf.log 2>/dev/null; do sleep 1; done
 PGPASSWORD="$TSDB_PASS" psql -h localhost -p 5432 -U workshop -d edge -v ON_ERROR_STOP=1 <<'SQL'
 CREATE MATERIALIZED VIEW IF NOT EXISTS cpu_hourly
 WITH (timescaledb.continuous) AS
@@ -87,7 +89,6 @@ SELECT add_continuous_aggregate_policy('cpu_hourly',
   schedule_interval => INTERVAL '30 minutes',
   if_not_exists     => true);
 SQL
-kill "$TSDB_PF_PID" 2>/dev/null || true
 ```
 <!-- e2e:assert {"contains": "CREATE MATERIALIZED VIEW"} -->
 
@@ -117,6 +118,39 @@ GROUP BY 1, 2;
 ```
 
 This is structurally identical to **Iceberg's merge-on-read**: the materialization hypertable is the committed data file, the raw un-refreshed chunks are the uncommitted delta, and the query-time UNION ALL is the merge reader that reconciles them at query time.
+
+---
+
+## The read complexity you can't refresh away
+
+Real-time aggregation narrows the freshness gap, but look again at what that planner
+rewrite actually does: it `UNION ALL`s a **live scan of the un-refreshed tail** onto
+the pre-materialised buckets. That live scan *is* read-time aggregation — the very
+cost the CAGG was supposed to remove. So a continuous aggregate doesn't **eliminate**
+read complexity; it **bounds** it to whatever hasn't been refreshed yet. There's
+always a residual scan on every read.
+
+And how small can that tail get? Only as small as the **refresh policy allows**. A
+CAGG stays current through a *scheduled background job* (`schedule_interval` above),
+and that interval has a practical floor: each refresh scans the modified buckets and
+rewrites the materialization, so you can't crank it arbitrarily fast without refreshes
+overlapping and competing with the write path. The un-refreshed tail — and thus the
+residual read scan and the freshness lag — can shrink, but never to zero.
+
+RisingWave has no such floor. It doesn't *refresh* on a schedule at all — it maintains
+each view **incrementally, row by row, as every event arrives**, with no background
+job in the loop:
+
+- **Freshness is truly continuous** — sub-second/millisecond — not quantised by a
+  refresh interval.
+- **The read is a pure point lookup** — there is no residual tail to scan, ever.
+
+That is the sharp end of the read-vs-write-complexity trade. A CAGG shifts *most* of
+the aggregation to write time but, because its refresh is scheduled and bucketed,
+always leaves a residual read-time scan behind. RisingWave shifts *all* of it, because
+incremental streaming maintenance has no minimum refresh granularity to leave a tail.
+TimescaleDB can get **close** to a pure keyed-lookup read — it just can't get all the
+way there the way a native streaming engine does.
 
 ---
 
@@ -279,8 +313,10 @@ Not simply "because it's in RAM." It wins specifically when:
 
 1. **You need continuous freshness *and* cheap reads at once.** TimescaleDB forces
    a trade-off — raw is fresh but expensive per read; a CAGG is cheap per read but
-   stale by the refresh interval. RisingWave gives both, because the work is
-   already done at ingest.
+   stale by the refresh interval, and even with real-time aggregation on, it still
+   pays a residual scan of the un-refreshed tail (see
+   [The read complexity you can't refresh away](#the-read-complexity-you-cant-refresh-away)).
+   RisingWave gives both, because the work is already done at ingest.
 2. **Reads are frequent.** The freshness panel fires a query on *every* incoming
    event (the AppSync-as-clock pattern). TimescaleDB pays the scan/aggregate cost
    per fire; RisingWave already holds the answer.

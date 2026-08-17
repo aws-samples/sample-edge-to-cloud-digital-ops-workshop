@@ -6,214 +6,94 @@ hide:
 
 # Edge Digital Operations Workshop
 
-**Format:** 4-hour sessions · Once per week · 7 weeks  
-**Audience:** Engineers familiar with the AWS console and basic Linux  
-**Prerequisite:** A cloud admin deploys the platform stack before Session 1
+**Turn the data your equipment already produces into decisions you can act on in seconds — not next quarter.**
+
+Every pump, compressor, and sensor in the field is already generating a stream of readings. The business value isn't in *collecting* that data — it's in getting the right slice of it, at the right freshness, to the right person or system, at a cost that scales. A control-room operator needs sub-second freshness to catch a failing pump. A reliability engineer needs weeks of trend history. A compliance team needs an immutable archive going back years. **The same sensor reading has to serve all three — and each has a different tolerance for latency, cost, and complexity.**
+
+This workshop is a hands-on tour of how to build that pipeline on AWS, end to end, and — just as importantly — how to make the architectural tradeoffs that decide whether it delivers business value or becomes an expensive science project.
 
 ---
 
-## Mental Model: The Four-Layer Pipeline
+## Why This Matters to the Business
 
-Every real-time sensor pipeline — regardless of cloud provider, on-premises or edge — is a variation of the same four-layer model. Understanding this model first makes every architectural decision in the workshop follow naturally.
+- **Faster decisions → less downtime.** Catching a pump-rate anomaly in 80 milliseconds instead of 5 minutes is the difference between a graceful shutdown and an unplanned outage. We make that latency *visible and measurable* so you can put a number on it.
+- **Right-sized cost.** Keeping every reading in a live in-memory store is fast but expensive; archiving everything to cheap object storage is affordable but slow to query. Most real value comes from knowing *which tier serves which question* — and this workshop makes you choose, and shows you the bill.
+- **Resilience where connectivity is unreliable.** Remote sites lose their network. We show how to keep local operations running — and lose zero data — through a WAN outage, then reconcile automatically when the link returns.
+- **Avoiding lock-in.** The pipeline is built from managed AWS services *and* open, portable components, so you can see exactly where each tradeoff between "fully managed and fast" and "open and portable" lands.
 
-```mermaid
-block-beta
-  columns 3
-
-  Sensor["📡 Sensor<br/>────────────────────────<br/>Generates readings at regular<br/>intervals (e.g. 1 Hz).<br/>Publishes over MQTT."]:1
-
-  MQTT["📨 Message Broker<br/>────────────────────────<br/>Lightweight pub/sub.<br/>Not a durable log.<br/>Forwards to streaming service.<br/>────────────────────────<br/>e.g. IoT Core, EMQX"]:1
-
-  Stream["🔁 Streaming Service<br/>────────────────────────<br/>Durable, ordered log.<br/>Multiple consumers read<br/>independently. Handles<br/>replay on reconnect.<br/>────────────────────────<br/>e.g. Kafka, Redpanda, MSK"]:1
-
-  Mem["🧠 In-Memory Store<br/>────────────────────────<br/>Materialized views in RAM.<br/>Continuous queries run as<br/>data arrives.<br/>Sub-50 ms latency.<br/>────────────────────────<br/>Use for: live dashboards,<br/>alarms, fleet aggregates<br/>────────────────────────<br/>e.g. RisingWave"]:1
-
-  TSDB["🗄️ Disk-Based Store<br/>────────────────────────<br/>Accepts high-throughput writes.<br/>Continuous aggregates<br/>pre-computed on schedule.<br/>90–95% compression.<br/>────────────────────────<br/>Use for: recent history,<br/>ad-hoc drilldown, SQL joins<br/>────────────────────────<br/>e.g. TimescaleDB"]:1
-
-  Object["🪣 Object Storage<br/>────────────────────────<br/>Raw stream archived directly.<br/>Unlimited capacity, low cost.<br/>Write-once, batch-read.<br/>────────────────────────<br/>Use for: long-term archive,<br/>ML training, compliance<br/>────────────────────────<br/>e.g. S3"]:1
-
-  style Sensor fill:#FED7AA,stroke:#C2410C,color:#1a1a1a
-  style MQTT fill:#FEF08A,stroke:#A16207,color:#1a1a1a
-  style Stream fill:#BFDBFE,stroke:#1D4ED8,color:#1a1a1a
-  style Mem fill:#E9D5FF,stroke:#6D28D9,color:#1a1a1a
-  style TSDB fill:#A5F3FC,stroke:#0E7490,color:#1a1a1a
-  style Object fill:#E5E7EB,stroke:#374151,color:#1a1a1a
-```
-
-The rest of this workshop maps real AWS and open-source components onto each box. **The pattern stays the same whether the pipeline runs on a rig at the edge or entirely in the cloud.**
-
-### Why these layers exist
-
-The layers solve distinct problems that no single system handles well:
-
-- **Broker** (IoT Core, EMQX) — accepts MQTT connections from thousands of devices, handles TLS termination, fan-out to subscribers. Not durable: messages that miss their subscriber window are gone.
-- **Streaming service** (MSK, Redpanda) — fills the durability gap. Multiple independent consumers (RisingWave, TimescaleDB) each maintain their own read offset and can fall behind or replay without affecting each other. The broker feeds this layer; the streaming service is what makes the downstream consumers decoupled.
-- **In-memory store** (RisingWave) — continuously maintains pre-computed aggregations *in RAM*. Queries hit pre-computed state — no row scan, no disk I/O. Freshness is ~100–300 ms from the stream. The cost is that raw history isn't stored here — only the views you defined.
-- **Disk-based store** (TimescaleDB) — accepts high-throughput appends from the stream and compresses them aggressively (90–95% on regular sensor data). Serves ad-hoc queries, time-range drilldowns, and joins against business data. Freshness lags slightly (seconds) because it materializes aggregates on a schedule rather than on every write.
-- **Object storage** (S3) — writes the raw stream once, forever. No query engine of its own; Athena bridges the gap. Cost-effective for compliance, ML training, and long-horizon analytics. Data freshness is governed by Firehose's buffering (128 MB or 300 s, whichever fires first) — tens of seconds up to ~300 s at workshop-scale throughput.
+By the end you'll be able to look at a real-time data requirement and answer the questions that actually drive the architecture: *How fresh does this need to be? How long must we keep it? What does it cost at fleet scale? What happens when the network drops?*
 
 ---
 
-## Full Architecture
+## The Core Tradeoff: Freshness vs. Scale
 
-This workshop builds the following pipeline. The two ingest paths (edge cluster and direct cloud ingest) both land in the same MSK cluster feeding the streaming/relational consumers, while a separate IoT Rule delivers telemetry directly to Amazon Data Firehose for the Iceberg archive tier.
+There is no single store that is both instantly fresh *and* cheap to keep forever at unlimited volume. The fresh-**and**-limitless corner is an *unattainable ideal* — so every real option lands on an **efficient frontier**, where you can only buy more of one axis by giving up the other. No point on that frontier beats the others; each is the best choice for a *different* question.
 
-```mermaid
-flowchart TD
-    subgraph edge["Edge — K3s cluster (Sessions 5–7)"]
-        Sensor["Sensor simulator<br>(MQTT, 1 Hz+)"]
-        MQTTBroker["Redpanda Connect<br>(ingest bridge)"]
-        RP["Redpanda @ Edge<br>(3-node Raft)"]
+<div style="max-width:780px;margin:1.5rem auto;">
+<svg viewBox="0 0 820 500" role="img" aria-labelledby="pareto-title pareto-desc" style="width:100%;height:auto;font-family:var(--md-text-font-family,sans-serif);">
+  <title id="pareto-title">Data freshness vs. data-volume scalability — an efficient frontier</title>
+  <desc id="pareto-desc">A scatter plot whose vertical axis is data freshness (fresh at top) and horizontal axis is data volume and retention (high at right). Five data stores sit on a downward-sloping efficient frontier: live push via AppSync is freshest but stores nothing; RisingWave in-memory is very fresh with limited volume; TimescaleDB (self-managed, continuous aggregates) is the fresher disk hot tier while managed Timestream for InfluxDB trades a little freshness for higher write volume and retention; Iceberg on S3 via Athena holds unlimited history but is the slowest to query. The top-right corner — fresh at unlimited scale — is marked as an unattainable ideal.</desc>
 
-        subgraph edge_compute["Streaming & Storage"]
-            RW_edge["Edge RisingWave<br>(streaming compute,<br>mat. views, HMI source)"]
-            TSDB["TimescaleDB / CNPG<br>(ad-hoc queries,<br>Digital Ops page)"]
-            MinIO["MinIO<br>(RisingWave checkpoints)"]
-        end
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--md-default-fg-color--light)"/>
+    </marker>
+  </defs>
 
-        RPC_relay["Redpanda Connect<br>(Kafka→Kafka WAN relay)"]
-    end
+  <!-- attainable region (everything below/left of the frontier) -->
+  <path d="M110,81 L143,81 L268,112 L407,203 L493,228 L737,385 L737,420 L110,420 Z"
+        fill="var(--md-primary-fg-color)" fill-opacity="0.06" stroke="none"/>
 
-    subgraph iot_edge["Direct Cloud Ingest — Sessions 1–4"]
-        IoTDevice["EC2 edge devices<br>(IoT Device Client)"]
-    end
+  <!-- axes -->
+  <line x1="110" y1="420" x2="770" y2="420" stroke="var(--md-default-fg-color--light)" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="110" y1="420" x2="110" y2="60"  stroke="var(--md-default-fg-color--light)" stroke-width="1.5" marker-end="url(#arrow)"/>
 
-    subgraph cloud["Cloud — AWS"]
-        IoTCore["AWS IoT Core<br>(managed MQTT broker)"]
-        IoTRuleFH["IoT Rules Engine<br>(Firehose action)"]
-        Firehose["Amazon Data Firehose<br>(Iceberg destination)"]
-        S3["S3 / Iceberg"]
-        Athena["Amazon Athena"]
-        IoTRule["IoT Rules Engine<br>(Kafka action)"]
-        MSK["Amazon MSK<br>(Multi-AZ, Provisioned)"]
-        RW_cloud["Cloud RisingWave<br>(fleet analytics)"]
-        TSDB_cloud["Cloud TimescaleDB<br>(self-managed hot tier)"]
-        Influx_cloud["Timestream for InfluxDB<br>(managed hot tier, polled)"]
-    end
+  <!-- axis titles -->
+  <text x="440" y="468" text-anchor="middle" font-size="15" font-weight="600" fill="var(--md-default-fg-color)">Data volume &amp; retention &#8594;</text>
+  <text x="42"  y="245" text-anchor="middle" font-size="15" font-weight="600" fill="var(--md-default-fg-color)" transform="rotate(-90 42 245)">Data freshness &#8594;</text>
+  <text x="120" y="438" font-size="12" fill="var(--md-default-fg-color--light)">low</text>
+  <text x="760" y="438" text-anchor="end" font-size="12" fill="var(--md-default-fg-color--light)">high</text>
+  <text x="100" y="78"  text-anchor="end" font-size="12" fill="var(--md-default-fg-color--light)">fresh</text>
+  <text x="100" y="418" text-anchor="end" font-size="12" fill="var(--md-default-fg-color--light)">slow</text>
 
-    Sensor -->|MQTT publish| MQTTBroker
-    MQTTBroker -->|sensors.raw.*| RP
-    RP -->|sensors.raw/calc| RW_edge
-    RP -->|sensors.raw/calc| TSDB
-    RW_edge <-->|PG wire| TSDB
-    RW_edge -.->|checkpoints| MinIO
-    RP --> RPC_relay
-    RPC_relay -->|zstd compressed| MSK
+  <!-- unattainable ideal corner -->
+  <circle cx="740" cy="84" r="9" fill="none" stroke="var(--md-default-fg-color--light)" stroke-width="1.5" stroke-dasharray="3 3"/>
+  <text x="726" y="88" text-anchor="end" font-size="12.5" font-style="italic" fill="var(--md-default-fg-color--light)">Ideal: fresh at any volume</text>
+  <text x="726" y="104" text-anchor="end" font-size="12.5" font-style="italic" fill="var(--md-default-fg-color--light)">&#8212; unattainable</text>
 
-    IoTDevice -->|"MQTT / TLS"| IoTCore
-    IoTCore --> IoTRuleFH
-    IoTCore --> IoTRule
-    IoTRuleFH -->|"Firehose action"| Firehose
-    Firehose -->|"Iceberg commits"| S3
-    S3 --> Athena
-    IoTRule -->|"Kafka action (VPC destination)"| MSK
+  <!-- efficient frontier -->
+  <polyline points="143,81 268,112 407,203 493,228 737,385" fill="none"
+            stroke="var(--md-primary-fg-color)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
 
-    MSK --> RW_cloud
-    MSK -->|"Redpanda Connect"| TSDB_cloud
-    MSK -->|"Telegraf"| Influx_cloud
+  <!-- points (2px surface ring so they sit on the line) -->
+  <g fill="var(--md-primary-fg-color)" stroke="var(--md-default-bg-color)" stroke-width="2.5">
+    <circle cx="143" cy="81"  r="7"/>
+    <circle cx="268" cy="112" r="7"/>
+    <circle cx="407" cy="203" r="7"/>
+    <circle cx="493" cy="228" r="7"/>
+    <circle cx="737" cy="385" r="7"/>
+  </g>
 
-    classDef sensor fill:#FED7AA,stroke:#C2410C,color:#1a1a1a
-    classDef broker fill:#FEF08A,stroke:#A16207,color:#1a1a1a
-    classDef streaming fill:#BFDBFE,stroke:#1D4ED8,color:#1a1a1a
-    classDef inmem fill:#E9D5FF,stroke:#6D28D9,color:#1a1a1a
-    classDef tsdb fill:#A5F3FC,stroke:#0E7490,color:#1a1a1a
-    classDef object fill:#E5E7EB,stroke:#374151,color:#1a1a1a
+  <!-- point labels -->
+  <g font-size="13.5" fill="var(--md-default-fg-color)">
+    <text x="156" y="85"  font-weight="600">Live push (AppSync)</text>
+    <text x="281" y="116" font-weight="600">RisingWave — in-memory</text>
+    <text x="399" y="222" text-anchor="end" font-weight="600">TimescaleDB</text>
+    <text x="506" y="225" font-weight="600">Timestream for InfluxDB</text>
+    <text x="726" y="380" text-anchor="end" font-weight="600">Iceberg on S3 / Athena</text>
+  </g>
+</svg>
+</div>
 
-    class Sensor,IoTDevice sensor
-    class MQTTBroker,IoTCore,IoTRule,IoTRuleFH broker
-    class RPC_relay,RP,MSK,Firehose streaming
-    class RW_edge,RW_cloud inmem
-    class TSDB,TSDB_cloud,Influx_cloud tsdb
-    class MinIO,S3,Athena object
-```
-
-### Component Roles
-
-| Component | Role | Where in workshop |
-|---|---|---|
-| **AWS IoT Core** | Managed MQTT broker for cloud-connected devices; fleet provisioning; device shadows; IoT Jobs | Sessions 1–4 |
-| **IoT Rules Engine** | Two rules per slot: a VPC Kafka action to MSK (streaming/relational consumers) and a Firehose action to the Iceberg archive tier — no Lambda hop needed | Sessions 1–4 |
-| **Amazon MSK** | Cloud-side stream buffer; feeds RisingWave and TimescaleDB | Sessions 1–4 |
-| **Amazon Data Firehose** | Receives telemetry directly from an IoT Rule (Firehose action) and writes it into the pre-created Iceberg table in the Glue Data Catalog | Session 1 |
-| **Amazon Athena** | Query engine over the Iceberg table; measures the archive-tier freshness | Session 1 |
-| **Cloud RisingWave** | Fleet analytics; continuously maintained materialized views; sub-100 ms query latency | Session 4 |
-| **Cloud TimescaleDB** | Self-managed hot-tier history (days–weeks); continuous aggregates; ad-hoc SQL; business data joins | Session 4 |
-| **Timestream for InfluxDB** | Managed hot tier serving the same telemetry via Telegraf from MSK; dimensional model, polled freshness — the managed counterpart to TimescaleDB | Session 4 |
-| **Redpanda @ Edge** | Durable stream buffer at the edge; offline replay when WAN is down | Sessions 5–7 |
-| **Redpanda Connect (ingest)** | Bridges MQTT → Redpanda at the edge | Sessions 5–7 |
-| **Redpanda Connect (relay)** | Forwards edge Redpanda → Cloud MSK; resumes from committed offset after WAN recovery | Sessions 5–7 |
-| **Edge RisingWave** | Streaming compute at the edge; powers the HMI live sensor panels via SSE | Sessions 5–7 |
-| **Edge TimescaleDB** | Durable time-series at the edge; powers the Digital Ops page | Sessions 5–7 |
-| **Next.js HMI** | P&ID-style operator interface; Site View (React Flow) + Digital Ops metrics page | Sessions 6–7 |
+Read it as a menu, not a ranking. **Live push** and **in-memory** stores (top-left) give millisecond freshness for the *current* picture but retain little history. **Object storage** (bottom-right) keeps everything cheaply for years but answers in seconds-to-minutes. The **disk-based hot tiers** sit between them, balancing recent history against query speed. The business skill is knowing which question sits where on this frontier — and this workshop makes every one of these tiers observable side by side, so you can *see* the trade-off rather than take it on faith.
 
 ---
 
-## Which Ingest Path to Use
+## What You'll Build
 
-Both paths in the architecture diagram land in the same MSK cluster and feed the same downstream consumers — they are not mutually exclusive. The question is which one fits a given device's connectivity profile.
+Over seven sessions you'll stand up a complete edge-to-cloud pipeline: simulated field devices publishing telemetry, a cloud ingest and analytics layer, and an edge stack that keeps running when the network doesn't. You'll instrument it, break it on purpose, and watch the same metric arrive through different paths at very different speeds — the core lesson of the whole workshop.
 
-| | Direct cloud ingest (IoT Core) | Edge Redpanda → MSK relay |
-|---|---|---|
-| **WAN required to operate** | Yes — device must reach IoT Core to publish at all | No — Redpanda buffers locally; relay catches up on reconnect |
-| **Handles intermittent WAN** | No — messages dropped if IoT Core is unreachable | Yes — Redpanda's Kafka offset model guarantees no data loss across outages |
-| **Edge-local dashboard** | No — data only exists in the cloud | Yes — Edge RisingWave and TimescaleDB serve dashboards from local data regardless of cloud connectivity |
-| **Broker dependency** | AWS IoT Core (AWS-managed) | Redpanda (open source, self-hosted on your hardware) |
-| **Architecture approach** | Faster time to value — fully managed by AWS; no edge infrastructure to operate | Open architecture — Kafka-compatible interface decouples the edge stack from the cloud backend |
-| **Per-device throughput cap** | 100 msg/s hard limit per connection | No practical cap — Redpanda handles hundreds of thousands of msg/s on NVMe |
-| **Fleet management (Jobs, shadows)** | Native — built into IoT Core | Not included — requires a separate management plane |
-| **Setup complexity** | Low — IoT Core is fully managed | Higher — K3s cluster + Helm stack to operate |
-
-### When to use direct IoT Core ingest
-
-- Device has a **stable, always-on internet connection** (office sensor, fixed infrastructure)
-- You need **IoT Jobs, device shadows, or fleet provisioning** — these are IoT Core features with no Redpanda equivalent
-- Low publish frequency (≤100 msg/s per device) and no offline survival requirement
-- You want minimal operational overhead and are comfortable with the AWS dependency
-
-### When to use the Redpanda → MSK relay
-
-- Device is at a **remote or intermittently connected site** (offshore rig, wellsite, field equipment)
-- You need **offline-resilient local dashboards** — operators must see live data even when the WAN link is down
-- High-frequency sensors (vibration, acoustic) that exceed IoT Core's per-connection throughput cap
-- You want **open architecture** — the Kafka-compatible interface means you can route edge data to any cloud backend (AWS MSK today, Azure Event Hubs or on-prem Kafka tomorrow) without changing the edge stack
-
-!!! info "How this workshop uses both"
-    Sessions 1–4 use direct IoT Core ingest because the workshop EC2 instances have stable internet and the sessions focus on IoT Core features (fleet provisioning, Jobs, shadows). Sessions 5–7 layer the Redpanda edge stack on top of the same devices to show what the full resilient architecture looks like — both paths feed the same MSK cluster throughout.
-
----
-
-## Which Storage Tier to Query
-
-These query tiers serve different access patterns. Choosing the wrong tier costs latency (Athena for live queries) or unnecessary complexity (RisingWave for raw history).
-
-| Query Pattern | Right Tier | Why |
-|---|---|---|
-| Current sensor reading — sub-100 ms required | **RisingWave** | In-memory MV; <50 ms; no disk access |
-| Fleet-wide aggregate right now (e.g. total pump rate) | **RisingWave** | MV spans all devices; returns instantly regardless of fleet size |
-| Last 7/30/180-day trend chart (hourly buckets) | **TimescaleDB** | Continuous aggregates precompute buckets on write; query scans tiny aggregate table, not raw rows |
-| "What happened on this device in the last 48 hours?" | **TimescaleDB** | Hypertable chunk pruning; targeted scan is fast even on raw rows |
-| Same hot-tier query, but with zero cluster ops to run | **Timestream for InfluxDB** | Managed counterpart to TimescaleDB — same telemetry, no pod/PVC/operator to operate; trades a push primitive for polled freshness |
-| ML training — months of raw sensor history | **Iceberg / Athena** | Full dataset; batch-optimized; cost-effective at scale |
-| Compliance audit — raw records since a specific date | **Iceberg / Athena** | Immutable archive; query by time range |
-
----
-
-## Data Freshness Reference
-
-The workshop makes this ladder directly observable — each tier is wired to a panel in the cloud UI (Session 4) and compared side-by-side with the edge HMI (Session 6).
-
-| Tier | Mechanism | Expected freshness | Scales with fleet? |
-|---|---|---|---|
-| Live push (IoT → AppSync) | No database — IoT Rules HTTP action → AppSync Events → WebSocket | ~10–80 ms | Flat — per-message cost |
-| Edge RisingWave MV (LAN) | SSE via Next.js SUBSCRIBE cursor | ~100–300 ms | Flat |
-| Cloud RisingWave MV | SSE via ALB → Next.js SUBSCRIBE cursor | ~300–650 ms | Flat — incremental MV update |
-| Edge TimescaleDB CAGG | AppSync Event triggers HTTP request → Next.js Route Handler → Edge TimescaleDB CAGG | ~100–400 ms (LAN) | Flat — edge fleet is fixed at 3 devices |
-| Cloud TimescaleDB CAGG | AppSync Event triggers HTTP query → CAGG + live scan | ~100 ms–3 s | Grows: live scan over un-materialized tail |
-| Timestream for InfluxDB (managed) | AppSync Event triggers HTTP poll → Flux `last()` over the fleet's series | ~1–2 s | Grows: query groups all series |
-| Iceberg / Athena | Firehose buffering interval + Iceberg commit | tens of s up to ~300 s | Grows with data volume |
-
-!!! tip "Why does TimescaleDB freshness grow with fleet size?"
-    At 3 devices the CAGG live scan touches ~30 un-materialized rows per query. At 500 devices (5,000 rows/second) the same query scans ~25,000 un-materialized rows — pushing freshness to 500 ms–3 s. RisingWave's MV cost stays flat because it was updated incrementally on every insert: the freshness cost is paid at write time, not read time.
+The deep technical detail — the layered mental model, the full architecture diagram, and the freshness/cost comparison tables — lives in the [Architecture Reference](reference/architecture.md) and in the individual sessions, so we can keep this overview focused on the *why*.
 
 ---
 

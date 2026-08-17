@@ -134,10 +134,11 @@ Check consumer group lag in the cloud MSK console — it should be near zero.
 
 The edge stack is now live. Data flows:
 
-```
-Sensor simulator → MQTT → Redpanda Connect → Redpanda
-  ├─► Edge RisingWave → Next.js SSE → HMI browser
-  └─► WAN relay → Cloud MSK → Cloud analytics
+```mermaid
+flowchart LR
+  Sensor["Sensor simulator"] -->|MQTT| RC["Redpanda Connect"] --> Redpanda["Redpanda"]
+  Redpanda --> RW["Edge RisingWave"] --> SSE["Next.js SSE"] --> HMI["HMI browser"]
+  Redpanda --> WAN["WAN relay"] --> MSK["Cloud MSK"] --> Analytics["Cloud analytics"]
 ```
 
 **Preview Session 6:** Use the Next.js HMI via port-forwarding to visualize the industrial site, explore Digital Ops metrics, and simulate a network failure.

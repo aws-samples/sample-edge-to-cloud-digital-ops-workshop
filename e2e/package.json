@@ -8,7 +8,8 @@
     "test:admin": "tsx doc-runner-cli.ts workshop --persona admin",
     "test:participant": "tsx doc-runner-cli.ts workshop --persona participant",
     "test:delete-platform-stack": "tsx doc-runner-cli.ts workshop --delete-platform-stack",
-    "test:doc-runner": "tsx doc-runner-cli.ts"
+    "test:doc-runner": "tsx doc-runner-cli.ts",
+    "screenshot:dashboard": "node screenshot-dashboard.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-ssm": "^3.0.0",
@@ -16,6 +17,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.9.2",
+    "playwright": "^1.60.0",
     "tsx": "^4.19.0",
     "typescript": "^5.5.0"
   }

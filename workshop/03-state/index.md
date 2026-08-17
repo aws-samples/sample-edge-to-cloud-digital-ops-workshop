@@ -1,7 +1,7 @@
-# Session 3 — State: Device Shadows and the Management UI
+# Session 3 — State: Device Shadows and Failure Detection
 
 **Duration:** 4 hours  
-**Goal:** Add the remaining named shadows, use the front-end UI to observe device state, and experience failure detection via shadow staleness.
+**Goal:** Add the remaining named shadows and experience failure detection via shadow staleness.
 
 ---
 
@@ -11,8 +11,7 @@
 |---|---|---|
 | [Block 1](block-1-shadows.md) | 45 min | Named Shadow Architecture |
 | [Block 2](block-2-shadow-job.md) | 60 min | Deploy Shadow Update Job |
-| [Block 3](block-3-ui.md) | 60 min | Front-End UI Walkthrough |
-| [Block 4](block-4-failure.md) | 45 min | Failure Detection |
+| [Block 3](block-3-failure.md) | 45 min | Failure Detection |
 | Wrap-up | 15 min | Recap + preview Session 4 |
 
 ---

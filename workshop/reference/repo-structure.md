@@ -13,7 +13,7 @@ edge-digital-ops-workshop/
 │       ├── participant-stack.ts    # Per-slot NestedStack: EC2, IoT, MSK topics, S3, AppSync Events
 │       ├── orchestrator-app.ts     # CDK app entry for the deploy orchestrator (deployed once per account)
 │       └── orchestrator-stack.ts   # CodeBuild project that runs the async fire-and-forget deploy
-├── frontend/                       # Amplify-hosted cloud UI (fleet view, freshness panel)
+├── frontend/                       # Local Next.js cloud UI (fleet view, freshness panel), run via pnpm dev
 ├── cloud-dashboard/                # Session 4 analytics dashboard (Next.js) — built into a
 │   │                               #   container image, runs on EKS via helm/cloud-analytics
 │   ├── Dockerfile                  # Multi-stage build → workshop-cloud-dashboard ECR image

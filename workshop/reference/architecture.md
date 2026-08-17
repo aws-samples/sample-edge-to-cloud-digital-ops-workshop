@@ -21,43 +21,54 @@ Every real-time sensor pipeline is a variation of the same four-layer model:
 
 ## Full Architecture Diagram
 
-```
-Edge — K3s / K3s
-  Sensor simulator ──► MQTT Broker (Redpanda Connect ingest)
-                              │
-                        Redpanda (3-node Raft)
-                              │
-                  ┌───────────┴────────────┐
-                  ▼                        ▼
-          Edge RisingWave           Edge TimescaleDB
-          (streaming MVs)           (ad-hoc queries)
-                  │
-          Next.js HMI (SSE)
-          ← port-forward ← Browser
-                              │
-                        Redpanda Connect (WAN relay)
-                              │
-Cloud — AWS
-  Amazon MSK (Provisioned, SASL/SCRAM)
-    │
-    ├─► Cloud RisingWave (EKS) ─────────────► ALB SSE ──► Cloud UI
-    │
-    ├─► Redpanda Connect ─► Cloud TimescaleDB (EKS, self-managed) ──► ALB SSE ──► Cloud UI
-    │
-    └─► Telegraf (EKS) ──► Timestream for InfluxDB (managed hot tier) ──► poll ──► Cloud UI
+```mermaid
+flowchart TD
+  subgraph Edge["Edge — K3s"]
+    Sensor["Sensor simulator"]
+    MQTT["MQTT Broker<br/>(Redpanda Connect ingest)"]
+    Redpanda["Redpanda<br/>(3-node Raft)"]
+    EdgeRW["Edge RisingWave<br/>(streaming MVs)"]
+    EdgeTS["Edge TimescaleDB<br/>(ad-hoc queries)"]
+    HMI["Next.js HMI (SSE)"]
+    EdgeBrowser["Browser"]
+    WAN["Redpanda Connect<br/>(WAN relay)"]
 
-  Amazon Data Firehose (Iceberg destination) ──► S3 (Apache Iceberg) ──► Athena
-    ▲ (fed directly by an IoT Rule Firehose action — no MSK hop)
+    Sensor -->|MQTT| MQTT --> Redpanda
+    Redpanda --> EdgeRW
+    Redpanda --> EdgeTS
+    Redpanda --> WAN
+    EdgeRW --> HMI
+    EdgeBrowser -->|port-forward| HMI
+  end
 
-AWS IoT Core
-  ← EC2 (IoT Device Client, MQTT)
-  → IoT Rules Engine → Kafka action    → MSK
-  → IoT Rules Engine → Firehose action → Amazon Data Firehose (Iceberg)
-  → IoT Rules Engine → HTTP action     → AppSync Events → Cloud UI (WebSocket)
+  subgraph IoT["AWS IoT Core"]
+    EC2["EC2 (IoT Device Client, MQTT)"]
+    Rules["IoT Rules Engine"]
+    EC2 -->|MQTT| Rules
+  end
 
-Amplify (hosted cloud UI)
-  ← AppSync Events (WebSocket — device shadows, live push)
-  ← ALB SSE (RisingWave aggregation panels)
-  ← ALB SSE (TimescaleDB CAGG panels)
-  ← HTTP poll (Timestream for InfluxDB freshness panel)
+  subgraph Cloud["Cloud — AWS"]
+    MSK["Amazon MSK<br/>(Provisioned, SASL/SCRAM)"]
+    CloudRW["Cloud RisingWave (EKS)"]
+    CloudRC["Redpanda Connect"]
+    CloudTS["Cloud TimescaleDB<br/>(EKS, self-managed)"]
+    Telegraf["Telegraf (EKS)"]
+    Influx["Timestream for InfluxDB<br/>(managed hot tier)"]
+    Firehose["Amazon Data Firehose<br/>(Iceberg destination)"]
+    S3["S3 (Apache Iceberg)"]
+    Athena["Athena"]
+    AppSync["AppSync Events"]
+    UI["Cloud UI / Amplify<br/>(hosted cloud UI)"]
+
+    MSK --> CloudRW -->|ALB SSE| UI
+    MSK --> CloudRC --> CloudTS -->|ALB SSE| UI
+    MSK --> Telegraf --> Influx -->|HTTP poll| UI
+    Firehose --> S3 --> Athena
+    AppSync -->|WebSocket| UI
+  end
+
+  WAN --> MSK
+  Rules -->|Kafka action| MSK
+  Rules -->|Firehose action, no MSK hop| Firehose
+  Rules -->|HTTP action| AppSync
 ```

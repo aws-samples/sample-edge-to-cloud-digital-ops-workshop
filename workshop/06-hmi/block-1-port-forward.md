@@ -24,18 +24,18 @@ Or keep the port-forward running in a separate terminal and open `http://localho
 
 The HMI uses a direct PostgreSQL wire subscription — no GraphQL layer, no polling:
 
-```
-Browser
-  │  EventSource  →  /api/live-stream  (SSE)
-  ▼
-Next.js App Router Route Handler
-  │  pg connection open to Edge RisingWave
-  │  CREATE SUBSCRIPTION s1 ON mv_sensor_latest WITHOUT INITIAL SNAPSHOT
-  │  DECLARE CURSOR c1 FOR SUBSCRIPTION s1
-  │  loop: FETCH 100 FROM c1 → flush as SSE event
-  ▼
-Edge RisingWave (in-cluster, LAN)
-  ← Redpanda ← Redpanda Connect ← Sensor simulator
+```mermaid
+flowchart TD
+  Browser["Browser"]
+  Handler["Next.js App Router Route Handler<br/>pg connection open to Edge RisingWave<br/>CREATE SUBSCRIPTION s1 ON mv_sensor_latest WITHOUT INITIAL SNAPSHOT<br/>DECLARE CURSOR c1 FOR SUBSCRIPTION s1<br/>loop: FETCH 100 FROM c1 → flush as SSE event"]
+  RW["Edge RisingWave (in-cluster, LAN)"]
+  Redpanda["Redpanda"]
+  RC["Redpanda Connect"]
+  Sensor["Sensor simulator"]
+
+  Browser -->|"EventSource → /api/live-stream (SSE)"| Handler
+  Handler --> RW
+  Sensor --> RC --> Redpanda --> RW
 ```
 
 The browser `EventSource` client receives updates and re-renders the React Flow node that owns that sensor. Effective latency: ~100–300 ms LAN.

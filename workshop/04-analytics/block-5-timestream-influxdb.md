@@ -1,4 +1,4 @@
-# Block 5 — Timestream for InfluxDB (Managed Hot Tier)
+# Block 5 — Amazon Timestream for InfluxDB: the Managed Hot Tier
 
 **Duration:** 45 min
 
@@ -9,14 +9,14 @@
 In [Block 4](block-4-timescaledb.md) you ran a **self-managed** hot store:
 TimescaleDB on the cluster (CloudNativePG owns HA, failover, backups; you own the
 operand image, the extension, the hypertable, and the continuous-aggregate SQL).
-This block deploys the **managed** counterpart — **Amazon Timestream for
+This block looks at the **managed** counterpart — **Amazon Timestream for
 InfluxDB** — serving the *same* telemetry so you can compare them head-to-head on
 the freshness dashboard in [Block 6](block-6-dashboard.md).
 
-This is the hands-on version of the **managed-vs-self-managed hot-tier** decision
-in the SCADA storage guidance: both are purpose-built time-series stores with
-sub-second-to-seconds freshness; the difference is who operates them and what you
-trade for that.
+Both are purpose-built time-series **hot stores** from the on-disk substrate
+introduced in [Block 1](block-1-storage.md): they serve recent history from disk
+with sub-second-to-seconds freshness. The difference is not *what* they store but
+*who operates them* and *what you trade* for that.
 
 | | **TimescaleDB (Block 4)** | **Timestream for InfluxDB (this block)** |
 |---|---|---|
@@ -28,18 +28,24 @@ trade for that.
 | You operate | Image, extension, HA tuning, scaling, patching | Nothing — instance sizing is the only knob |
 | Cost model | Instance runs 24/7 whether queried or not | Instance runs 24/7; managed premium, zero ops |
 
-Neither is "better" — the workshop's point is that a managed store removes an
-entire operational surface (the checkpoint/affinity/node-sizing failure modes you
-saw RisingWave and TimescaleDB hit in [Block 6](block-6-dashboard.md#data-store-performance-characteristics))
-at the cost of a push primitive and some control. You feel that trade directly:
-the InfluxDB tier is the one polled live tier that needs **no** pod, PVC, operator,
-or affinity rule on your cluster.
+Neither is "better" — the point is that the **managed** store removes an entire
+operational surface (the checkpoint/affinity/node-sizing failure modes you saw
+RisingWave and TimescaleDB hit in
+[Block 6](block-6-dashboard.md#data-store-performance-characteristics)) at the cost
+of a push primitive and some control. You feel that trade directly: it is a
+purpose-built time-series hot store serving from disk on a fully managed instance,
+so it is the one live tier that needs **no** pod, PVC, operator, or affinity rule
+on your cluster — but it is **polled, not pushed** (there is no `LISTEN`/`NOTIFY`
+equivalent we use here). Zero ops in exchange for the loss of a push primitive and
+some control.
 
 ---
 
 ## The InfluxDB dimensional data model
 
-InfluxDB does **not** model "one measurement per metric." A point has four parts:
+This is the store's defining strength, and where it diverges most from a
+relational hot tier. InfluxDB does **not** model "one measurement per metric." A
+point has four parts:
 
 | Part | Role | Example |
 |---|---|---|
@@ -48,11 +54,14 @@ InfluxDB does **not** model "one measurement per metric." A point has four parts
 | **fields** | the actual **value(s)** (not indexed) | `value=37.2` |
 | **time** | the point's timestamp | `1723447800000` (epoch-ms) |
 
-A **series** is one unique (measurement + tag-set) combination. Keeping the metric
-name in a **tag** (`sensor=cpu_pct`) rather than baking it into the measurement
-name (`cpu_pct_reading`) is the idiomatic choice: it keeps cardinality bounded and
-lets a single query `GROUP BY` sensor across the whole fleet — exactly what the
-dashboard's fleet aggregate needs.
+A **series** is one unique (measurement + tag-set) combination, and **series
+cardinality** — the number of distinct tag-set combinations — is the primary thing
+that governs an InfluxDB instance's memory and index cost. Keeping the metric name
+in a **tag** (`sensor=cpu_pct`) rather than baking it into the measurement name
+(`cpu_pct_reading`) is the idiomatic choice for two reasons: it keeps cardinality
+bounded (new metrics add tag *values*, not new measurements), and it lets a single
+query `GROUP BY` sensor across the whole fleet — exactly what the dashboard's fleet
+aggregate needs.
 
 This is the same normalisation TimescaleDB uses (`sensor_readings(sensor, site_id,
 value, …)`, one row per metric), just expressed in InfluxDB's vocabulary — which
@@ -61,96 +70,56 @@ is why both tiers can answer the identical fleet-freshness question.
 !!! info "One dimensional schema, two message shapes"
     Two kinds of message land on MSK: pre-normalised industrial sensor messages
     (`sensors.raw.*`, already `{sensor, site_id, value, ts_ms}`) and flat IoT node
-    telemetry (`raw.telemetry`, `{thing_name, cpu_pct, mem_used_pct, …}`). Telegraf
-    maps the first straight onto `sensor_reading` and **fans the second out** —
-    one `sensor_reading` point per numeric metric, tagged `site_id=<thing_name>`,
-    `sensor=<metric>` — so both arrive under the *same* schema as the sensors. See
-    the `starlark` processor in the config below.
+    telemetry (`raw.telemetry`, `{thing_name, cpu_pct, mem_used_pct, …}`). The
+    ingest agent maps the first straight onto `sensor_reading` and **fans the
+    second out** — one `sensor_reading` point per numeric metric, tagged
+    `site_id=<thing_name>`, `sensor=<metric>` — so both message shapes arrive under
+    the *same* dimensional schema. The dimensional model is what lets two very
+    different payloads collapse onto one queryable series space.
 
 ---
 
-## How data gets in: MSK → Telegraf → line protocol
+## How data gets in (and why freshness ≠ query latency)
 
 TimescaleDB is fed by Redpanda Connect; the managed tier is fed by **Telegraf**,
-InfluxData's own agent, reading the **same MSK topics**. Telegraf's
-`kafka_consumer` inputs consume the topics, its parsers map JSON onto the
-dimensional model above, and its `outputs.influxdb_v2` writes **line protocol**
-(`measurement,tag=v field=v timestamp`) to the per-slot bucket.
+InfluxData's own agent, reading the **same MSK topics**. Conceptually the path is
+short: **MSK → Telegraf → line protocol** (`measurement,tag=v field=v timestamp`)
+written to the per-slot bucket. Telegraf consumes the Kafka topics, maps the JSON
+onto the dimensional model above, and writes points out on a flush interval.
 
 Every point is timestamped with `ts_ms` — the IoT-Core **ingest** epoch-ms, the
 same basis every other tier uses — so the freshness numbers on the dashboard are
 clock-skew-free and apples-to-apples.
 
-??? example "View source — Telegraf config (helm/cloud-analytics/templates/telegraf-config.yaml)"
-    [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/helm/cloud-analytics/templates/telegraf-config.yaml){ .md-button target=_blank }
+Keep two axes distinct when you reason about this tier:
 
-    ```toml
-    --8<-- "helm/cloud-analytics/templates/telegraf-config.yaml:telegraf-config"
-    ```
+- **Freshness** is an *ingestion-path* property: how long after a device publishes
+  the point becomes visible. Here it is governed by Telegraf's flush interval plus
+  the dashboard's poll cadence — roughly **1–2 s**. It has nothing to do with how
+  hard the query is.
+- **Query latency** is a *read-cost* property: how long a given read takes once the
+  data is present. A `last()` per series is cheap; a wide `aggregateWindow`
+  downsample over a long range is more expensive.
 
----
-
-## Shared instance, per-slot bucket, in-cluster token
-
-The instance follows the **MSK precedent**: **one shared** Timestream for InfluxDB
-instance for the whole account, with **per-slot isolation via a bucket** named
-`workshop-<deploymentId>` (not one instance per slot). The CDK construct lives in
-the platform stack:
-
-??? example "View source — Timestream for InfluxDB instance (amplify/custom/platform-stack.ts)"
-    [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/amplify/custom/platform-stack.ts){ .md-button target=_blank }
-
-    ```typescript
-    --8<-- "amplify/custom/platform-stack.ts:influxdb-instance"
-    ```
-
-The instance is **VPC-private** (`publiclyAccessible: false`, cloud VPC only) and
-Timestream for InfluxDB surfaces only an **admin username/password** — never a
-token. But Telegraf's `influxdb_v2` output needs a **token**. So bucket + token
-provisioning can't run from the deploy script (it can't reach the private
-endpoint); it runs **in-cluster** as a Helm post-install hook Job that signs in
-with the admin creds, creates the per-slot bucket, mints a scoped read/write
-token, and writes it into the `influxdb-credentials` Secret that both Telegraf and
-the dashboard consume. The Job is **token-stable** — if the Secret already exists
-it reuses it rather than orphaning tokens on every upgrade.
-
-```
-Platform stack:  shared workshop-influxdb instance (private, admin user/pass in Secrets Manager)
-                                   │
-Helm post-install hook Job  ──────►│  POST /api/v2/signin  (admin)
-(in-cluster, in-VPC)               │  create bucket workshop-ws-slot00
-                                   │  mint read/write token
-                                   ▼
-                        k8s Secret: influxdb-credentials {INFLUX_URL, INFLUX_TOKEN, INFLUX_ORG, INFLUX_BUCKET}
-                            │                                   │
-                            ▼                                   ▼
-                    Telegraf sink (writes)          Dashboard InfluxDB tier (reads, Block 6)
-```
+This is the same **read-complexity vs. write-complexity** trade the session keeps
+returning to. Query-time downsampling with `aggregateWindow` pushes the work to
+**read time** (cheap writes, you pay on every query); a Timestream for InfluxDB
+**task / downsampling** — like a TimescaleDB continuous aggregate — pushes it to
+**write time** (you maintain a rollup continuously, reads are then cheap). The
+store lets you choose per query which side of that trade to pay on.
 
 ---
 
-## Verify the tier is live
+## Read the store's shape with Flux
 
-Block 1 already deployed `helm/cloud-analytics` with the Telegraf sink enabled.
-Confirm the provisioning Job minted the per-slot credentials and Telegraf is
-running:
-
-```bash
-# The provision Job writes this Secret once the bucket + token exist.
-kubectl get secret influxdb-credentials -n ws-slot00 \
-  -o jsonpath='{.data.INFLUX_BUCKET}' | base64 -d; echo
-kubectl get deploy cloud-analytics-telegraf -n ws-slot00 \
-  -o jsonpath='{.status.readyReplicas} ready{"\n"}'
-```
-<!-- e2e:assert {"contains": "ready"} -->
-
-The bucket should print as `workshop-ws-slot00` and Telegraf should report `1 ready`.
-
-Now read the newest point straight from the bucket with a **Flux** query — the
-same query shape the dashboard's `/api/freshness?tier=influxdb` route runs. Tunnel
-to the private instance through a throwaway `socat` pod:
+The clearest way to *understand* a store is to query it. Point a Flux client at the
+per-slot bucket and ask for the newest point per series — the same query shape the
+dashboard's `/api/freshness?tier=influxdb` route runs. The instance is VPC-private,
+so read its connection details from the in-cluster credentials Secret and reach it
+over a short-lived port-forward:
 
 ```bash
+# Connection details for the per-slot bucket (URL, token, org, bucket name).
 IX_URL=$(kubectl get secret influxdb-credentials -n ws-slot00 -o jsonpath='{.data.INFLUX_URL}' | base64 -d)
 IX_TOKEN=$(kubectl get secret influxdb-credentials -n ws-slot00 -o jsonpath='{.data.INFLUX_TOKEN}' | base64 -d)
 IX_ORG=$(kubectl get secret influxdb-credentials -n ws-slot00 -o jsonpath='{.data.INFLUX_ORG}' | base64 -d)
@@ -162,16 +131,30 @@ kubectl wait --for=condition=Ready pod/influx-q-$$ -n ws-slot00 --timeout=60s >/
 kubectl port-forward -n ws-slot00 pod/influx-q-$$ 8086:8086 > /tmp/ix-q-pf.log 2>&1 &
 IX_PF_PID=$!
 until grep -q "Forwarding from" /tmp/ix-q-pf.log 2>/dev/null; do sleep 1; done
+```
+
+Now ask for the newest point per series:
+
+```bash
 # Count series and show the most recent reading per (site_id, sensor).
 curl -sf -k "https://localhost:8086/api/v2/query?org=${IX_ORG}" \
   -H "Authorization: Token ${IX_TOKEN}" \
   -H 'Accept: application/csv' \
   -H 'Content-Type: application/vnd.flux' \
-  -d 'from(bucket:"'"$IX_BUCKET"'") |> range(start:-15m) |> filter(fn:(r)=> r._measurement=="sensor_reading" and r._field=="value") |> group(columns:["site_id","sensor"]) |> last()' \
-  | head -20
+  -d 'from(bucket:"'"$IX_BUCKET"'") |> range(start:-15m) |> filter(fn:(r)=> r._measurement=="sensor_reading" and r._field=="value") |> group(columns:["site_id","sensor"]) |> last()'
 kill "$IX_PF_PID" 2>/dev/null || true
 kubectl delete pod influx-q-$$ -n ws-slot00 --wait=false >/dev/null 2>&1 || true
 ```
+<!-- e2e:assert {"contains": "sensor_reading"} -->
+
+Read the pipeline left to right — it *is* the dimensional model in action:
+
+1. `from(bucket:…) |> range(start:-15m)` — scan the last 15 minutes of the bucket.
+2. `filter(… r._measurement=="sensor_reading" and r._field=="value")` — one
+   measurement family, one field.
+3. `group(columns:["site_id","sensor"])` — regroup by the two identity tags, i.e.
+   one group **per series**.
+4. `last()` — the newest point in each group.
 
 Each CSV row is one series' latest point — `sensor_reading`, tagged by `site_id`
 and `sensor`, with the `value` field and an RFC3339 `_time`. That's the managed
@@ -181,7 +164,7 @@ tier holding the identical fleet view TimescaleDB serves next door.
     Timestream for InfluxDB (v2 engine) speaks **Flux** (the pipe-forward
     functional language used above) and **InfluxQL** (a SQL-like dialect); the
     newer v3 engine adds native **SQL**. The dashboard uses Flux because its
-    `last()`/`aggregateWindow` primitives express "newest point per series" and
+    `last()` / `aggregateWindow` primitives express "newest point per series" and
     "downsample on read" more directly than InfluxQL — but the fleet question is
     the same one the TimescaleDB `GROUP BY` answers.
 
