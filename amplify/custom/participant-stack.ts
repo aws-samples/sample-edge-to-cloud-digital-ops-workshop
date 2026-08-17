@@ -484,6 +484,18 @@ exports.handler = async (event) => {
     // can fail the deploy.
     const packageArn = `arn:aws:iot:${this.region}:${this.account}:package/${deploymentId}-telemetry-agent`;
     const packageVersionsArn = `${packageArn}/version/*`;
+    // Serialize the whole version lifecycle into a single dependency chain
+    // (create V1 → publish V1 → create V2 → publish V2 → …). The version/*
+    // grant widening (#218) made the 8 per-resource IAM policies mutually
+    // redundant, but they were still ATTACHED and INVOKED in parallel against a
+    // brand-new singleton provider role, so on a cold slot the first
+    // invocation(s) could still fire before ANY policy had propagated to IoT's
+    // authorizer — observed again on a fresh ws-slot04 deploy (V3 published, V4
+    // failed with "iot:UpdatePackageVersion … not authorized", #217 redux).
+    // Chaining staggers the invocations seconds apart: after the first
+    // policy propagates every later resource is safe, and the redundant grants
+    // guarantee the chain never needs a policy that hasn't attached yet.
+    let previousResource: AwsCustomResource | undefined;
     for (const versionName of telemetryAgentVersions) {
       const logicalId = `TelemetryAgentV${versionName.split(".")[0]}`;
 
@@ -547,6 +559,12 @@ exports.handler = async (event) => {
         ]),
       });
       create.node.addDependency(softwarePackage);
+      // Chain onto the previous version's publish so the custom-resource
+      // invocations run sequentially, not all at once (see the comment above the
+      // loop — this is what actually closes the IAM-propagation race).
+      if (previousResource) {
+        create.node.addDependency(previousResource);
+      }
 
       // Versions are created in DRAFT; a version must be PUBLISHED to be
       // deployable via destinationPackageVersions (see PackageConfig in the
@@ -587,6 +605,8 @@ exports.handler = async (event) => {
         ]),
       });
       publish.node.addDependency(create);
+      // The next version's create waits on this publish → one serial chain.
+      previousResource = publish;
     }
 
     // --8<-- [start:provisioning-template]
