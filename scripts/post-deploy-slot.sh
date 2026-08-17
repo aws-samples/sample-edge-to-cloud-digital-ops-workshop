@@ -102,6 +102,16 @@ fi
 # wall-clock. Idempotent: safe to re-run against an already-deployed slot.
 # See scripts/deploy-cloud-analytics.sh and workshop/04-analytics/block-1.
 echo ">>> [$DEPLOYMENT_ID] Pre-warming cloud analytics stack via scripts/deploy-cloud-analytics.sh…"
-bash "$HERE/deploy-cloud-analytics.sh" --deployment-id "$DEPLOYMENT_ID"
+# The cluster-scoped operator installs (cert-manager, gp3, risingwave-operator,
+# cnpg, kube-prometheus-stack) and the dashboard image build are SHARED, one-time
+# work — not per-slot. When sandbox-all.sh fans out slots in parallel it does that
+# bootstrap once on the first slot and sets these env vars for the rest, so the
+# concurrent slots don't race on the same cluster-wide helm releases ("UPGRADE
+# FAILED: release: already exists"). Default false → a standalone/single-slot run
+# still does everything itself.
+CLOUD_ANALYTICS_ARGS=(--deployment-id "$DEPLOYMENT_ID")
+[[ "${POST_DEPLOY_SKIP_CLUSTER_SCOPED:-false}" == "true" ]] && CLOUD_ANALYTICS_ARGS+=(--skip-cluster-scoped)
+[[ "${POST_DEPLOY_SKIP_DASHBOARD_BUILD:-false}" == "true" ]] && CLOUD_ANALYTICS_ARGS+=(--skip-dashboard-build)
+bash "$HERE/deploy-cloud-analytics.sh" "${CLOUD_ANALYTICS_ARGS[@]}"
 
 echo ">>> [$DEPLOYMENT_ID] Post-deploy tail complete."

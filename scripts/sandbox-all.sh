@@ -345,10 +345,32 @@ _reap_one() {
   done
 }
 
-for ID in "${DEPLOYMENT_IDS[@]}"; do
+# The cloud-analytics pre-warm installs cluster-scoped, cluster-WIDE helm
+# releases (cert-manager, gp3, risingwave-operator, cnpg, kube-prometheus-stack)
+# and builds+pushes the shared dashboard image — one-time work on the shared EKS
+# cluster, NOT per-slot. Running it concurrently across slots races on those same
+# releases ("UPGRADE FAILED: release: already exists") and rebuilds the identical
+# image N times. So run the FIRST slot's tail serially to do that bootstrap once,
+# then fan the REST out in parallel with the cluster-scoped work skipped
+# (POST_DEPLOY_SKIP_* → post-deploy-slot.sh passes --skip-cluster-scoped /
+# --skip-dashboard-build to deploy-cloud-analytics.sh).
+FIRST="${DEPLOYMENT_IDS[0]}"
+REST=("${DEPLOYMENT_IDS[@]:1}")
+
+echo ">>> [$FIRST] Bootstrap slot — running serially (installs shared cluster-scoped operators + builds the dashboard image once)..."
+if _post_deploy_slot "$FIRST" >"${LOG_DIR}/${FIRST}.log" 2>&1; then
+  echo ">>> [$FIRST] Post-deploy tail complete."
+else
+  rc=$?
+  echo "ERROR: post-deploy tail for $FIRST failed (rc=$rc) — see ${LOG_DIR}/${FIRST}.log" >&2
+  tail -n 25 "${LOG_DIR}/${FIRST}.log" | sed "s/^/    [$FIRST] /" >&2 || true
+  FAILED=1
+fi
+
+for ID in "${REST[@]+"${REST[@]}"}"; do
   while [[ ${#PIDS[@]} -ge $MAX_PARALLEL ]]; do _reap_one; done
-  echo ">>> [$ID] Starting post-deploy tail..."
-  ( _post_deploy_slot "$ID" ) >"${LOG_DIR}/${ID}.log" 2>&1 &
+  echo ">>> [$ID] Starting post-deploy tail (shared bootstrap already done, cluster-scoped + dashboard build skipped)..."
+  ( export POST_DEPLOY_SKIP_CLUSTER_SCOPED=true POST_DEPLOY_SKIP_DASHBOARD_BUILD=true; _post_deploy_slot "$ID" ) >"${LOG_DIR}/${ID}.log" 2>&1 &
   PIDS+=("$!")
   PID_IDS+=("$ID")
 done
