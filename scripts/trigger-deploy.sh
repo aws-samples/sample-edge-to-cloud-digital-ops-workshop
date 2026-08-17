@@ -34,9 +34,16 @@ fi
 # Join slots with commas for the WORKSHOP_SLOTS env override.
 SLOT_CSV=$(IFS=,; echo "${SLOTS[*]}")
 
+# Pass the override as JSON, NOT CLI shorthand. In shorthand
+# (name=WORKSHOP_SLOTS,value=ws-slot00,ws-slot01,type=PLAINTEXT) the commas
+# inside the comma-separated slot list are parsed as list-item separators, so
+# `value` becomes a list and the call fails ParamValidation. This only bites
+# with 2+ slots (a single slot has no comma), which is why single-slot deploys
+# worked. JSON quotes the whole CSV as one string, so it is comma-safe.
 START_ARGS=(
   --project-name "$PROJECT"
-  --environment-variables-override "name=WORKSHOP_SLOTS,value=${SLOT_CSV},type=PLAINTEXT"
+  --environment-variables-override
+  "[{\"name\":\"WORKSHOP_SLOTS\",\"value\":\"${SLOT_CSV}\",\"type\":\"PLAINTEXT\"}]"
 )
 [[ -n "$BRANCH" ]] && START_ARGS+=(--source-version "$BRANCH")
 
