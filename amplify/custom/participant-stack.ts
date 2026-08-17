@@ -296,6 +296,17 @@ export class ParticipantStack extends NestedStack {
       })
     );
 
+    ec2Role.addToPolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        // list-exports is used by the telemetry job handler to resolve the shared
+        // platform bucket at runtime; ListExports does not support resource-level
+        // scoping, so it must be granted on "*".
+        actions: ["cloudformation:ListExports"],
+        resources: ["*"],
+      })
+    );
+
     // ── IoT policies ─────────────────────────────────────────────────────────
     new IotPolicy(this, "ClaimPolicy", {
       policyName: `workshop-${deploymentId}-claim-policy`,
