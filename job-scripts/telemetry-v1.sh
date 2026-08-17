@@ -160,7 +160,11 @@ chmod +x "$TELEMETRY_SCRIPT"
 # until restarted, and a restart that doesn't actually come back active leaves
 # the fleet on the OLD publisher with no signal beyond a false-COMPLETED job.
 # Fail loud on both checks so that failure surfaces on the IoT Job itself.
-grep -q "aws iot-data publish" "$TELEMETRY_SCRIPT" && { echo "ERROR: $TELEMETRY_SCRIPT still contains the old per-message publish loop after write" >&2; exit 1; }
+# Anchor to a real command invocation (leading whitespace + the command), not
+# the string anywhere in the file -- the written script's own explanatory
+# comment references `aws iot-data publish`, which a bare substring grep would
+# match and false-abort even though the old loop is gone (#248).
+grep -qE '^[[:space:]]*aws iot-data publish' "$TELEMETRY_SCRIPT" && { echo "ERROR: $TELEMETRY_SCRIPT still contains the old per-message publish loop after write" >&2; exit 1; }
 /opt/mqtt-venv/bin/python3 -c "import awsiot" || { echo "ERROR: /opt/mqtt-venv/bin/python3 cannot import awsiot -- aborting job before restart" >&2; exit 1; }
 systemctl restart workshop-telemetry
 TELEMETRY_ACTIVE=0
