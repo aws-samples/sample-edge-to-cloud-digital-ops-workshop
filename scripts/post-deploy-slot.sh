@@ -13,8 +13,9 @@
 # Steps (formerly inline in sandbox.sh):
 #   1. Wait for the 3 EC2 devices to self-register via fleet provisioning
 #   2. Seed initial device-config + $package shadows
-#   3. Pre-warm the edge K3s cluster (scripts/launch-k3s.sh)
-#   4. Pre-warm the cloud analytics stack (scripts/deploy-cloud-analytics.sh)
+#   3. Re-push the current telemetry-v2.sh IoT Job (scripts/push-telemetry-job.sh)
+#   4. Pre-warm the edge K3s cluster (scripts/launch-k3s.sh)
+#   5. Pre-warm the cloud analytics stack (scripts/deploy-cloud-analytics.sh)
 
 set -euo pipefail
 
@@ -67,6 +68,20 @@ for THING in "${THING_NAMES[@]+"${THING_NAMES[@]}"}"; do
     /dev/null
 done
 echo ">>> [$DEPLOYMENT_ID] Shadow seeding complete."
+
+# ── Re-push the current telemetry IoT Job ────────────────────────────────────
+# #248: UserData only installs the persistent-MQTT publisher (#244) on a
+# device's first boot, and nothing else re-delivers job-scripts/telemetry-v2.sh
+# to already-registered devices (or a device whose UserData run silently
+# regressed) on a plain redeploy. Push it here, every deploy, so the current
+# coprocess/mqtt-publisher.py form is authoritative for the whole fleet
+# regardless of what any individual device's boot happened to install.
+if [[ "${#THING_NAMES[@]}" -ge 1 ]]; then
+  echo ">>> [$DEPLOYMENT_ID] Re-pushing current telemetry-v2.sh via IoT Job…"
+  bash "$HERE/push-telemetry-job.sh" "$DEPLOYMENT_ID"
+else
+  echo ">>> [$DEPLOYMENT_ID] Skipping telemetry job push — no devices registered."
+fi
 
 # ── Pre-warm the edge K3s cluster ────────────────────────────────────────────
 # Launch the K3s bootstrap IoT Job now, during the facilitator pre-deploy, so the

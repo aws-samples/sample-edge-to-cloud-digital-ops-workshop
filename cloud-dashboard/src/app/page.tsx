@@ -117,6 +117,26 @@ function LatencyChart({ rw, tsdb, athena, influx }: { rw: FreshnessPayload | nul
   );
 }
 
+// ── chart 1c: device → ingest latency (log scale) ────────────────────────────
+// The device-hop segment of the sensor→dashboard waterfall (#245): ingest_ts
+// minus message_timestamp — device-side MQTT publish + network transit,
+// upstream of any data store. Both stores see the same device hop, but it's
+// currently only computed on the RisingWave leg (risingwave/ddl-cloud.sql);
+// other tiers show null until wired up. See the epic issue #246.
+function DeviceHopChart({ rw, tsdb, athena, influx }: { rw: FreshnessPayload | null; tsdb: FreshnessPayload | null; athena: FreshnessPayload | null; influx: FreshnessPayload | null }) {
+  return (
+    <TierMsBarChart
+      title="Device → Ingest Latency (log scale)"
+      blurb="Time from the device stamping a reading (message_timestamp) to IoT Core receiving it (ingest_ts) — the device-side MQTT publish + network hop, upstream of any data store. Currently exposed via the RisingWave leg only."
+      axisLabel="device hop (log)"
+      rw={rw?.deviceHopLatency.risingwave_ms ?? null}
+      tsdb={tsdb?.deviceHopLatency.timescaledb_ms ?? null}
+      athena={athena?.deviceHopLatency.athena_ms ?? null}
+      influx={influx?.deviceHopLatency.influxdb_ms ?? null}
+    />
+  );
+}
+
 // ── push hook: subscribe to /api/stream/{tier} over SSE ──────────────────────
 // Replaces the old setInterval poll for the two live tiers (#160). The server
 // holds a RisingWave subscription cursor or a TimescaleDB LISTEN connection
@@ -441,6 +461,8 @@ export default function DashboardPage() {
       <FreshnessChart  rw={rwData}   tsdb={tsdbData} athena={athenaData} influx={influxData} />
       <div style={{ height: "1rem" }} />
       <LatencyChart    rw={rwData}   tsdb={tsdbData} athena={athenaData} influx={influxData} />
+      <div style={{ height: "1rem" }} />
+      <DeviceHopChart  rw={rwData}   tsdb={tsdbData} athena={athenaData} influx={influxData} />
       <div style={{ height: "1rem" }} />
       <ResourceChart   rw={rwData}   tsdb={tsdbData} />
       <div style={{ height: "1rem" }} />

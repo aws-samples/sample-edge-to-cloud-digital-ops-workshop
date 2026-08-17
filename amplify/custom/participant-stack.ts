@@ -296,6 +296,17 @@ export class ParticipantStack extends NestedStack {
       })
     );
 
+    ec2Role.addToPolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        // list-exports is used by the telemetry job handler to resolve the shared
+        // platform bucket at runtime; ListExports does not support resource-level
+        // scoping, so it must be granted on "*".
+        actions: ["cloudformation:ListExports"],
+        resources: ["*"],
+      })
+    );
+
     // ── IoT policies ─────────────────────────────────────────────────────────
     new IotPolicy(this, "ClaimPolicy", {
       policyName: `workshop-${deploymentId}-claim-policy`,
@@ -702,6 +713,60 @@ set -euxo pipefail
 yum install -y amazon-ssm-agent 2>/dev/null || true
 systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent
 
+# #248: scripts/sandbox.sh|sandbox-all.sh upload boot-time artifacts (device
+# client binary, mqtt-publisher.py) to S3 as a step in the same deploy that
+# creates this instance -- on a fresh account (or a CodeBuild orchestrator run)
+# that upload can still be in flight when this UserData reaches its \`aws s3 cp\`.
+# Retry with backoff instead of letting one racy \`aws s3 cp\` take down the rest
+# of boot under \`set -e\`; fail loud (non-zero, aborting boot) after exhausting
+# retries rather than silently continuing without the persistent MQTT publisher.
+s3_cp_retry() {
+  local src="$1" dst="$2" attempt
+  for attempt in 1 2 3 4 5 6 7 8; do
+    if aws s3 cp "$src" "$dst" --region ${this.region}; then
+      return 0
+    fi
+    echo "WARN: aws s3 cp $src -> $dst failed (attempt $attempt/8) -- retrying in 15s" >&2
+    sleep 15
+  done
+  echo "ERROR: aws s3 cp $src -> $dst failed after 8 attempts -- aborting boot" >&2
+  return 1
+}
+
+# #248: \`pip3 install\` can transiently fail (PyPI throttling, the NAT gateway
+# not yet passing traffic this early in boot, etc). Retry with the same
+# backoff/fail-loud shape as s3_cp_retry above instead of letting one bad
+# attempt take down the rest of boot under \`set -e\` -- and instead of a
+# retry exhausting into a silent fallback to the old per-message
+# \`aws iot-data publish\` path.
+pip_install_retry() {
+  local pip_bin="$1" pkg="$2" attempt
+  for attempt in 1 2 3 4 5; do
+    if "$pip_bin" install "$pkg"; then
+      return 0
+    fi
+    echo "WARN: $pip_bin install $pkg failed (attempt $attempt/5) -- retrying in 15s" >&2
+    sleep 15
+  done
+  echo "ERROR: $pip_bin install $pkg failed after 5 attempts -- aborting boot" >&2
+  return 1
+}
+
+# #248 round 4: awsiotsdk pins awscrt==0.36.1, but this AMI already has
+# awscrt 0.31.1 installed system-wide via rpm. \`pip3 install awsiotsdk\`
+# then tries to uninstall the rpm-managed awscrt and fails ("Cannot
+# uninstall awscrt ... installed by rpm"), aborting every retry. Isolate the
+# publisher's deps in a dedicated venv so pip never touches the rpm-managed
+# system awscrt. Idempotent: skip creation if the venv already exists.
+ensure_mqtt_venv() {
+  if [[ ! -x /opt/mqtt-venv/bin/python3 ]]; then
+    python3 -m ensurepip --upgrade
+    python3 -m venv /opt/mqtt-venv
+  fi
+  /opt/mqtt-venv/bin/pip install --upgrade pip
+  pip_install_retry /opt/mqtt-venv/bin/pip awsiotsdk
+}
+
 # #166: the edge VPC's NAT Gateway reaps idle flows after 350s. The device
 # client's MQTT socket sits idle between telemetry publishes (those go over
 # the HTTPS data plane, not this socket), so with no keepalive traffic below
@@ -738,8 +803,24 @@ IOT_ENDPOINT=$(aws iot describe-endpoint \
   --endpoint-type iot:Data-ATS \
   --query endpointAddress --output text)
 
-aws s3 cp "s3://${sharedBucketName}/bin/aws-iot-device-client" /usr/local/bin/aws-iot-device-client --region ${this.region}
+s3_cp_retry "s3://${sharedBucketName}/bin/aws-iot-device-client" /usr/local/bin/aws-iot-device-client
 chmod +x /usr/local/bin/aws-iot-device-client
+
+# #244: persistent MQTT publisher, installed once at boot. The telemetry loop
+# (below) hands it JSON payloads over a bash coprocess pipe instead of
+# shelling out to \`aws iot-data publish\` per message.
+#
+# #248: these echo breadcrumbs bracket the install so a live
+# cloud-init-output.log inspection can tell "never reached this block" apart
+# from "reached it and pip failed" -- the \`set -x\` trace alone was not
+# distinguishable enough while debugging the original report.
+echo ">>> workshop-userdata: installing awsiotsdk into isolated venv"
+ensure_mqtt_venv
+echo ">>> workshop-userdata: awsiotsdk installed"
+s3_cp_retry "s3://${sharedBucketName}/bin/mqtt-publisher.py" /usr/local/bin/mqtt-publisher.py
+chmod +x /usr/local/bin/mqtt-publisher.py
+echo ">>> workshop-userdata: mqtt-publisher.py staged"
+/opt/mqtt-venv/bin/python3 -c "import awsiot" || { echo "ERROR: /opt/mqtt-venv/bin/python3 cannot import awsiot -- aborting boot" >&2; exit 1; }
 
 mkdir -p /etc/aws-iot-device-client/jobs
 chmod 700 /etc/aws-iot-device-client/certs
@@ -795,9 +876,22 @@ ln -sfn /etc/aws-iot-device-client/jobs /root/.aws-iot-device-client/jobs
 cat > /etc/aws-iot-device-client/jobs/publish-telemetry.sh <<'TELEMETRY'
 #!/bin/bash
 INSTANCE_ID=$(ec2-metadata --instance-id | cut -d' ' -f2)
+AZ=$(ec2-metadata --availability-zone | cut -d' ' -f2)
+REGION="\${AZ%?}"
 DEPLOYMENT_ID=$DEPLOYMENT_ID
 IOT_ENDPOINT=$(aws iot describe-endpoint --endpoint-type iot:Data-ATS --query endpointAddress --output text)
 INTERVAL_S=5
+
+# #244: one persistent MQTT connection for the life of this process, instead
+# of a new \`aws iot-data publish\` process (+ fresh TLS handshake) per message.
+# The client id must differ from the device's own Thing name -- AWS IoT drops
+# the OLDER connection on a client-id collision, which would kick the device
+# client's Jobs/shadow session offline every time this loop restarts.
+coproc MQTT_PUB { /opt/mqtt-venv/bin/python3 /usr/local/bin/mqtt-publisher.py \
+  --endpoint "$IOT_ENDPOINT" \
+  --region "$REGION" \
+  --topic "edge/$DEPLOYMENT_ID/$INSTANCE_ID/telemetry" \
+  --client-id "\${INSTANCE_ID}-telemetry-pub"; }
 
 while true; do
   TS=$(date -u +%s%3N)
@@ -809,12 +903,7 @@ while true; do
     '{"thing_name":"%s","message_timestamp":%s,"cpu_pct":%s,"mem_used_pct":%s,"disk_used_pct":%s}' \
     "$INSTANCE_ID" "$TS" "$CPU" "$MEM" "$DISK")
 
-  aws iot-data publish \
-    --endpoint-url "https://$IOT_ENDPOINT" \
-    --topic "edge/$DEPLOYMENT_ID/$INSTANCE_ID/telemetry" \
-    --payload "$PAYLOAD" \
-    --cli-binary-format raw-in-base64-out \
-    2>/dev/null || true
+  echo "$PAYLOAD" >&"\${MQTT_PUB[1]}" || true
 
   sleep $INTERVAL_S
 done
@@ -904,6 +993,12 @@ systemctl daemon-reload
 systemctl enable aws-iot-device-client workshop-telemetry iot-post-provision-restart
 systemctl start aws-iot-device-client workshop-telemetry
 systemctl start --no-block iot-post-provision-restart
+
+# #248: a definitive, unambiguous signal that this script ran to completion --
+# a partial/aborted run (e.g. one of the retry helpers above exhausting its
+# attempts) never creates this file. Check it live with:
+#   aws ssm send-command ... --parameters commands='["cat /var/lib/workshop-userdata-complete"]'
+echo "$(date -u +%FT%TZ) boot completed" > /var/lib/workshop-userdata-complete
 `;
 
     const amiId = MachineImage.latestAmazonLinux2023().getImage(this).imageId;

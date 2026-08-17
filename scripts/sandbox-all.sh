@@ -99,6 +99,78 @@ echo ">>> Active slot set is now: ${ALL_SLOTS}"
 CDK_DEFAULT_REGION="${CDK_DEFAULT_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region || echo us-east-1)}}"
 export CDK_DEFAULT_ACCOUNT CDK_DEFAULT_REGION
 
+# ── Acquire the IoT Device Client binary ─────────────────────────────────────
+# Pure local acquire/build — no dependency on the platform stack, so this runs
+# before the deploy. Mirror scripts/sandbox.sh exactly (shared functions in
+# build-device-client.sh so the two paths can't drift): fetch the pre-built
+# GitHub Release asset first (Docker-free, no creds — works in CodeBuild), fall
+# back to a local Docker build only if Docker is present, else fail with an
+# actionable message.
+# shellcheck source=scripts/build-device-client.sh
+source "$(dirname "$0")/build-device-client.sh"
+# Provenance-suffixed cache key, matching sandbox.sh, so a stale binary from
+# before a version/patch bump is never reused silently.
+LOCAL_BINARY_CACHE="$HOME/.cache/workshop/aws-iot-device-client-${DEVICE_CLIENT_PROVENANCE}"
+if [[ ! -f "$LOCAL_BINARY_CACHE" ]]; then
+  echo ">>> Fetching pre-built IoT Device Client from GitHub Release ${DEVICE_CLIENT_RELEASE_TAG}…"
+  if fetch_prebuilt_device_client "$LOCAL_BINARY_CACHE"; then
+    echo ">>> Fetched pre-built binary → $LOCAL_BINARY_CACHE"
+  elif command -v docker >/dev/null 2>&1; then
+    echo ">>> No pre-built artifact available — building with Docker (one-time, ~8 min)…"
+    build_device_client_binary "$LOCAL_BINARY_CACHE"
+    echo ">>> Binary built and cached at $LOCAL_BINARY_CACHE"
+  else
+    echo "ERROR: could not obtain the aws-iot-device-client binary." >&2
+    echo "  • No pre-built artifact at GitHub Release '${DEVICE_CLIENT_RELEASE_TAG}' (repo ${DEVICE_CLIENT_REPO})." >&2
+    echo "  • Docker is not available, so the local cross-compile fallback can't run either." >&2
+    echo "  Fix: publish the artifact via the 'Build Device Client' workflow" >&2
+    echo "  (gh workflow run build-device-client.yml), then re-deploy." >&2
+    exit 1
+  fi
+else
+  echo ">>> Using cached IoT Device Client binary."
+fi
+
+# ── Stage boot-time artifacts to the shared S3 bucket ────────────────────────
+# #248: EC2 UserData downloads these at boot. Uploading them only AFTER the
+# `cdk deploy` below (which is what boots the instances) raced freshly-launched
+# instances' UserData — observed live on ws-slot42: instances up 19:04 UTC,
+# mqtt-publisher.py uploaded 19:06 UTC, so the boot-time download 404'd and the
+# persistent MQTT publisher never installed. Stage now, before the deploy,
+# whenever the platform bucket already exists (the common redeploy case) so
+# there is no race at all. On a brand-new account the bucket doesn't exist
+# until this deploy creates it; STAGED_BEFORE_DEPLOY records whether we managed
+# to stage now so the fallback after the deploy runs exactly once, not twice.
+resolve_s3_bucket() {
+  aws cloudformation list-exports \
+    --query "Exports[?Name=='workshop-platform-bucket-name'].Value" \
+    --output text 2>/dev/null
+}
+
+upload_boot_artifacts() {
+  local bucket="$1"
+  echo ">>> Uploading IoT Device Client binary to s3://${bucket}/bin/aws-iot-device-client..."
+  aws s3 cp "$LOCAL_BINARY_CACHE" "s3://${bucket}/bin/aws-iot-device-client"
+
+  echo ">>> Uploading persistent MQTT telemetry publisher to s3://${bucket}/bin/mqtt-publisher.py..."
+  aws s3 cp job-scripts/mqtt-publisher.py "s3://${bucket}/bin/mqtt-publisher.py"
+
+  echo ">>> Uploading sensor simulator to s3://${bucket}/simulator/sensor-sim.py..."
+  aws s3 cp simulator/sensor-sim.py "s3://${bucket}/simulator/sensor-sim.py"
+  echo ">>> Uploading frac-op burst generator to s3://${bucket}/simulator/frac-op-burst.py..."
+  aws s3 cp simulator/frac-op-burst.py "s3://${bucket}/simulator/frac-op-burst.py"
+}
+
+S3_BUCKET=$(resolve_s3_bucket)
+STAGED_BEFORE_DEPLOY=false
+if [[ -n "$S3_BUCKET" && "$S3_BUCKET" != "None" ]]; then
+  echo ">>> Platform bucket already exists ($S3_BUCKET) — staging boot-time artifacts before deploy (#248)."
+  upload_boot_artifacts "$S3_BUCKET"
+  STAGED_BEFORE_DEPLOY=true
+else
+  echo ">>> Platform bucket does not exist yet (first-ever deploy) — staging boot-time artifacts right after the deploy below creates it."
+fi
+
 echo ">>> Deploying $PLATFORM_STACK_NAME (platform + all ${ALL_SLOTS} slots as nested stacks)..."
 WORKSHOP_SLOTS="$ALL_SLOTS" npx cdk deploy \
   --app "$PLATFORM_APP" \
@@ -203,53 +275,24 @@ echo ">>> SSM $EDGE_NAT_SSM points at live NAT gateway $EXISTING_NAT_SSM."
 echo ">>> Creating/confirming IoT VPC destination..."
 bash "$(dirname "$0")/create-iot-vpc-dest.sh"
 
-# ── Resolve S3 bucket from CloudFormation export ─────────────────────────────
-S3_BUCKET=$(aws cloudformation list-exports \
-  --query "Exports[?Name=='workshop-platform-bucket-name'].Value" \
-  --output text)
-
-# ── Acquire + upload shared IoT Device Client binary to S3 ───────────────────
-# Mirror scripts/sandbox.sh exactly (shared functions in build-device-client.sh
-# so the two paths can't drift): fetch the pre-built GitHub Release asset first
-# (Docker-free, no creds — works in CodeBuild), fall back to a local Docker
-# build only if Docker is present, else fail with an actionable message.
+# ── Stage boot-time artifacts (fallback: first-ever deploy) ─────────────────
+# The bucket didn't exist when we checked before the deploy above, so it's a
+# resource of the deploy that just ran — the binary/publisher were already
+# acquired locally above, so just resolve the bucket and upload now. (The
+# common redeploy case already staged everything before the deploy, above.)
 #
-# Previously this path merely checked for a pre-existing cache and warned+skipped
-# if absent. Under the async orchestrator (CodeBuild) that cache is always empty,
-# so the binary was never uploaded → edge instances never ran the Device Client
-# → the K3s IoT Job never executed → the post-deploy tail timed out waiting 30
-# min for the kubeconfig in SSM. Acquiring it here fixes the async deploy.
-# shellcheck source=scripts/build-device-client.sh
-source "$(dirname "$0")/build-device-client.sh"
-# Provenance-suffixed cache key, matching sandbox.sh, so a stale binary from
-# before a version/patch bump is never reused silently.
-LOCAL_BINARY_CACHE="$HOME/.cache/workshop/aws-iot-device-client-${DEVICE_CLIENT_PROVENANCE}"
-if [[ ! -f "$LOCAL_BINARY_CACHE" ]]; then
-  echo ">>> Fetching pre-built IoT Device Client from GitHub Release ${DEVICE_CLIENT_RELEASE_TAG}…"
-  if fetch_prebuilt_device_client "$LOCAL_BINARY_CACHE"; then
-    echo ">>> Fetched pre-built binary → $LOCAL_BINARY_CACHE"
-  elif command -v docker >/dev/null 2>&1; then
-    echo ">>> No pre-built artifact available — building with Docker (one-time, ~8 min)…"
-    build_device_client_binary "$LOCAL_BINARY_CACHE"
-    echo ">>> Binary built and cached at $LOCAL_BINARY_CACHE"
-  else
-    echo "ERROR: could not obtain the aws-iot-device-client binary." >&2
-    echo "  • No pre-built artifact at GitHub Release '${DEVICE_CLIENT_RELEASE_TAG}' (repo ${DEVICE_CLIENT_REPO})." >&2
-    echo "  • Docker is not available, so the local cross-compile fallback can't run either." >&2
-    echo "  Fix: publish the artifact via the 'Build Device Client' workflow" >&2
-    echo "  (gh workflow run build-device-client.yml), then re-deploy." >&2
+# Previously this whole acquire+upload path only ran here, after the deploy.
+# Under the async orchestrator (CodeBuild) the local cache is always empty on
+# a fresh runner, so if this were the only place it ran, a fresh CodeBuild run
+# would still race a freshly-launched instance's boot the same way #248 did.
+if [[ "$STAGED_BEFORE_DEPLOY" != true ]]; then
+  S3_BUCKET=$(resolve_s3_bucket)
+  if [[ -z "$S3_BUCKET" || "$S3_BUCKET" == "None" ]]; then
+    echo "ERROR: could not resolve the workshop-platform-bucket-name export after deploying $PLATFORM_STACK_NAME." >&2
     exit 1
   fi
-else
-  echo ">>> Using cached IoT Device Client binary."
+  upload_boot_artifacts "$S3_BUCKET"
 fi
-echo ">>> Uploading IoT Device Client binary to s3://${S3_BUCKET}/bin/aws-iot-device-client..."
-aws s3 cp "$LOCAL_BINARY_CACHE" "s3://${S3_BUCKET}/bin/aws-iot-device-client"
-
-echo ">>> Uploading sensor simulator to s3://${S3_BUCKET}/simulator/sensor-sim.py..."
-aws s3 cp simulator/sensor-sim.py "s3://${S3_BUCKET}/simulator/sensor-sim.py"
-echo ">>> Uploading frac-op burst generator to s3://${S3_BUCKET}/simulator/frac-op-burst.py..."
-aws s3 cp simulator/frac-op-burst.py "s3://${S3_BUCKET}/simulator/frac-op-burst.py"
 echo ">>> Shared uploads complete."
 
 # ── Per-slot post-deploy tail (parallel) ─────────────────────────────────────

@@ -27,6 +27,19 @@ export interface FreshnessPayload {
     athena_ms: number | null;
     influxdb_ms: number | null;
   };
+  // Chart 1c — device→ingest hop latency (#245), ms. ingest_ts (IoT-Core-
+  // stamped) minus message_timestamp (device-stamped immediately before
+  // publish) — the device-side MQTT publish + network hop, upstream of any
+  // data store (see the epic issue #246). Currently only computed on the
+  // RisingWave leg (risingwave/ddl-cloud.sql:mv_device_hop_latency); other
+  // tiers are null until wired up. Null also when no recent row carries
+  // message_timestamp.
+  deviceHopLatency: {
+    risingwave_ms: number | null;
+    timescaledb_ms: number | null;
+    athena_ms: number | null;
+    influxdb_ms: number | null;
+  };
   // Chart 2 — fleet-wide free CPU and memory (percentage)
   fleetResources: {
     avg_free_cpu_pct: number | null;
@@ -53,6 +66,10 @@ function mockPayload(source: "risingwave" | "timescaledb" | "athena" | "influxdb
   const ts_lat = source === "timescaledb" ? 15 + Math.random() * 20 : null;
   const at_lat = source === "athena" ? 1200 + Math.random() * 800 : null;
   const ix_lat = source === "influxdb" ? 20 + Math.random() * 40 : null;
+  // Device→ingest hop (#245): only mocked on the RisingWave leg, matching the
+  // real query which is only computed there today. ~20-80ms reflects the
+  // target post-#244 (persistent MQTT publisher) behaviour.
+  const rw_hop = source === "risingwave" ? 20 + Math.random() * 60 : null;
   return {
     tierFreshness: {
       risingwave_ms: rw_ms,
@@ -65,6 +82,12 @@ function mockPayload(source: "risingwave" | "timescaledb" | "athena" | "influxdb
       timescaledb_ms: ts_lat,
       athena_ms: at_lat,
       influxdb_ms: ix_lat,
+    },
+    deviceHopLatency: {
+      risingwave_ms: rw_hop,
+      timescaledb_ms: null,
+      athena_ms: null,
+      influxdb_ms: null,
     },
     fleetResources: {
       avg_free_cpu_pct: 85 + Math.random() * 10,
@@ -228,6 +251,12 @@ export async function GET(req: NextRequest) {
           athena_ms: Date.now() - queryT0,
           influxdb_ms: null,
         },
+        deviceHopLatency: {
+          risingwave_ms: null,
+          timescaledb_ms: null,
+          athena_ms: null,
+          influxdb_ms: null,
+        },
         fleetResources: {
           avg_free_cpu_pct: avgFreeCpu,
           avg_free_mem_pct: avgFreeMem,
@@ -313,6 +342,12 @@ export async function GET(req: NextRequest) {
           timescaledb_ms: null,
           athena_ms: null,
           influxdb_ms: queryMs,
+        },
+        deviceHopLatency: {
+          risingwave_ms: null,
+          timescaledb_ms: null,
+          athena_ms: null,
+          influxdb_ms: null,
         },
         fleetResources: {
           avg_free_cpu_pct: avg(cpuFree),

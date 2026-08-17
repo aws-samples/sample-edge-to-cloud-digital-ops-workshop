@@ -107,7 +107,15 @@ risingwave:
   # small (1-vCPU) node, so the committed epoch — and therefore MV freshness —
   # falls minutes behind wall-clock even under trivial load. 1000ms is the
   # RisingWave default; do not lower without profiling the commit path.
-  barrierIntervalMs: 1000
+  #
+  # #243: 500ms roughly halves cloud-side ingest→visible latency (~3s → ~1.3s
+  # p50) and was validated live on ws-slot42 (r6i.xlarge) with zero ingestion
+  # backlog at this workload's rate. It's the one lever that measurably moved
+  # this number — librdkafka fetch-backoff tuning was tried and refuted (see
+  # #243). Effective checkpoint interval = barrierIntervalMs × checkpoint
+  # frequency (frequency default 1) — don't also raise frequency expecting
+  # compounding gains.
+  barrierIntervalMs: 500
 
   # --8<-- [start:compute-sizing]
   # Memory budget RisingWave sizes its own heap/caches to, in bytes. The operator
