@@ -484,17 +484,42 @@ exports.handler = async (event) => {
     // can fail the deploy.
     const packageArn = `arn:aws:iot:${this.region}:${this.account}:package/${deploymentId}-telemetry-agent`;
     const packageVersionsArn = `${packageArn}/version/*`;
-    // Serialize the whole version lifecycle into a single dependency chain
-    // (create V1 → publish V1 → create V2 → publish V2 → …). The version/*
-    // grant widening (#218) made the 8 per-resource IAM policies mutually
-    // redundant, but they were still ATTACHED and INVOKED in parallel against a
-    // brand-new singleton provider role, so on a cold slot the first
-    // invocation(s) could still fire before ANY policy had propagated to IoT's
-    // authorizer — observed again on a fresh ws-slot04 deploy (V3 published, V4
-    // failed with "iot:UpdatePackageVersion … not authorized", #217 redux).
-    // Chaining staggers the invocations seconds apart: after the first
-    // policy propagates every later resource is safe, and the redundant grants
-    // guarantee the chain never needs a policy that hasn't attached yet.
+    // Two independent hardening measures close the IAM-propagation race that has
+    // repeatedly failed cold-slot deploys (#217, #218 and its redux):
+    //
+    // 1. FULL-ACTION SUPERSET on every policy. Every AwsCustomResource here shares
+    //    ONE singleton provider role; each `policy:` attaches a SEPARATE
+    //    AWS::IAM::Policy to it, and each propagates to IoT's authorizer
+    //    INDEPENDENTLY. #218 widened the *resource* dimension to `version/*` so the
+    //    policies were redundant across versions — but the *action* dimension was
+    //    still split (create policies granted only Create/Delete, publish policies
+    //    only Update). So `UpdatePackageVersion` authorization hinged specifically
+    //    on a *publish* policy propagating; on a cold slot a create call would
+    //    succeed (its policy live) while the sibling update-only policy still
+    //    lagged → "iot:UpdatePackageVersion … not authorized" (seen on fresh
+    //    ws-slot04 V4-publish, then ws-slot02 V1-publish). Granting the FULL action
+    //    set on every policy makes them supersets: IAM authorizes the union of all
+    //    propagated policies, so the moment ANY one is live the role can create,
+    //    publish AND delete every version.
+    // 2. SERIAL CHAIN (create V1 → publish V1 → create V2 → …). Guarantees a create
+    //    runs and returns first; creates propagate reliably (observed), so by the
+    //    time the following publish fires a full-action policy is already live.
+    const telemetryAgentPolicy = AwsCustomResourcePolicy.fromStatements([
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: [
+          "iot:CreatePackageVersion",
+          "iot:UpdatePackageVersion",
+          "iot:DeletePackageVersion",
+        ],
+        resources: [packageArn, packageVersionsArn],
+      }),
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["iot:GetIndexingConfiguration"],
+        resources: ["*"],
+      }),
+    ]);
     let previousResource: AwsCustomResource | undefined;
     for (const versionName of telemetryAgentVersions) {
       const logicalId = `TelemetryAgentV${versionName.split(".")[0]}`;
@@ -545,18 +570,7 @@ exports.handler = async (event) => {
           // Tolerate a version already removed out-of-band (e.g. manual cleanup).
           ignoreErrorCodesMatching: "ResourceNotFoundException",
         },
-        policy: AwsCustomResourcePolicy.fromStatements([
-          new PolicyStatement({
-            effect: Effect.ALLOW,
-            actions: ["iot:CreatePackageVersion", "iot:DeletePackageVersion"],
-            resources: [packageArn, packageVersionsArn],
-          }),
-          new PolicyStatement({
-            effect: Effect.ALLOW,
-            actions: ["iot:GetIndexingConfiguration"],
-            resources: ["*"],
-          }),
-        ]),
+        policy: telemetryAgentPolicy,
       });
       create.node.addDependency(softwarePackage);
       // Chain onto the previous version's publish so the custom-resource
@@ -591,18 +605,7 @@ exports.handler = async (event) => {
           },
           physicalResourceId: PhysicalResourceId.of(`${logicalId}Publish`),
         },
-        policy: AwsCustomResourcePolicy.fromStatements([
-          new PolicyStatement({
-            effect: Effect.ALLOW,
-            actions: ["iot:UpdatePackageVersion"],
-            resources: [packageArn, packageVersionsArn],
-          }),
-          new PolicyStatement({
-            effect: Effect.ALLOW,
-            actions: ["iot:GetIndexingConfiguration"],
-            resources: ["*"],
-          }),
-        ]),
+        policy: telemetryAgentPolicy,
       });
       publish.node.addDependency(create);
       // The next version's create waits on this publish → one serial chain.
