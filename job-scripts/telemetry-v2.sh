@@ -25,10 +25,28 @@ command -v jq >/dev/null 2>&1 || yum install -y jq || dnf install -y jq
 # not depend on that having succeeded -- install them here too if missing, so
 # re-pushing this job (scripts/push-telemetry-job.sh) is self-sufficient
 # regardless of what any individual device's UserData run did or didn't do.
-python3 -c "import awsiot" >/dev/null 2>&1 || { python3 -m ensurepip --upgrade >/dev/null 2>&1 || true; pip3 install awsiotsdk; }
+# Round 3 (#248): retry + fail loud instead of one unguarded attempt -- a
+# transient pip/S3 hiccup here must not leave the fleet silently stuck on the
+# old aws iot-data publish path behind a false-COMPLETED job.
+if ! python3 -c "import awsiot" >/dev/null 2>&1; then
+  python3 -m ensurepip --upgrade >/dev/null 2>&1 || true
+  SDK_INSTALLED=0
+  for _attempt in 1 2 3 4 5; do
+    pip3 install awsiotsdk && { SDK_INSTALLED=1; break; }
+    echo "WARN: pip3 install awsiotsdk failed (attempt $_attempt/5) -- retrying in 5s" >&2
+    sleep 5
+  done
+  [[ "$SDK_INSTALLED" -eq 1 ]] || { echo "ERROR: pip3 install awsiotsdk failed after 5 attempts -- aborting job" >&2; exit 1; }
+fi
 if [[ ! -x /usr/local/bin/mqtt-publisher.py ]]; then
   MQTT_PUB_BUCKET=$(aws cloudformation list-exports --region "$REGION" --query "Exports[?Name=='workshop-platform-bucket-name'].Value" --output text)
-  aws s3 cp "s3://${MQTT_PUB_BUCKET}/bin/mqtt-publisher.py" /usr/local/bin/mqtt-publisher.py --region "$REGION"
+  MQTT_PUB_FETCHED=0
+  for _attempt in 1 2 3 4 5; do
+    aws s3 cp "s3://${MQTT_PUB_BUCKET}/bin/mqtt-publisher.py" /usr/local/bin/mqtt-publisher.py --region "$REGION" && { MQTT_PUB_FETCHED=1; break; }
+    echo "WARN: aws s3 cp mqtt-publisher.py failed (attempt $_attempt/5) -- retrying in 5s" >&2
+    sleep 5
+  done
+  [[ "$MQTT_PUB_FETCHED" -eq 1 ]] || { echo "ERROR: aws s3 cp mqtt-publisher.py failed after 5 attempts -- aborting job" >&2; exit 1; }
   chmod +x /usr/local/bin/mqtt-publisher.py
 fi
 
@@ -129,7 +147,24 @@ TELEMETRY
 chmod +x "$TELEMETRY_SCRIPT"
 
 # ── Restart telemetry service ──────────────────────────────────────────────────
+# Round 3 (#248): the write above only lands on disk -- the continuously-running
+# workshop-telemetry.service (ExecStart=$TELEMETRY_SCRIPT) does not pick it up
+# until restarted, and a restart that doesn't actually come back active leaves
+# the fleet on the OLD publisher with no signal beyond a false-COMPLETED job.
+# Fail loud on both checks so that failure surfaces on the IoT Job itself.
+grep -q "aws iot-data publish" "$TELEMETRY_SCRIPT" && { echo "ERROR: $TELEMETRY_SCRIPT still contains the old per-message publish loop after write" >&2; exit 1; }
 systemctl restart workshop-telemetry
+TELEMETRY_ACTIVE=0
+for _attempt in 1 2 3 4 5; do
+  sleep 2
+  systemctl is-active --quiet workshop-telemetry && { TELEMETRY_ACTIVE=1; break; }
+  echo "WARN: workshop-telemetry not active yet after restart (attempt $_attempt/5)" >&2
+done
+if [[ "$TELEMETRY_ACTIVE" -ne 1 ]]; then
+  echo "ERROR: workshop-telemetry failed to become active after restart" >&2
+  systemctl status workshop-telemetry --no-pager >&2 || true
+  exit 1
+fi
 
 # ── Update shadows: report new version ────────────────────────────────────────
 sleep 2
