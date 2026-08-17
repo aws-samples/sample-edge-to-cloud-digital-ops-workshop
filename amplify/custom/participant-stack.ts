@@ -729,16 +729,31 @@ s3_cp_retry() {
 # retry exhausting into a silent fallback to the old per-message
 # \`aws iot-data publish\` path.
 pip_install_retry() {
-  local pkg="$1" attempt
+  local pip_bin="$1" pkg="$2" attempt
   for attempt in 1 2 3 4 5; do
-    if pip3 install "$pkg"; then
+    if "$pip_bin" install "$pkg"; then
       return 0
     fi
-    echo "WARN: pip3 install $pkg failed (attempt $attempt/5) -- retrying in 15s" >&2
+    echo "WARN: $pip_bin install $pkg failed (attempt $attempt/5) -- retrying in 15s" >&2
     sleep 15
   done
-  echo "ERROR: pip3 install $pkg failed after 5 attempts -- aborting boot" >&2
+  echo "ERROR: $pip_bin install $pkg failed after 5 attempts -- aborting boot" >&2
   return 1
+}
+
+# #248 round 4: awsiotsdk pins awscrt==0.36.1, but this AMI already has
+# awscrt 0.31.1 installed system-wide via rpm. \`pip3 install awsiotsdk\`
+# then tries to uninstall the rpm-managed awscrt and fails ("Cannot
+# uninstall awscrt ... installed by rpm"), aborting every retry. Isolate the
+# publisher's deps in a dedicated venv so pip never touches the rpm-managed
+# system awscrt. Idempotent: skip creation if the venv already exists.
+ensure_mqtt_venv() {
+  if [[ ! -x /opt/mqtt-venv/bin/python3 ]]; then
+    python3 -m ensurepip --upgrade
+    python3 -m venv /opt/mqtt-venv
+  fi
+  /opt/mqtt-venv/bin/pip install --upgrade pip
+  pip_install_retry /opt/mqtt-venv/bin/pip awsiotsdk
 }
 
 # #166: the edge VPC's NAT Gateway reaps idle flows after 350s. The device
@@ -788,13 +803,13 @@ chmod +x /usr/local/bin/aws-iot-device-client
 # cloud-init-output.log inspection can tell "never reached this block" apart
 # from "reached it and pip failed" -- the \`set -x\` trace alone was not
 # distinguishable enough while debugging the original report.
-echo ">>> workshop-userdata: installing awsiotsdk"
-python3 -m ensurepip --upgrade
-pip_install_retry awsiotsdk
+echo ">>> workshop-userdata: installing awsiotsdk into isolated venv"
+ensure_mqtt_venv
 echo ">>> workshop-userdata: awsiotsdk installed"
 s3_cp_retry "s3://${sharedBucketName}/bin/mqtt-publisher.py" /usr/local/bin/mqtt-publisher.py
 chmod +x /usr/local/bin/mqtt-publisher.py
 echo ">>> workshop-userdata: mqtt-publisher.py staged"
+/opt/mqtt-venv/bin/python3 -c "import awsiot" || { echo "ERROR: /opt/mqtt-venv/bin/python3 cannot import awsiot -- aborting boot" >&2; exit 1; }
 
 mkdir -p /etc/aws-iot-device-client/jobs
 chmod 700 /etc/aws-iot-device-client/certs
@@ -861,7 +876,7 @@ INTERVAL_S=5
 # The client id must differ from the device's own Thing name -- AWS IoT drops
 # the OLDER connection on a client-id collision, which would kick the device
 # client's Jobs/shadow session offline every time this loop restarts.
-coproc MQTT_PUB { python3 /usr/local/bin/mqtt-publisher.py \
+coproc MQTT_PUB { /opt/mqtt-venv/bin/python3 /usr/local/bin/mqtt-publisher.py \
   --endpoint "$IOT_ENDPOINT" \
   --region "$REGION" \
   --topic "edge/$DEPLOYMENT_ID/$INSTANCE_ID/telemetry" \

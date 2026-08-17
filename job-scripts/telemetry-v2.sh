@@ -28,15 +28,23 @@ command -v jq >/dev/null 2>&1 || yum install -y jq || dnf install -y jq
 # Round 3 (#248): retry + fail loud instead of one unguarded attempt -- a
 # transient pip/S3 hiccup here must not leave the fleet silently stuck on the
 # old aws iot-data publish path behind a false-COMPLETED job.
-if ! python3 -c "import awsiot" >/dev/null 2>&1; then
+# Round 4 (#248): awsiotsdk pins awscrt==0.36.1, but the device already has
+# awscrt 0.31.1 installed system-wide via rpm -- pip then tries to uninstall
+# the rpm-managed package and fails every retry ("installed by rpm"). Isolate
+# the install in a dedicated venv so pip never touches the system awscrt.
+if [[ ! -x /opt/mqtt-venv/bin/python3 ]]; then
   python3 -m ensurepip --upgrade >/dev/null 2>&1 || true
+  python3 -m venv /opt/mqtt-venv
+fi
+if ! /opt/mqtt-venv/bin/python3 -c "import awsiot" >/dev/null 2>&1; then
+  /opt/mqtt-venv/bin/pip install --upgrade pip >/dev/null 2>&1 || true
   SDK_INSTALLED=0
   for _attempt in 1 2 3 4 5; do
-    pip3 install awsiotsdk && { SDK_INSTALLED=1; break; }
-    echo "WARN: pip3 install awsiotsdk failed (attempt $_attempt/5) -- retrying in 5s" >&2
+    /opt/mqtt-venv/bin/pip install awsiotsdk && { SDK_INSTALLED=1; break; }
+    echo "WARN: /opt/mqtt-venv/bin/pip install awsiotsdk failed (attempt $_attempt/5) -- retrying in 5s" >&2
     sleep 5
   done
-  [[ "$SDK_INSTALLED" -eq 1 ]] || { echo "ERROR: pip3 install awsiotsdk failed after 5 attempts -- aborting job" >&2; exit 1; }
+  [[ "$SDK_INSTALLED" -eq 1 ]] || { echo "ERROR: /opt/mqtt-venv/bin/pip install awsiotsdk failed after 5 attempts -- aborting job" >&2; exit 1; }
 fi
 if [[ ! -x /usr/local/bin/mqtt-publisher.py ]]; then
   MQTT_PUB_BUCKET=$(aws cloudformation list-exports --region "$REGION" --query "Exports[?Name=='workshop-platform-bucket-name'].Value" --output text)
@@ -101,7 +109,7 @@ PREV_RECV=0
 # The client id must differ from the device's own Thing name -- AWS IoT drops
 # the OLDER connection on a client-id collision, which would kick the device
 # client's Jobs/shadow session offline every time this loop restarts.
-coproc MQTT_PUB { python3 /usr/local/bin/mqtt-publisher.py \
+coproc MQTT_PUB { /opt/mqtt-venv/bin/python3 /usr/local/bin/mqtt-publisher.py \
   --endpoint "$IOT_ENDPOINT" \
   --region "$REGION" \
   --topic "edge/$DEPLOYMENT_ID/$INSTANCE_ID/telemetry" \
@@ -153,6 +161,7 @@ chmod +x "$TELEMETRY_SCRIPT"
 # the fleet on the OLD publisher with no signal beyond a false-COMPLETED job.
 # Fail loud on both checks so that failure surfaces on the IoT Job itself.
 grep -q "aws iot-data publish" "$TELEMETRY_SCRIPT" && { echo "ERROR: $TELEMETRY_SCRIPT still contains the old per-message publish loop after write" >&2; exit 1; }
+/opt/mqtt-venv/bin/python3 -c "import awsiot" || { echo "ERROR: /opt/mqtt-venv/bin/python3 cannot import awsiot -- aborting job before restart" >&2; exit 1; }
 systemctl restart workshop-telemetry
 TELEMETRY_ACTIVE=0
 for _attempt in 1 2 3 4 5; do
