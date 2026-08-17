@@ -722,6 +722,25 @@ s3_cp_retry() {
   return 1
 }
 
+# #248: \`pip3 install\` can transiently fail (PyPI throttling, the NAT gateway
+# not yet passing traffic this early in boot, etc). Retry with the same
+# backoff/fail-loud shape as s3_cp_retry above instead of letting one bad
+# attempt take down the rest of boot under \`set -e\` -- and instead of a
+# retry exhausting into a silent fallback to the old per-message
+# \`aws iot-data publish\` path.
+pip_install_retry() {
+  local pkg="$1" attempt
+  for attempt in 1 2 3 4 5; do
+    if pip3 install "$pkg"; then
+      return 0
+    fi
+    echo "WARN: pip3 install $pkg failed (attempt $attempt/5) -- retrying in 15s" >&2
+    sleep 15
+  done
+  echo "ERROR: pip3 install $pkg failed after 5 attempts -- aborting boot" >&2
+  return 1
+}
+
 # #166: the edge VPC's NAT Gateway reaps idle flows after 350s. The device
 # client's MQTT socket sits idle between telemetry publishes (those go over
 # the HTTPS data plane, not this socket), so with no keepalive traffic below
@@ -764,10 +783,18 @@ chmod +x /usr/local/bin/aws-iot-device-client
 # #244: persistent MQTT publisher, installed once at boot. The telemetry loop
 # (below) hands it JSON payloads over a bash coprocess pipe instead of
 # shelling out to \`aws iot-data publish\` per message.
+#
+# #248: these echo breadcrumbs bracket the install so a live
+# cloud-init-output.log inspection can tell "never reached this block" apart
+# from "reached it and pip failed" -- the \`set -x\` trace alone was not
+# distinguishable enough while debugging the original report.
+echo ">>> workshop-userdata: installing awsiotsdk"
 python3 -m ensurepip --upgrade
-pip3 install awsiotsdk
+pip_install_retry awsiotsdk
+echo ">>> workshop-userdata: awsiotsdk installed"
 s3_cp_retry "s3://${sharedBucketName}/bin/mqtt-publisher.py" /usr/local/bin/mqtt-publisher.py
 chmod +x /usr/local/bin/mqtt-publisher.py
+echo ">>> workshop-userdata: mqtt-publisher.py staged"
 
 mkdir -p /etc/aws-iot-device-client/jobs
 chmod 700 /etc/aws-iot-device-client/certs
@@ -940,6 +967,12 @@ systemctl daemon-reload
 systemctl enable aws-iot-device-client workshop-telemetry iot-post-provision-restart
 systemctl start aws-iot-device-client workshop-telemetry
 systemctl start --no-block iot-post-provision-restart
+
+# #248: a definitive, unambiguous signal that this script ran to completion --
+# a partial/aborted run (e.g. one of the retry helpers above exhausting its
+# attempts) never creates this file. Check it live with:
+#   aws ssm send-command ... --parameters commands='["cat /var/lib/workshop-userdata-complete"]'
+echo "$(date -u +%FT%TZ) boot completed" > /var/lib/workshop-userdata-complete
 `;
 
     const amiId = MachineImage.latestAmazonLinux2023().getImage(this).imageId;
