@@ -49,7 +49,9 @@ The pattern holds whether the pipeline runs on a rig at the edge or entirely in 
 
 ## The Full Pipeline — Where Session 1 Fits
 
-This is the complete edge-to-cloud pipeline you'll build across all seven sessions, with **every box tinted by its role from the model above** — orange sensors, yellow brokers, blue streaming, purple in-memory stores, cyan disk stores, grey object storage. **Session 1 exercises the bold-outlined path:** EC2 devices publish to AWS IoT Core, an IoT Rule fans telemetry to Amazon Data Firehose, and Firehose lands it as Apache Iceberg files in S3 for Athena to query. The rest — the edge K3s stack, MSK, and the live analytics tiers (RisingWave, TimescaleDB, Timestream for InfluxDB, AppSync) — arrives in later sessions.
+This is the complete edge-to-cloud pipeline you'll build across all seven sessions, with **every box tinted by its role from the model above** — orange sensors, yellow brokers, blue streaming, purple in-memory stores, cyan disk stores, grey object storage. Supporting glue that isn't one of those roles — connectors, dashboards, and the live-push API — is drawn as dashed white boxes. **Session 1 exercises the bold-outlined path:** EC2 devices publish to AWS IoT Core, an IoT Rule fans telemetry to Amazon Data Firehose, and Firehose lands it as Apache Iceberg files in S3 for Athena to query. The rest — the edge K3s stack, MSK, and the live analytics tiers (RisingWave, TimescaleDB, Timestream for InfluxDB, AppSync) — arrives in later sessions.
+
+On this direct path the **only** component outside AWS is the device itself. In production that's a physical field device; in this workshop it's an EC2 instance running the IoT Device Client, purely because everything here deploys into an AWS account. AWS IoT Core and the Rules Engine are managed AWS services and live in the cloud.
 
 ```mermaid
 flowchart TD
@@ -71,13 +73,13 @@ flowchart TD
     EdgeBrowser -->|port-forward| HMI
   end
 
-  subgraph IoT["AWS IoT Core"]
-    EC2["EC2 (IoT Device Client, MQTT)"]
-    Rules["IoT Rules Engine"]
-    EC2 -->|MQTT| Rules
+  subgraph Field["Field device — outside AWS (Sessions 1–4)"]
+    EC2["IoT device<br/>(a physical field device in production;<br/>an EC2 w/ IoT Device Client in this workshop)"]
   end
 
   subgraph Cloud["Cloud — AWS"]
+    IoTCore["AWS IoT Core<br/>(managed MQTT broker)"]
+    Rules["IoT Rules Engine"]
     MSK["Amazon MSK<br/>(Provisioned, SASL/SCRAM)"]
     CloudRW["Cloud RisingWave (EKS)"]
     CloudRC["Redpanda Connect"]
@@ -90,6 +92,7 @@ flowchart TD
     AppSync["AppSync Events"]
     UI["Cloud UI / Amplify<br/>(hosted cloud UI)"]
 
+    IoTCore --> Rules
     MSK --> CloudRW -->|ALB SSE| UI
     MSK --> CloudRC --> CloudTS -->|ALB SSE| UI
     MSK --> Telegraf --> Influx -->|HTTP poll| UI
@@ -97,7 +100,8 @@ flowchart TD
     AppSync -->|WebSocket| UI
   end
 
-  WAN --> MSK
+  EC2 -->|MQTT / TLS| IoTCore
+  WAN -->|Kafka over WAN| MSK
   Rules -->|Kafka action| MSK
   Rules -->|Firehose action, no MSK hop| Firehose
   Rules -->|HTTP action| AppSync
@@ -108,15 +112,17 @@ flowchart TD
   classDef inmem fill:#E9D5FF,stroke:#6D28D9,color:#1a1a1a;
   classDef tsdb fill:#A5F3FC,stroke:#0E7490,color:#1a1a1a;
   classDef object fill:#E5E7EB,stroke:#374151,color:#1a1a1a;
+  classDef neutral fill:#FFFFFF,stroke:#94A3B8,stroke-dasharray:4 3,color:#334155;
   classDef active stroke-width:4px;
 
   class Sensor,EC2 sensor;
-  class MQTT,Rules broker;
+  class MQTT,IoTCore,Rules broker;
   class Redpanda,WAN,MSK,Firehose streaming;
   class EdgeRW,CloudRW inmem;
   class EdgeTS,CloudTS,Influx tsdb;
   class S3,Athena object;
-  class EC2,Rules,Firehose,S3,Athena active;
+  class HMI,EdgeBrowser,CloudRC,Telegraf,AppSync,UI neutral;
+  class EC2,IoTCore,Rules,Firehose,S3,Athena active;
 ```
 
 ---
