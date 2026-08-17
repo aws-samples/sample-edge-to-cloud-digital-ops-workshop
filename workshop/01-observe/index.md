@@ -1,7 +1,123 @@
+---
+hide:
+  - navigation
+  - toc
+---
+
+
 # Session 1 — Observe: The Data in Motion
 
 **Duration:** 4 hours  
 **Goal:** Understand how devices register into IoT Core, then trace the full data path from EC2 → IoT Core → Firehose → S3 → Athena and measure data freshness.
+
+!!! note "Why IoT Core is the front door here"
+    This session sends telemetry into AWS through **AWS IoT Core** — the managed MQTT broker. That's a deliberate architecture choice, not the only one: devices can also be Kafka producers straight into MSK, or publish through an edge Redpanda cluster that relays to MSK (which you'll build in Sessions 5–7). IoT Core wins here because it's fully managed and unlocks the fleet-management features this workshop leans on next — Jobs, device shadows, and fleet provisioning. The full three-way comparison, and how to pick per device, is in the [capstone architecture review](../07-capstone/block-1-architecture.md#choosing-your-aws-entrypoint-iot-core-vs-msk).
+
+---
+
+## The Mental Model: Sensor → Broker → Streaming → Storage
+
+Every real-time sensor pipeline — cloud, on-premises, or edge — is a variation of the same handful of roles. Learn these once and every box in the architecture that follows falls into place. **The colors here carry through to the pipeline diagram below.**
+
+```mermaid
+block-beta
+  columns 3
+
+  Sensor["📡 Sensor<br/>────────────────────────<br/>Generates readings at regular<br/>intervals (e.g. 1 Hz).<br/>Publishes over MQTT."]:1
+
+  MQTT["📨 Message Broker<br/>────────────────────────<br/>Lightweight pub/sub.<br/>Not a durable log.<br/>Forwards to streaming service.<br/>────────────────────────<br/>e.g. IoT Core, EMQX"]:1
+
+  Stream["🔁 Streaming Service<br/>────────────────────────<br/>Durable, ordered log.<br/>Multiple consumers read<br/>independently. Handles<br/>replay on reconnect.<br/>────────────────────────<br/>e.g. Kafka, Redpanda, MSK"]:1
+
+  Mem["🧠 In-Memory Store<br/>────────────────────────<br/>Materialized views in RAM.<br/>Continuous queries run as<br/>data arrives.<br/>Sub-50 ms latency.<br/>────────────────────────<br/>Use for: live dashboards,<br/>alarms, fleet aggregates<br/>────────────────────────<br/>e.g. RisingWave"]:1
+
+  TSDB["🗄️ Disk-Based Store<br/>────────────────────────<br/>Accepts high-throughput writes.<br/>Continuous aggregates<br/>pre-computed on schedule.<br/>90–95% compression.<br/>────────────────────────<br/>Use for: recent history,<br/>ad-hoc drilldown, SQL joins<br/>────────────────────────<br/>e.g. TimescaleDB, InfluxDB"]:1
+
+  Object["🪣 Object Storage<br/>────────────────────────<br/>Raw stream archived directly.<br/>Unlimited capacity, low cost.<br/>Write-once, batch-read.<br/>────────────────────────<br/>Use for: long-term archive,<br/>ML training, compliance<br/>────────────────────────<br/>e.g. S3"]:1
+
+  style Sensor fill:#FED7AA,stroke:#C2410C,color:#1a1a1a
+  style MQTT fill:#FEF08A,stroke:#A16207,color:#1a1a1a
+  style Stream fill:#BFDBFE,stroke:#1D4ED8,color:#1a1a1a
+  style Mem fill:#E9D5FF,stroke:#6D28D9,color:#1a1a1a
+  style TSDB fill:#A5F3FC,stroke:#0E7490,color:#1a1a1a
+  style Object fill:#E5E7EB,stroke:#374151,color:#1a1a1a
+```
+
+The pattern holds whether the pipeline runs on a rig at the edge or entirely in the cloud — only the specific products change.
+
+---
+
+## The Full Pipeline — Where Session 1 Fits
+
+This is the complete edge-to-cloud pipeline you'll build across all seven sessions, with **every box tinted by its role from the model above** — orange sensors, yellow brokers, blue streaming, purple in-memory stores, cyan disk stores, grey object storage. **Session 1 exercises the bold-outlined path:** EC2 devices publish to AWS IoT Core, an IoT Rule fans telemetry to Amazon Data Firehose, and Firehose lands it as Apache Iceberg files in S3 for Athena to query. The rest — the edge K3s stack, MSK, and the live analytics tiers (RisingWave, TimescaleDB, Timestream for InfluxDB, AppSync) — arrives in later sessions.
+
+```mermaid
+flowchart TD
+  subgraph Edge["Edge — K3s (Sessions 5–7)"]
+    Sensor["Sensor simulator"]
+    MQTT["MQTT Broker<br/>(Redpanda Connect ingest)"]
+    Redpanda["Redpanda<br/>(3-node Raft)"]
+    EdgeRW["Edge RisingWave<br/>(streaming MVs)"]
+    EdgeTS["Edge TimescaleDB<br/>(ad-hoc queries)"]
+    HMI["Next.js HMI (SSE)"]
+    EdgeBrowser["Browser"]
+    WAN["Redpanda Connect<br/>(WAN relay)"]
+
+    Sensor -->|MQTT| MQTT --> Redpanda
+    Redpanda --> EdgeRW
+    Redpanda --> EdgeTS
+    Redpanda --> WAN
+    EdgeRW --> HMI
+    EdgeBrowser -->|port-forward| HMI
+  end
+
+  subgraph IoT["AWS IoT Core"]
+    EC2["EC2 (IoT Device Client, MQTT)"]
+    Rules["IoT Rules Engine"]
+    EC2 -->|MQTT| Rules
+  end
+
+  subgraph Cloud["Cloud — AWS"]
+    MSK["Amazon MSK<br/>(Provisioned, SASL/SCRAM)"]
+    CloudRW["Cloud RisingWave (EKS)"]
+    CloudRC["Redpanda Connect"]
+    CloudTS["Cloud TimescaleDB<br/>(EKS, self-managed)"]
+    Telegraf["Telegraf (EKS)"]
+    Influx["Timestream for InfluxDB<br/>(managed hot tier)"]
+    Firehose["Amazon Data Firehose<br/>(Iceberg destination)"]
+    S3["S3 (Apache Iceberg)"]
+    Athena["Athena"]
+    AppSync["AppSync Events"]
+    UI["Cloud UI / Amplify<br/>(hosted cloud UI)"]
+
+    MSK --> CloudRW -->|ALB SSE| UI
+    MSK --> CloudRC --> CloudTS -->|ALB SSE| UI
+    MSK --> Telegraf --> Influx -->|HTTP poll| UI
+    Firehose --> S3 --> Athena
+    AppSync -->|WebSocket| UI
+  end
+
+  WAN --> MSK
+  Rules -->|Kafka action| MSK
+  Rules -->|Firehose action, no MSK hop| Firehose
+  Rules -->|HTTP action| AppSync
+
+  classDef sensor fill:#FED7AA,stroke:#C2410C,color:#1a1a1a;
+  classDef broker fill:#FEF08A,stroke:#A16207,color:#1a1a1a;
+  classDef streaming fill:#BFDBFE,stroke:#1D4ED8,color:#1a1a1a;
+  classDef inmem fill:#E9D5FF,stroke:#6D28D9,color:#1a1a1a;
+  classDef tsdb fill:#A5F3FC,stroke:#0E7490,color:#1a1a1a;
+  classDef object fill:#E5E7EB,stroke:#374151,color:#1a1a1a;
+  classDef active stroke-width:4px;
+
+  class Sensor,EC2 sensor;
+  class MQTT,Rules broker;
+  class Redpanda,WAN,MSK,Firehose streaming;
+  class EdgeRW,CloudRW inmem;
+  class EdgeTS,CloudTS,Influx tsdb;
+  class S3,Athena object;
+  class EC2,Rules,Firehose,S3,Athena active;
+```
 
 ---
 
