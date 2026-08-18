@@ -15,7 +15,13 @@
 #   2. Seed initial device-config + $package shadows
 #   3. Re-push the current telemetry-v2.sh IoT Job (scripts/push-telemetry-job.sh)
 #   4. Pre-warm the edge K3s cluster (scripts/launch-k3s.sh)
-#   5. Pre-warm the cloud analytics stack (scripts/deploy-cloud-analytics.sh)
+#
+# #253: cloud-analytics collapsed from one release PER SLOT into ONE shared
+# release for the whole workshop — deploying/pre-warming it is no longer part
+# of any slot's tail. scripts/sandbox-all.sh deploys it once, directly, via
+# `scripts/deploy-cloud-analytics.sh --shared`, before fanning out per-slot
+# tails. A standalone run of this script (e.g. via sandbox.sh for one slot)
+# assumes that shared release already exists.
 
 set -euo pipefail
 
@@ -94,24 +100,5 @@ if [[ "${#THING_NAMES[@]}" -ge 3 ]]; then
 else
   echo ">>> [$DEPLOYMENT_ID] Skipping K3s pre-warm — fewer than 3 devices registered."
 fi
-
-# ── Pre-warm the cloud analytics stack ──────────────────────────────────────
-# RisingWave + TimescaleDB + Redpanda Connect + dashboard into the shared EKS
-# cluster, during the facilitator pre-deploy — so it's already up when
-# attendees reach session 04 instead of costing ~45 min of live session
-# wall-clock. Idempotent: safe to re-run against an already-deployed slot.
-# See scripts/deploy-cloud-analytics.sh and workshop/04-analytics/block-1.
-echo ">>> [$DEPLOYMENT_ID] Pre-warming cloud analytics stack via scripts/deploy-cloud-analytics.sh…"
-# The cluster-scoped operator installs (cert-manager, gp3, risingwave-operator,
-# cnpg, kube-prometheus-stack) and the dashboard image build are SHARED, one-time
-# work — not per-slot. When sandbox-all.sh fans out slots in parallel it does that
-# bootstrap once on the first slot and sets these env vars for the rest, so the
-# concurrent slots don't race on the same cluster-wide helm releases ("UPGRADE
-# FAILED: release: already exists"). Default false → a standalone/single-slot run
-# still does everything itself.
-CLOUD_ANALYTICS_ARGS=(--deployment-id "$DEPLOYMENT_ID")
-[[ "${POST_DEPLOY_SKIP_CLUSTER_SCOPED:-false}" == "true" ]] && CLOUD_ANALYTICS_ARGS+=(--skip-cluster-scoped)
-[[ "${POST_DEPLOY_SKIP_DASHBOARD_BUILD:-false}" == "true" ]] && CLOUD_ANALYTICS_ARGS+=(--skip-dashboard-build)
-bash "$HERE/deploy-cloud-analytics.sh" "${CLOUD_ANALYTICS_ARGS[@]}"
 
 echo ">>> [$DEPLOYMENT_ID] Post-deploy tail complete."

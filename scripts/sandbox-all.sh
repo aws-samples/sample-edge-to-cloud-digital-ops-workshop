@@ -295,13 +295,25 @@ if [[ "$STAGED_BEFORE_DEPLOY" != true ]]; then
 fi
 echo ">>> Shared uploads complete."
 
+# ── Shared cloud-analytics release (once per account, not per slot) ─────────
+# #253: cloud-analytics collapsed from one release PER SLOT into ONE shared
+# release every slot's telemetry flows through — so it's no longer part of any
+# slot's post-deploy tail (see post-deploy-slot.sh). Deploy it here, once,
+# before the per-slot tails fan out below. This also does the cluster-scoped
+# operator bootstrap (cert-manager, risingwave-operator, cnpg,
+# kube-prometheus-stack) the shared release needs — nothing else in the
+# per-slot tails requires those anymore, so there's no first-slot-serial /
+# rest-parallel dance to coordinate here either.
+echo ">>> Deploying the shared cloud-analytics release..."
+bash "$(dirname "$0")/deploy-cloud-analytics.sh" --shared
+
 # ── Per-slot post-deploy tail (parallel) ─────────────────────────────────────
 # The single `cdk deploy` above already brought up every slot's nested
 # Auth/Data/Participant stacks (epic #181). What remains per slot is the
-# post-deploy tail — device self-registration wait, shadow seeding, K3s + cloud
-# analytics pre-warm — factored into scripts/post-deploy-slot.sh so sandbox.sh
-# and the CI orchestrator share the exact same steps. These are independent per
-# slot, so run them concurrently.
+# post-deploy tail — device self-registration wait, shadow seeding, and K3s
+# pre-warm — factored into scripts/post-deploy-slot.sh so sandbox.sh and the CI
+# orchestrator share the exact same steps. These are independent per slot, so
+# run them concurrently.
 MAX_PARALLEL="${SANDBOX_MAX_PARALLEL:-6}"
 LOG_DIR=$(mktemp -d /tmp/sandbox-all-logs.XXXXXX)
 echo ">>> Running post-deploy tail for ${#DEPLOYMENT_IDS[@]} slots in parallel (max ${MAX_PARALLEL} at once, logs in ${LOG_DIR})..."
@@ -345,32 +357,13 @@ _reap_one() {
   done
 }
 
-# The cloud-analytics pre-warm installs cluster-scoped, cluster-WIDE helm
-# releases (cert-manager, gp3, risingwave-operator, cnpg, kube-prometheus-stack)
-# and builds+pushes the shared dashboard image — one-time work on the shared EKS
-# cluster, NOT per-slot. Running it concurrently across slots races on those same
-# releases ("UPGRADE FAILED: release: already exists") and rebuilds the identical
-# image N times. So run the FIRST slot's tail serially to do that bootstrap once,
-# then fan the REST out in parallel with the cluster-scoped work skipped
-# (POST_DEPLOY_SKIP_* → post-deploy-slot.sh passes --skip-cluster-scoped /
-# --skip-dashboard-build to deploy-cloud-analytics.sh).
-FIRST="${DEPLOYMENT_IDS[0]}"
-REST=("${DEPLOYMENT_IDS[@]:1}")
-
-echo ">>> [$FIRST] Bootstrap slot — running serially (installs shared cluster-scoped operators + builds the dashboard image once)..."
-if _post_deploy_slot "$FIRST" >"${LOG_DIR}/${FIRST}.log" 2>&1; then
-  echo ">>> [$FIRST] Post-deploy tail complete."
-else
-  rc=$?
-  echo "ERROR: post-deploy tail for $FIRST failed (rc=$rc) — see ${LOG_DIR}/${FIRST}.log" >&2
-  tail -n 25 "${LOG_DIR}/${FIRST}.log" | sed "s/^/    [$FIRST] /" >&2 || true
-  FAILED=1
-fi
-
-for ID in "${REST[@]+"${REST[@]}"}"; do
+# #253: post-deploy-slot.sh no longer touches cloud-analytics (deployed once,
+# above), so every slot's tail is independent — no more first-slot-serial /
+# rest-parallel bootstrap dance needed here.
+for ID in "${DEPLOYMENT_IDS[@]}"; do
   while [[ ${#PIDS[@]} -ge $MAX_PARALLEL ]]; do _reap_one; done
-  echo ">>> [$ID] Starting post-deploy tail (shared bootstrap already done, cluster-scoped + dashboard build skipped)..."
-  ( export POST_DEPLOY_SKIP_CLUSTER_SCOPED=true POST_DEPLOY_SKIP_DASHBOARD_BUILD=true; _post_deploy_slot "$ID" ) >"${LOG_DIR}/${ID}.log" 2>&1 &
+  echo ">>> [$ID] Starting post-deploy tail..."
+  _post_deploy_slot "$ID" >"${LOG_DIR}/${ID}.log" 2>&1 &
   PIDS+=("$!")
   PID_IDS+=("$ID")
 done
