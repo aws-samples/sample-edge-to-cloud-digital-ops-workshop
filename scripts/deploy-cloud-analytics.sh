@@ -184,10 +184,17 @@ if [[ "$SHARED" == "true" ]]; then
     fi
     GENERATED_PASSWORD=$(aws secretsmanager get-random-password \
       --exclude-punctuation --password-length 32 --query RandomPassword --output text)
+    # Build the JSON in its own command substitution rather than nesting it
+    # inside --secret-string "$(...)" — bash 3.2 (macOS's system /bin/bash)
+    # mis-parses a nested $( … "$( … )" … ), dropping the inner double-quotes
+    # that protect the {...} dict literal, which then brace-expands into two
+    # broken `python3 -c` invocations (bash 4+/zsh parse it fine, which is why
+    # this only breaks on facilitators' Macs and not CI). See #255.
+    MSK_SECRET_JSON=$(python3 -c "import json,sys; print(json.dumps({'username': sys.argv[1], 'password': sys.argv[2]}))" "$MSK_USER" "$GENERATED_PASSWORD")
     MSK_SECRET_ARN=$(aws secretsmanager create-secret --name "$MSK_SECRET_ID" \
       --description "MSK SASL/SCRAM credentials for the shared cloud-analytics release" \
       --kms-key-id "$MSK_SCRAM_KEY_ARN" \
-      --secret-string "$(python3 -c "import json,sys; print(json.dumps({'username': sys.argv[1], 'password': sys.argv[2]}))" "$MSK_USER" "$GENERATED_PASSWORD")" \
+      --secret-string "$MSK_SECRET_JSON" \
       --query ARN --output text)
     echo "    created $MSK_SECRET_ARN"
   else
@@ -246,8 +253,7 @@ else
   TOPICS_PY="[\"sensors.raw.sim\", \"raw.telemetry\"] + [f\"sensors.raw.${DEPLOYMENT_ID}-edge-{i}\" for i in range(3)]"
 fi
 
-kubectl -n "$NAMESPACE" exec -i kafka-admin -- \
-  env MSK_BOOTSTRAP="$MSK_BOOTSTRAP" MSK_USER="$MSK_USER" MSK_PASS="$MSK_PASS" TOPICS_PY="$TOPICS_PY" python3 - <<'PYEOF'
+TOPIC_CREATE_PY=$(cat <<'PYEOF'
 import os
 from kafka.admin import KafkaAdminClient, NewTopic
 from kafka.errors import TopicAlreadyExistsError
@@ -264,6 +270,23 @@ for t in topics:
         print("exists", t)
 print("TOPICS:", sorted(admin.list_topics()))
 PYEOF
+)
+
+# Retry with backoff, same shape as the SCRAM-secret association retry loop
+# above: a just-associated SCRAM secret (shared mode) can take the brokers a
+# few seconds to propagate, and the admin client's first connection attempt
+# fails with "KafkaConnectionError: socket disconnected" until it does.
+TOPIC_CREATE_OK=false
+for attempt in $(seq 1 8); do
+  if kubectl -n "$NAMESPACE" exec -i kafka-admin -- \
+      env MSK_BOOTSTRAP="$MSK_BOOTSTRAP" MSK_USER="$MSK_USER" MSK_PASS="$MSK_PASS" TOPICS_PY="$TOPICS_PY" python3 - <<<"$TOPIC_CREATE_PY"; then
+    TOPIC_CREATE_OK=true
+    break
+  fi
+  echo "    attempt $attempt failed to create MSK topics (likely SCRAM-propagation lag) — retrying..."
+  sleep 15
+done
+[[ "$TOPIC_CREATE_OK" == "true" ]] || { echo "ERROR: failed to create MSK topics after 8 attempts." >&2; exit 1; }
 kubectl -n "$NAMESPACE" delete pod kafka-admin >/dev/null
 
 # ── 3b. Timestream for InfluxDB admin credentials (#229/#230) ───────────────

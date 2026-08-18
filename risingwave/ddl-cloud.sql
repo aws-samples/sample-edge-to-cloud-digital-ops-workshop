@@ -126,9 +126,17 @@ FORMAT PLAIN ENCODE JSON;
 -- The MVs below select from these views, never from the raw sources directly,
 -- so deployment_id derivation is enforced in exactly one place.
 -- ─────────────────────────────────────────────────────────────────────────────
+-- deployment_id is the `^ws-slot[0-9]+` prefix of site_id. Use regexp_match, NOT
+-- the SQL-standard `substring(x FROM pattern)` POSIX form: RisingWave does not
+-- support the pattern form of substring — it reads the second argument as an
+-- integer start position and fails at runtime with `str_parse('^ws-slot...')` /
+-- "integer invalid digit found in string", which broke the whole DDL hook job.
+-- CI never catches this because the DDL is only ever applied against a live
+-- RisingWave, not in CI. regexp_match returns a varchar[]; element [1] is the
+-- whole match (no capture group needed).
 CREATE VIEW IF NOT EXISTS sim_all_slots AS
 SELECT sensor, site_id, value, unit, ts_ms,
-       substring(site_id from '^ws-slot[0-9]+') AS deployment_id
+       (regexp_match(site_id, '^ws-slot[0-9]+'))[1] AS deployment_id
 FROM sensors_raw_cloud;
 
 CREATE VIEW IF NOT EXISTS telemetry_all_slots AS
