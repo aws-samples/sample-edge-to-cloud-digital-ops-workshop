@@ -129,9 +129,11 @@ FORMAT PLAIN ENCODE JSON;
 -- deployment_id is the `^ws-slot[0-9]+` prefix of site_id. Use regexp_match, NOT
 -- the SQL-standard `substring(x FROM pattern)` POSIX form: RisingWave does not
 -- support the pattern form of substring — it reads the second argument as an
--- integer start position and fails with `str_parse('^ws-slot...')` /
--- "integer invalid digit found in string". regexp_match returns a varchar[];
--- element [1] is the whole match (no capture group needed).
+-- integer start position and fails at runtime with `str_parse('^ws-slot...')` /
+-- "integer invalid digit found in string", which broke the whole DDL hook job.
+-- CI never catches this because the DDL is only ever applied against a live
+-- RisingWave, not in CI. regexp_match returns a varchar[]; element [1] is the
+-- whole match (no capture group needed).
 CREATE VIEW IF NOT EXISTS sim_all_slots AS
 SELECT sensor, site_id, value, unit, ts_ms,
        (regexp_match(site_id, '^ws-slot[0-9]+'))[1] AS deployment_id
