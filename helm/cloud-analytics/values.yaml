@@ -1,6 +1,14 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # cloud-analytics default values
-# Overridden per slot by scripts/deploy-cloud-analytics.sh via --set.
+# Overridden by scripts/deploy-cloud-analytics.sh via --set.
+#
+# #253: this chart deploys ONCE per account now, not once per slot — one
+# shared RisingWave + TimescaleDB + redpanda-connect + telegraf + dashboard
+# serving every slot, filtered by `deployment_id` (see risingwave/ddl-cloud.sql
+# and cloud-dashboard/src/lib/freshness-queries.ts). `deploymentId` below is a
+# fixed sentinel ("shared") for this release, kept as a chart value (rather
+# than deleted) because it still names the release-scoped resources (S3 state
+# bucket, IRSA role trust, labels) exactly like a slot id used to.
 #
 # Assumes the following are already in place before `helm install` (all
 # handled by scripts/deploy-cloud-analytics.sh, not this chart — they are
@@ -16,9 +24,10 @@
 #   - the RisingWave state S3 bucket (workshop-<id>-<account>-risingwave-state)
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Workshop slot identifier — used as a label on all resources and to derive
-# per-slot names (S3 bucket, IRSA role trust, etc.)
-deploymentId: ws-slot00
+# Release-scoping identifier — used as a label on all resources and to derive
+# resource names (S3 bucket, IRSA role trust, etc.). Fixed at "shared" (#253);
+# the release now serves every slot, not one slot per release.
+deploymentId: shared
 
 # AWS account ID — needed to build the RisingWave state bucket name and the
 # IRSA role ARN.
@@ -193,12 +202,13 @@ rpConnectTimescaledb:
 # above. Deliberately a *different* ingest tool (Telegraf, the idiomatic
 # InfluxDB agent) so Session 4 teaches line protocol + Telegraf, not just a
 # second copy of the same pipeline. Consumes the same MSK topics
-# (^sensors\.raw\., raw.telemetry) under a per-slot consumer group
-# (influxdb-sink-<deploymentId>) and writes the dimensional sensor_reading model
-# (measurement=sensor_reading, tags site_id/sensor, field value, ts=ts_ms) into
-# the shared Timestream for InfluxDB instance's per-slot bucket.
+# (^sensors\.raw\., raw.telemetry) under a single shared consumer group (#253 —
+# this chart is now one release for every slot, so there is no other consumer
+# to split partitions against) and writes the dimensional sensor_reading model
+# (measurement=sensor_reading, tags site_id/sensor/deployment_id, field value,
+# ts=ts_ms) into the shared Timestream for InfluxDB instance's one shared bucket.
 #
-# DEFAULT ON for deployed slots, OFF for local/minikube smoke tests (same
+# DEFAULT ON for the deployed release, OFF for local/minikube smoke tests (same
 # convention as risingwave.compute.dedicatedNodePool.enabled) — there is no
 # InfluxDB instance to reach off-cluster, and the influxdb-credentials secret
 # (bucket + token, minted in-cluster by influxdb-provision-job.yaml) won't exist.
@@ -215,12 +225,13 @@ telegraf:
   # InfluxDB v2 auth for a Telegraf output plugin is token-based, but Amazon
   # Timestream for InfluxDB only surfaces admin username/password (Secrets
   # Manager, exposed on PlatformStack.shared by #229). The instance is
-  # VPC-private, so the per-slot bucket + scoped token are minted IN-CLUSTER by
+  # VPC-private, so the shared bucket + scoped token are minted IN-CLUSTER by
   # influxdb-provision-job.yaml, which signs in with the admin creds (the
   # influxdb-admin secret deploy-cloud-analytics.sh creates) and writes the
-  # influxdb-credentials secret this Deployment consumes. Bucket name is keyed
-  # on the slot; 7-day retention keeps the shared instance from growing forever.
-  bucket: ""          # defaults to "workshop-<deploymentId>" when empty
+  # influxdb-credentials secret this Deployment consumes. #253: one shared
+  # bucket for every slot (deployment_id is a tag on each point, not a bucket
+  # boundary); 7-day retention keeps it from growing forever.
+  bucket: ""          # defaults to "workshop-cloud-analytics" when empty
   retentionSeconds: 604800   # 7 days
   # k8s secret (in this namespace) holding the minted per-slot InfluxDB token —
   # written by the provisioning Job, consumed here via envFrom.

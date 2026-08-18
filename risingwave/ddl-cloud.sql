@@ -4,9 +4,8 @@
 -- helm/cloud-analytics/templates/risingwave-ddl-job.yaml (mirrors the pattern
 -- in helm/edge-stack/templates/risingwave-ddl-job.yaml) — the Job reads the
 -- __MSK_BOOTSTRAP__/__MSK_USER__/__MSK_PASS__ placeholders below from the
--- in-cluster `msk-credentials` Secret and the __DEPLOYMENT_ID__ placeholder
--- from `.Values.deploymentId`, substitutes them itself, then pipes the result
--- through psql. No manual sed/psql step (see #159).
+-- in-cluster `msk-credentials` Secret, substitutes them itself, then pipes
+-- the result through psql. No manual sed/psql step (see #159).
 --
 -- #207: `CREATE ... IF NOT EXISTS` alone only guards against a re-run erroring
 -- on an already-existing NAME — it does NOT re-apply a changed DEFINITION, so
@@ -22,27 +21,28 @@
 --
 -- To re-apply by hand for debugging, port-forward the frontend service and
 -- substitute the same placeholders yourself:
---   kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567
+--   kubectl port-forward -n cloud-analytics svc/risingwave-cloud-frontend 4567:4567
 --
--- Notes on topic naming and SLOT SCOPING (#195):
---   The `sensors.raw.sim` and `raw.telemetry` MSK topics are SHARED across all
---   workshop slots on the one cluster (the Firehose→Iceberg reference path also
---   reads `raw.telemetry` fleet-wide, and the IoT Kafka rule action writes a
---   literal `raw.telemetry` topic per slot — see amplify/custom/participant-stack.ts).
---   Every record therefore carries its origin: sim rows stamp `site_id` =
---   `<deploymentId>-sim`; device rows stamp `deployment_id` = `<deploymentId>`.
---   Because RisingWave cannot subscribe to a wildcard topic and the topics are
---   intentionally shared, each source below is filtered to THIS slot via the
---   `__DEPLOYMENT_ID__` placeholder (logical views `sim_this_slot` /
---   `telemetry_this_slot`) so a slot's MVs only ever contain its own data. Prior
---   to this filter, e.g. `ws-slot90` showed `ws-slot05-sim` rows off the shared
---   sim topic.
+-- #253 — SHARED instance, filtered by deployment_id (not per-slot anymore):
+--   cloud-analytics used to be deployed once PER SLOT, each filtered down to
+--   its own slot's rows (the `sim_this_slot` / `telemetry_this_slot` views,
+--   WHERE-filtered on a per-slot placeholder substituted from
+--   `.Values.deploymentId`). That hit a hard EKS capacity ceiling — every slot
+--   added a full RisingWave+TimescaleDB+dashboard stack. cloud-analytics is
+--   now ONE shared release for every slot: the two views below no longer
+--   filter anything, they only CARRY `deployment_id` through (sim rows derive
+--   it from the `^ws-slot[0-9]+` prefix of `site_id`; device rows already
+--   have it as a column, stamped by the IoT rule — see
+--   amplify/custom/participant-stack.ts). Every MV downstream promotes
+--   `deployment_id` into its SELECT list and GROUP BY, so one shared instance
+--   still reports separate numbers per slot — the dashboard/API layer
+--   (cloud-dashboard, frontend) filters reads to the caller's slot via
+--   `?did=`.
 --
 --   scan.startup.mode stays 'latest' (NOT 'earliest'): 'earliest' would replay
 --   the entire shared-topic history (observed ~7.5M rows) on every source
 --   restart — the exact startup-backfill memory spike that caused the compute
---   OOM fixed in PR #191. The slot filter, not a startup-mode change, is the fix
---   for cross-slot contamination.
+--   OOM fixed in PR #191.
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- #207: drop every object this file (re)creates, in reverse dependency order,
@@ -61,8 +61,8 @@ SELECT pg_sleep(5);
 DROP MATERIALIZED VIEW IF EXISTS mv_fleet_1min_avg;
 DROP MATERIALIZED VIEW IF EXISTS mv_sensor_fleet_latest;
 DROP MATERIALIZED VIEW IF EXISTS mv_device_hop_latency;
-DROP VIEW IF EXISTS telemetry_this_slot;
-DROP VIEW IF EXISTS sim_this_slot;
+DROP VIEW IF EXISTS telemetry_all_slots;
+DROP VIEW IF EXISTS sim_all_slots;
 DROP SOURCE IF EXISTS sensors_raw_telemetry;
 DROP SOURCE IF EXISTS sensors_raw_cloud;
 
@@ -115,63 +115,68 @@ WITH (
 FORMAT PLAIN ENCODE JSON;
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- Slot-scoping views (#195). The two sources above read SHARED topics that carry
--- every slot's data; these logical views (plain CREATE VIEW — no extra streaming
--- state or memory footprint) narrow each to THIS slot before the MVs consume it.
---   - sim rows: filter on site_id = '<deploymentId>-sim' (SITE_ID env on the
---     sensor-sim EC2 is `${deploymentId}-sim`).
---   - device rows: filter on deployment_id = '<deploymentId>' (the IoT→MSK rule
+-- #253: fleet-wide views (plain CREATE VIEW — no extra streaming state or
+-- memory footprint) that carry `deployment_id` through from each source,
+-- WITHOUT filtering to any one slot — the shared instance serves every slot
+-- from these same two sources.
+--   - sim rows: derive deployment_id from the `^ws-slot[0-9]+` prefix of
+--     site_id (SITE_ID env on the sensor-sim EC2 is `${deploymentId}-sim`).
+--   - device rows: deployment_id is already a column (the IoT→MSK rule
 --     stamps `'<deploymentId>' AS deployment_id`).
--- The MVs below select from these views, never from the raw sources directly, so
--- slot scoping is enforced in exactly one place.
+-- The MVs below select from these views, never from the raw sources directly,
+-- so deployment_id derivation is enforced in exactly one place.
 -- ─────────────────────────────────────────────────────────────────────────────
-CREATE VIEW IF NOT EXISTS sim_this_slot AS
-SELECT sensor, site_id, value, unit, ts_ms
-FROM sensors_raw_cloud
-WHERE site_id = '__DEPLOYMENT_ID__-sim';
+CREATE VIEW IF NOT EXISTS sim_all_slots AS
+SELECT sensor, site_id, value, unit, ts_ms,
+       substring(site_id from '^ws-slot[0-9]+') AS deployment_id
+FROM sensors_raw_cloud;
 
-CREATE VIEW IF NOT EXISTS telemetry_this_slot AS
-SELECT thing_name, cpu_pct, mem_used_pct, disk_used_pct,
+CREATE VIEW IF NOT EXISTS telemetry_all_slots AS
+SELECT thing_name, deployment_id, cpu_pct, mem_used_pct, disk_used_pct,
        net_io_bytes_sent, net_io_bytes_recv, message_timestamp, ingest_ts
-FROM sensors_raw_telemetry
-WHERE deployment_id = '__DEPLOYMENT_ID__';
+FROM sensors_raw_telemetry;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Materialized view: latest reading per sensor per site across the entire fleet.
 -- Unions industrial sensor data (sensors_raw_cloud) with IoT node telemetry
--- (sensors_raw_telemetry unpivoted into per-metric rows).
+-- (sensors_raw_telemetry unpivoted into per-metric rows). deployment_id is
+-- carried into the SELECT list and GROUP BY (#253) so one shared MV still
+-- reports a distinct row per (sensor, site_id) *per slot*.
 -- Uses array_agg ORDER BY to pick the value with the highest ts_ms.
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_sensor_fleet_latest AS
 SELECT
     sensor,
     site_id,
+    deployment_id,
     (array_agg(value ORDER BY ts_ms DESC))[1]  AS value,
     (array_agg(unit  ORDER BY ts_ms DESC))[1]  AS unit,
     MAX(ts_ms)                                  AS ts_ms
 FROM (
-    SELECT sensor, site_id, value, unit, ts_ms FROM sim_this_slot
+    SELECT sensor, site_id, value, unit, ts_ms, deployment_id FROM sim_all_slots
     UNION ALL
-    SELECT 'cpu_pct'           AS sensor, thing_name AS site_id, cpu_pct                    AS value, 'percent' AS unit, ingest_ts AS ts_ms FROM telemetry_this_slot
+    SELECT 'cpu_pct'           AS sensor, thing_name AS site_id, cpu_pct                    AS value, 'percent' AS unit, ingest_ts AS ts_ms, deployment_id FROM telemetry_all_slots
     UNION ALL
-    SELECT 'mem_used_pct'      AS sensor, thing_name AS site_id, mem_used_pct               AS value, 'percent' AS unit, ingest_ts AS ts_ms FROM telemetry_this_slot
+    SELECT 'mem_used_pct'      AS sensor, thing_name AS site_id, mem_used_pct               AS value, 'percent' AS unit, ingest_ts AS ts_ms, deployment_id FROM telemetry_all_slots
     UNION ALL
-    SELECT 'disk_used_pct'     AS sensor, thing_name AS site_id, disk_used_pct              AS value, 'percent' AS unit, ingest_ts AS ts_ms FROM telemetry_this_slot
+    SELECT 'disk_used_pct'     AS sensor, thing_name AS site_id, disk_used_pct              AS value, 'percent' AS unit, ingest_ts AS ts_ms, deployment_id FROM telemetry_all_slots
     UNION ALL
-    SELECT 'net_io_bytes_sent' AS sensor, thing_name AS site_id, net_io_bytes_sent::DOUBLE  AS value, 'bytes'   AS unit, ingest_ts AS ts_ms FROM telemetry_this_slot
+    SELECT 'net_io_bytes_sent' AS sensor, thing_name AS site_id, net_io_bytes_sent::DOUBLE  AS value, 'bytes'   AS unit, ingest_ts AS ts_ms, deployment_id FROM telemetry_all_slots
     UNION ALL
-    SELECT 'net_io_bytes_recv' AS sensor, thing_name AS site_id, net_io_bytes_recv::DOUBLE  AS value, 'bytes'   AS unit, ingest_ts AS ts_ms FROM telemetry_this_slot
+    SELECT 'net_io_bytes_recv' AS sensor, thing_name AS site_id, net_io_bytes_recv::DOUBLE  AS value, 'bytes'   AS unit, ingest_ts AS ts_ms, deployment_id FROM telemetry_all_slots
 ) combined
-GROUP BY sensor, site_id;
+GROUP BY sensor, site_id, deployment_id;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Materialized view: 1-minute tumbling window averages per sensor per site.
 -- Buckets by (ts_ms / 60000) integer division — no watermark required.
+-- deployment_id carried into SELECT + GROUP BY (#253).
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_fleet_1min_avg AS
 SELECT
     sensor,
     site_id,
+    deployment_id,
     AVG(value)                                            AS avg_value,
     MIN(value)                                            AS min_value,
     MAX(value)                                            AS max_value,
@@ -179,19 +184,19 @@ SELECT
     to_timestamp((ts_ms / 60000) * 60)                   AS window_start,
     to_timestamp((ts_ms / 60000) * 60 + 60)              AS window_end
 FROM (
-    SELECT sensor, site_id, value, ts_ms FROM sim_this_slot
+    SELECT sensor, site_id, value, ts_ms, deployment_id FROM sim_all_slots
     UNION ALL
-    SELECT 'cpu_pct'           AS sensor, thing_name AS site_id, cpu_pct                   AS value, ingest_ts AS ts_ms FROM telemetry_this_slot
+    SELECT 'cpu_pct'           AS sensor, thing_name AS site_id, cpu_pct                   AS value, ingest_ts AS ts_ms, deployment_id FROM telemetry_all_slots
     UNION ALL
-    SELECT 'mem_used_pct'      AS sensor, thing_name AS site_id, mem_used_pct              AS value, ingest_ts AS ts_ms FROM telemetry_this_slot
+    SELECT 'mem_used_pct'      AS sensor, thing_name AS site_id, mem_used_pct              AS value, ingest_ts AS ts_ms, deployment_id FROM telemetry_all_slots
     UNION ALL
-    SELECT 'disk_used_pct'     AS sensor, thing_name AS site_id, disk_used_pct             AS value, ingest_ts AS ts_ms FROM telemetry_this_slot
+    SELECT 'disk_used_pct'     AS sensor, thing_name AS site_id, disk_used_pct             AS value, ingest_ts AS ts_ms, deployment_id FROM telemetry_all_slots
     UNION ALL
-    SELECT 'net_io_bytes_sent' AS sensor, thing_name AS site_id, net_io_bytes_sent::DOUBLE AS value, ingest_ts AS ts_ms FROM telemetry_this_slot
+    SELECT 'net_io_bytes_sent' AS sensor, thing_name AS site_id, net_io_bytes_sent::DOUBLE AS value, ingest_ts AS ts_ms, deployment_id FROM telemetry_all_slots
     UNION ALL
-    SELECT 'net_io_bytes_recv' AS sensor, thing_name AS site_id, net_io_bytes_recv::DOUBLE AS value, ingest_ts AS ts_ms FROM telemetry_this_slot
+    SELECT 'net_io_bytes_recv' AS sensor, thing_name AS site_id, net_io_bytes_recv::DOUBLE AS value, ingest_ts AS ts_ms, deployment_id FROM telemetry_all_slots
 ) combined
-GROUP BY sensor, site_id, (ts_ms / 60000);
+GROUP BY sensor, site_id, deployment_id, (ts_ms / 60000);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Materialized view: device→ingest hop latency (#245). ingest_ts is stamped by
@@ -202,23 +207,31 @@ GROUP BY sensor, site_id, (ts_ms / 60000);
 -- Bounded to a recent window (temporal filter, mirrors the TSDB 15-min
 -- freshness window in cloud-dashboard/src/lib/freshness-queries.ts) so the
 -- number reflects current behaviour rather than a lifetime average, and so
--- this MV's state stays bounded. Degrades to NULL (not an error) when no row
--- in the window carries message_timestamp -- e.g. older payloads or a
+-- this MV's state stays bounded. Grouped by deployment_id (#253) so the
+-- shared instance reports one hop-latency number per slot, not one fleet-wide
+-- average across every slot's devices. Degrades to NULL (not an error) when no
+-- row in a slot's window carries message_timestamp -- e.g. older payloads or a
 -- sim-only slot with no device telemetry.
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_device_hop_latency AS
 SELECT
+    deployment_id,
     AVG(ingest_ts - message_timestamp) AS avg_device_hop_ms,
     COUNT(*)                            AS sample_count
-FROM telemetry_this_slot
+FROM telemetry_all_slots
 WHERE message_timestamp IS NOT NULL
-  AND to_timestamp(ingest_ts / 1000) > now() - INTERVAL '15' MINUTE;
+  AND to_timestamp(ingest_ts / 1000) > now() - INTERVAL '15' MINUTE
+GROUP BY deployment_id;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Subscription: change feed on mv_sensor_fleet_latest for the cloud dashboard's
 -- push path (#160). A server-side consumer (cloud-dashboard's
 -- /api/stream/risingwave route) declares a SUBSCRIPTION CURSOR against this
 -- and relays each change event to the browser over SSE — no client polling.
+-- Every slot shares this one subscription; each connected browser's route
+-- re-aggregates mv_sensor_fleet_latest filtered to its own `?did=` on every
+-- change event, so a change to slot A's rows doesn't push stale-looking data
+-- to slot B's viewers, it just wakes them to re-read their own, unaffected rows.
 -- Retention window bounds how far a newly-connected cursor can look back.
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE SUBSCRIPTION IF NOT EXISTS dashboard_freshness_sub

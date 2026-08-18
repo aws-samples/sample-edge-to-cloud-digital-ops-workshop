@@ -57,12 +57,18 @@ spec:
             ts_ms          BIGINT          NOT NULL,
             sensor         TEXT            NOT NULL,
             site_id        TEXT            NOT NULL,
+            deployment_id  TEXT            NOT NULL,
             value          DOUBLE PRECISION,
             unit           TEXT,
             partition_time TIMESTAMPTZ     NOT NULL
           );
         - SELECT create_hypertable('sensor_readings', 'partition_time', if_not_exists => TRUE);
         - CREATE INDEX IF NOT EXISTS idx_sensor_readings_sensor ON sensor_readings(sensor, partition_time DESC);
+        # #253: the shared cloud-analytics instance holds every slot's rows in
+        # one hypertable — this composite index leads with deployment_id so a
+        # per-slot freshness read (WHERE deployment_id = $1 AND partition_time > ...)
+        # stays chunk-excluded and index-scoped instead of scanning every slot's data.
+        - CREATE INDEX IF NOT EXISTS idx_sensor_readings_deployment ON sensor_readings(deployment_id, sensor, partition_time DESC);
         # postInitApplicationSQL runs as the superuser, so hand the table to
         # the workshop role — it must OWN the hypertable to build a
         # continuous aggregate on it (Block 4), not merely hold DML grants.

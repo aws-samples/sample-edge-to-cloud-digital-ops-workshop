@@ -45,10 +45,10 @@ data:
     [[inputs.kafka_consumer]]
       brokers = [@@BROKERS@@]
       topic_regexps = ["^sensors\\.raw\\."]
-      # Per-slot consumer group: all slots read the SAME shared MSK topics, so a
-      # shared group would split partitions across slots and a fresh slot could
-      # see none. A per-slot group gives each slot its own full-topic cursor.
-      consumer_group = "influxdb-sink-{{ .Values.deploymentId }}"
+      # #253: cloud-analytics is now ONE shared release for every slot, so a
+      # single consumer group with one full-topic cursor is correct — there is
+      # no other consumer to split partitions against.
+      consumer_group = "influxdb-sink"
       sasl_mechanism = "SCRAM-SHA-512"
       sasl_username = "${MSK_USERNAME}"
       sasl_password = "${MSK_PASSWORD}"
@@ -75,13 +75,18 @@ data:
     [[inputs.kafka_consumer]]
       brokers = [@@BROKERS@@]
       topics = ["raw.telemetry"]
-      consumer_group = "influxdb-sink-{{ .Values.deploymentId }}-node"
+      consumer_group = "influxdb-sink-node"
       sasl_mechanism = "SCRAM-SHA-512"
       sasl_username = "${MSK_USERNAME}"
       sasl_password = "${MSK_PASSWORD}"
       enable_tls = true
       name_override = "node_telemetry"
-      tag_keys = ["thing_name"]
+      # deployment_id is stamped onto every raw.telemetry record by the IoT
+      # rule (amplify/custom/participant-stack.ts) — captured as a tag here so
+      # the starlark fan-out below (#253) can carry it onto each resulting
+      # sensor_reading point. thing_name has no slot prefix (it's the bare IoT
+      # thing name), so unlike Input A's site_id it can't be derived by regex.
+      tag_keys = ["thing_name", "deployment_id"]
       json_time_key = "ingest_ts"
       json_time_format = "unix_ms"
       fieldpass = ["cpu_pct", "mem_used_pct", "disk_used_pct", "net_io_bytes_sent", "net_io_bytes_recv"]
@@ -98,15 +103,31 @@ data:
             return metric
         out = []
         site = metric.tags.get("thing_name", "unknown")
+        deployment_id = metric.tags.get("deployment_id", "unknown")
         for k, v in metric.fields.items():
             m = Metric("sensor_reading")
             m.tags["site_id"] = site
             m.tags["sensor"] = k
+            m.tags["deployment_id"] = deployment_id
             m.fields["value"] = float(v)
             m.time = metric.time
             out.append(m)
         return out
     '''
+
+    # #253: Input A's sensor_reading points (from sensors.raw.*) carry no
+    # deployment_id — unlike node_telemetry above, site_id there IS slot-
+    # prefixed (`<deploymentId>-sim`), so derive it with a regex tag instead of
+    # threading it through a second input. Runs after the starlark stage above;
+    # a site_id that doesn't match (e.g. an already-tagged node_telemetry-derived
+    # point, whose site_id is a bare thing name) leaves deployment_id untouched.
+    [[processors.regex]]
+      namepass = ["sensor_reading"]
+      [[processors.regex.tags]]
+        key = "site_id"
+        pattern = "^(ws-slot[0-9]+).*"
+        replacement = "${1}"
+        result_key = "deployment_id"
 
     # ── Output: the shared instance's per-slot bucket ─────────────────────────
     # URL/token/org/bucket come from the influxdb-credentials secret (minted

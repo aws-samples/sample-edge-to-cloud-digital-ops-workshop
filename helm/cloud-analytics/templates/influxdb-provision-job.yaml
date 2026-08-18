@@ -1,9 +1,11 @@
 {{- if .Values.telegraf.enabled }}
-{{- $bucket := .Values.telegraf.bucket | default (printf "workshop-%s" .Values.deploymentId) }}
-# Post-install/post-upgrade Job that provisions the per-slot InfluxDB bucket +
-# scoped token on the SHARED Amazon Timestream for InfluxDB instance (#229/#230),
-# then writes them into the `influxdb-credentials` Secret the Telegraf sink
-# consumes. This has to run IN-CLUSTER because the instance is VPC-private and
+{{- $bucket := .Values.telegraf.bucket | default "workshop-cloud-analytics" }}
+# Post-install/post-upgrade Job that provisions the ONE shared InfluxDB bucket
+# (#253 — cloud-analytics is now a single release for every slot; deployment_id
+# is a tag on each point, not a bucket boundary) + scoped token on the SHARED
+# Amazon Timestream for InfluxDB instance (#229/#230), then writes them into
+# the `influxdb-credentials` Secret the Telegraf sink consumes. This has to
+# run IN-CLUSTER because the instance is VPC-private and
 # only surfaces admin username/password (Secrets Manager, via PlatformStack.shared)
 # — never a token — so the deploy script / CodeBuild can't reach it to mint one.
 #

@@ -56,11 +56,10 @@ spec:
                 echo "  no streaming compute node yet; sleeping..."
                 sleep 5
               done
-              echo "Substituting MSK credentials + slot id into DDL (no manual sed step — creds from msk-credentials Secret env, deployment id from chart value)..."
+              echo "Substituting MSK credentials into DDL (no manual sed step — creds from msk-credentials Secret env)..."
               sed -e "s|__MSK_BOOTSTRAP__|${MSK_BOOTSTRAP_SERVERS}|g" \
                   -e "s|__MSK_USER__|${MSK_USERNAME}|g" \
                   -e "s|__MSK_PASS__|${MSK_PASSWORD}|g" \
-                  -e "s|__DEPLOYMENT_ID__|{{ .Values.deploymentId }}|g" \
                   /ddl/ddl-cloud.sql > /tmp/ddl-cloud.sql
               echo "Running DDL..."
               # (3) CRITICAL (#214): -v ON_ERROR_STOP=1 so a failed CREATE after
