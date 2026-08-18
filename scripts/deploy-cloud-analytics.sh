@@ -184,10 +184,17 @@ if [[ "$SHARED" == "true" ]]; then
     fi
     GENERATED_PASSWORD=$(aws secretsmanager get-random-password \
       --exclude-punctuation --password-length 32 --query RandomPassword --output text)
+    # Build the JSON in its own command substitution rather than nesting it
+    # inside --secret-string "$(...)" — bash 3.2 (macOS's system /bin/bash)
+    # mis-parses a nested $( … "$( … )" … ), dropping the inner double-quotes
+    # that protect the {...} dict literal, which then brace-expands into two
+    # broken `python3 -c` invocations (bash 4+/zsh parse it fine, which is why
+    # this only breaks on facilitators' Macs and not CI). See #255.
+    MSK_SECRET_JSON=$(python3 -c "import json,sys; print(json.dumps({'username': sys.argv[1], 'password': sys.argv[2]}))" "$MSK_USER" "$GENERATED_PASSWORD")
     MSK_SECRET_ARN=$(aws secretsmanager create-secret --name "$MSK_SECRET_ID" \
       --description "MSK SASL/SCRAM credentials for the shared cloud-analytics release" \
       --kms-key-id "$MSK_SCRAM_KEY_ARN" \
-      --secret-string "$(python3 -c "import json,sys; print(json.dumps({'username': sys.argv[1], 'password': sys.argv[2]}))" "$MSK_USER" "$GENERATED_PASSWORD")" \
+      --secret-string "$MSK_SECRET_JSON" \
       --query ARN --output text)
     echo "    created $MSK_SECRET_ARN"
   else
