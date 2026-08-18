@@ -82,7 +82,7 @@ curl -sf http://localhost:3000 | head -c 200
 [Session 4, Block 5](../04-analytics/block-6-dashboard.md)):
 
 ```bash
-kubectl port-forward -n ws-slot00 svc/cloud-analytics-dashboard 3001:3000 > /tmp/dash-burst-pf.log 2>&1 &
+kubectl port-forward -n cloud-analytics svc/cloud-analytics-dashboard 3001:3000 > /tmp/dash-burst-pf.log 2>&1 &
 DASH_PF_PID=$!
 until grep -q "Forwarding from" /tmp/dash-burst-pf.log 2>/dev/null; do sleep 1; done
 curl -sf http://localhost:3001 | head -c 200
@@ -90,7 +90,8 @@ curl -sf http://localhost:3001 | head -c 200
 <!-- e2e:assert {"contains": "<"} -->
 
 Leave both port-forwards running and open `http://localhost:3000` (edge) and
-`http://localhost:3001` (cloud) in two browser tabs.
+`http://localhost:3001/?did=ws-slot00` (cloud — the shared dashboard scoped to your
+own slot) in two browser tabs.
 
 ---
 

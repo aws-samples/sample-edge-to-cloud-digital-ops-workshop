@@ -239,9 +239,15 @@ fi
 echo ">>> Upload complete."
 
 # ── Per-slot post-deploy tail ────────────────────────────────────────────────
-# Device self-registration wait, shadow seeding, K3s + cloud-analytics pre-warm.
-# Factored into scripts/post-deploy-slot.sh so sandbox.sh, sandbox-all.sh and the
-# CI orchestrator all run the identical steps. Idempotent.
+# Device self-registration wait, shadow seeding, K3s pre-warm. Factored into
+# scripts/post-deploy-slot.sh so sandbox.sh, sandbox-all.sh and the CI
+# orchestrator all run the identical steps. Idempotent.
+#
+# #253: cloud-analytics is now ONE shared release for the whole workshop, not
+# part of this per-slot tail — deploy/redeploy it separately, once per
+# account, with `scripts/deploy-cloud-analytics.sh --shared`
+# (scripts/sandbox-all.sh does this automatically when bringing up multiple
+# slots; a single `sandbox.sh` run assumes it already exists).
 bash "$(dirname "$0")/post-deploy-slot.sh" "$DEPLOYMENT_ID"
 
 # ── Write deployment summary ──────────────────────────────────────────────────

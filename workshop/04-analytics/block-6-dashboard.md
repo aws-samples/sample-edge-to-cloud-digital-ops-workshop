@@ -59,7 +59,7 @@ A linear axis would make RisingWave, TimescaleDB, and InfluxDB indistinguishable
     --8<-- "cloud-dashboard/src/lib/freshness-queries.ts"
     ```
 
-    Freshness = `Date.now() - MAX(ts_ms)`. Both tiers use `ts_ms`/the equivalent column populated from `ingest_ts` — the epoch-ms timestamp stamped by IoT Core when the message arrived, not the device clock — so clock-skew between EC2 edge nodes and the dashboard is eliminated.
+    Freshness = `Date.now() - MAX(ts_ms)`. Both tiers use `ts_ms`/the equivalent column populated from `ingest_ts` — the epoch-ms timestamp stamped by IoT Core when the message arrived, not the device clock — so clock-skew between EC2 edge nodes and the dashboard is eliminated. Both queries also carry a `deployment_id = $1` predicate — the dashboard is one shared instance for every slot (#253), so every read is scoped to the caller's own slot via its `?did=` value.
 
 ??? example "Query — Athena / Iceberg"
     ```sql
@@ -143,20 +143,22 @@ charts.
 
 ??? example "RisingWave — freshness + query latency (port 4567)"
     ```bash
-    kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567 > /tmp/rw-fresh-pf.log 2>&1 &
+    kubectl port-forward -n cloud-analytics svc/risingwave-cloud-frontend 4567:4567 > /tmp/rw-fresh-pf.log 2>&1 &
     RW_PF_PID=$!
     until grep -q "Forwarding from" /tmp/rw-fresh-pf.log 2>/dev/null; do sleep 1; done
     # Same MV the dashboard's /api/stream/risingwave route reads. ts_ms is the
     # IoT-Core ingest timestamp (epoch-ms), so freshness is clock-skew-free.
-    # Timestamp with the CLIENT's wall-clock, not RisingWave's own now() — see
-    # the measurement-trap warning above. One session, \timing on, a discarded
-    # warm-up SELECT then the measured SELECT — this isolates engine read
-    # latency from psql-spawn + connect/auth + tunnel cost (see the note above).
+    # deployment_id = 'ws-slot00' scopes this to your own slot — the MV holds
+    # every slot's rows on this shared instance (#253). Timestamp with the
+    # CLIENT's wall-clock, not RisingWave's own now() — see the measurement-trap
+    # warning above. One session, \timing on, a discarded warm-up SELECT then
+    # the measured SELECT — this isolates engine read latency from psql-spawn +
+    # connect/auth + tunnel cost (see the note above).
     epoch_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
     RW_RAW=$(psql -h localhost -p 4567 -U root -d dev -tA -F'|' <<'SQL'
     \timing on
-    SELECT MAX(ts_ms), COUNT(*) FROM mv_sensor_fleet_latest;
-    SELECT MAX(ts_ms), COUNT(*) FROM mv_sensor_fleet_latest;
+    SELECT MAX(ts_ms), COUNT(*) FROM mv_sensor_fleet_latest WHERE deployment_id = 'ws-slot00';
+    SELECT MAX(ts_ms), COUNT(*) FROM mv_sensor_fleet_latest WHERE deployment_id = 'ws-slot00';
     SQL
     )
     RW_NOW=$(epoch_ms)
@@ -172,23 +174,25 @@ charts.
 
 ??? example "TimescaleDB — freshness + query latency (port 5432)"
     ```bash
-    TSDB_PASS=$(kubectl get secret timescaledb-cloud-app -n ws-slot00 \
+    TSDB_PASS=$(kubectl get secret timescaledb-cloud-app -n cloud-analytics \
       -o jsonpath='{.data.password}' | base64 -d)
-    kubectl port-forward -n ws-slot00 svc/timescaledb-cloud-rw 5432:5432 > /tmp/tsdb-fresh-pf.log 2>&1 &
+    kubectl port-forward -n cloud-analytics svc/timescaledb-cloud-rw 5432:5432 > /tmp/tsdb-fresh-pf.log 2>&1 &
     TSDB_PF_PID=$!
     until grep -q "Forwarding from" /tmp/tsdb-fresh-pf.log 2>/dev/null; do sleep 1; done
     # Same sensor_readings table the dashboard's /api/stream/timescaledb route reads.
     # The `partition_time > now() - interval '15 minutes'` predicate is load-bearing:
     # it lets TimescaleDB do chunk exclusion (skip every chunk older than the window)
-    # instead of scanning the whole raw hypertable on every read. Without it this
-    # aggregates all history and grows unbounded — tens of seconds once the table
-    # hits millions of rows. One session, \timing on, a discarded warm-up SELECT
-    # then the measured SELECT — same isolation as the RisingWave block above;
-    # freshness still comes from the (warm) query's own now() - MAX(ts_ms).
+    # instead of scanning the whole raw hypertable on every read. deployment_id =
+    # 'ws-slot00' scopes it to your own slot — this hypertable holds every slot's
+    # rows on this shared instance (#253), and deployment_id leads the composite
+    # index so the two predicates stay index-scoped together. One session, \timing
+    # on, a discarded warm-up SELECT then the measured SELECT — same isolation as
+    # the RisingWave block above; freshness still comes from the (warm) query's
+    # own now() - MAX(ts_ms).
     TS_RAW=$(PGPASSWORD="$TSDB_PASS" psql -h localhost -p 5432 -U workshop -d edge -tA -F'|' <<'SQL'
     \timing on
-    SELECT (EXTRACT(EPOCH FROM now())*1000)::bigint - MAX(ts_ms), COUNT(*) FROM sensor_readings WHERE partition_time > now() - interval '15 minutes';
-    SELECT (EXTRACT(EPOCH FROM now())*1000)::bigint - MAX(ts_ms), COUNT(*) FROM sensor_readings WHERE partition_time > now() - interval '15 minutes';
+    SELECT (EXTRACT(EPOCH FROM now())*1000)::bigint - MAX(ts_ms), COUNT(*) FROM sensor_readings WHERE deployment_id = 'ws-slot00' AND partition_time > now() - interval '15 minutes';
+    SELECT (EXTRACT(EPOCH FROM now())*1000)::bigint - MAX(ts_ms), COUNT(*) FROM sensor_readings WHERE deployment_id = 'ws-slot00' AND partition_time > now() - interval '15 minutes';
     SQL
     )
     IFS='|' read -r TS_FRESH TS_ROWS < <(echo "$TS_RAW" | grep -v '^Time:' | tail -1)
@@ -236,20 +240,21 @@ charts.
 
 ??? example "Timestream for InfluxDB — freshness + query latency (port 8086)"
     ```bash
-    # Same per-slot bucket + sensor_reading schema the dashboard's
+    # Same shared bucket + sensor_reading schema the dashboard's
     # /api/freshness?tier=influxdb route queries (see Block 5). Assumes a local
     # tunnel to the managed instance on port 8086 (Block 5 sets this up). The
-    # url/token/org/bucket live in the influxdb-credentials secret; read them and
-    # run one Flux query for the newest point's timestamp. Freshness is subtracted
-    # against the CLIENT wall-clock (a portable epoch-ms helper) — same discipline
-    # as the other tiers.
+    # url/token/org/bucket live in the influxdb-credentials secret (shared
+    # cloud-analytics namespace — #253); read them and run one Flux query for
+    # the newest point's timestamp, filtered to your own slot via
+    # deployment_id. Freshness is subtracted against the CLIENT wall-clock (a
+    # portable epoch-ms helper) — same discipline as the other tiers.
     epoch_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
-    IX_TOKEN=$(kubectl get secret influxdb-credentials -n ws-slot00 -o jsonpath='{.data.INFLUX_TOKEN}' | base64 -d)
-    IX_ORG=$(kubectl get secret influxdb-credentials -n ws-slot00 -o jsonpath='{.data.INFLUX_ORG}' | base64 -d)
-    IX_BUCKET=$(kubectl get secret influxdb-credentials -n ws-slot00 -o jsonpath='{.data.INFLUX_BUCKET}' | base64 -d)
-    # Newest point across the bucket, as epoch-ms. Flux `last()` after a wide
+    IX_TOKEN=$(kubectl get secret influxdb-credentials -n cloud-analytics -o jsonpath='{.data.INFLUX_TOKEN}' | base64 -d)
+    IX_ORG=$(kubectl get secret influxdb-credentials -n cloud-analytics -o jsonpath='{.data.INFLUX_ORG}' | base64 -d)
+    IX_BUCKET=$(kubectl get secret influxdb-credentials -n cloud-analytics -o jsonpath='{.data.INFLUX_BUCKET}' | base64 -d)
+    # Newest point for this slot, as epoch-ms. Flux `last()` after a wide
     # range gives the most-recent sensor_reading; _time is RFC3339 → epoch-ms.
-    FLUX='from(bucket:"'"$IX_BUCKET"'") |> range(start:-15m) |> filter(fn:(r)=> r._measurement=="sensor_reading" and r._field=="value") |> last() |> keep(columns:["_time"]) |> max(column:"_time")'
+    FLUX='from(bucket:"'"$IX_BUCKET"'") |> range(start:-15m) |> filter(fn:(r)=> r._measurement=="sensor_reading" and r._field=="value" and r.deployment_id=="ws-slot00") |> last() |> keep(columns:["_time"]) |> max(column:"_time")'
     IX_T0=$(epoch_ms)
     IX_TIME=$(curl -sf -k "https://localhost:8086/api/v2/query?org=${IX_ORG}" \
       -H "Authorization: Token ${IX_TOKEN}" \
@@ -431,11 +436,12 @@ What holds the budget as you scale:
     transient node instability, not steady-state RisingWave behaviour.
 
     Tell it apart from the checkpoint-cadence case above by looking at pod restarts
-    and node events, not just the freshness number:
+    and node events, not just the freshness number — the shared instance's pods
+    live in the `cloud-analytics` namespace (#253), not your own slot's:
 
     ```bash
-    kubectl get events -n ws-slot00 --field-selector reason=NodeNotReady
-    kubectl get pods  -n ws-slot00 -o wide   # RESTARTS ages clustered together + shared NODE = one node took them all
+    kubectl get events -n cloud-analytics --field-selector reason=NodeNotReady
+    kubectl get pods  -n cloud-analytics -o wide   # RESTARTS ages clustered together + shared NODE = one node took them all
     ```
 
     The fix is write-side and operational, never a query change. The decisive

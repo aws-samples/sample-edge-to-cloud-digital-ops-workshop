@@ -99,4 +99,4 @@ fi
 
 echo ""
 echo ">>> Deploy with:"
-echo "      scripts/deploy-cloud-analytics.sh --deployment-id ws-slot00 --dashboard-image ${ECR_URI}:${IMAGE_TAG}"
+echo "      scripts/deploy-cloud-analytics.sh --shared --dashboard-image ${ECR_URI}:${IMAGE_TAG}"

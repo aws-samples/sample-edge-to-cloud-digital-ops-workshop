@@ -45,9 +45,16 @@ so the read side never recomputes it.
 |---|---|---|
 | `sensors_raw_cloud` | Source | Industrial sensor readings from MSK topic `sensors.raw.sim` |
 | `sensors_raw_telemetry` | Source | EC2 node telemetry (cpu/mem/disk/net) from MSK topic `raw.telemetry` |
-| `mv_sensor_fleet_latest` | Materialized view | Latest reading per sensor per site, across both sources |
-| `mv_fleet_1min_avg` | Materialized view | 1-minute tumbling-window averages per sensor per site |
+| `mv_sensor_fleet_latest` | Materialized view | Latest reading per sensor per site, across both sources — grouped by `deployment_id` too, since one shared instance now serves every slot |
+| `mv_fleet_1min_avg` | Materialized view | 1-minute tumbling-window averages per sensor per site, also grouped by `deployment_id` |
 | `dashboard_freshness_sub` | Subscription | Change feed on `mv_sensor_fleet_latest` — the push path the dashboard consumes (Block 6) |
+
+!!! info "One shared instance, filtered by `deployment_id`"
+    RisingWave here is **one shared instance for the whole workshop**, not one per slot —
+    it reads the same shared MSK topics every slot publishes to, and every view/MV below
+    carries a `deployment_id` column instead of being scoped to a single slot. The
+    queries in this block filter on `deployment_id = 'ws-slot00'` so you only see your own
+    devices; the dashboard (Block 6) does the same filtering via its `?did=` param.
 
 Each source declares the shape of a Kafka/MSK stream; each `CREATE MATERIALIZED VIEW`
 compiles into an operator graph that updates on every arriving row. The cost of the
@@ -69,7 +76,7 @@ RisingWave speaks the PostgreSQL wire protocol on **port 4567**, so any `psql` c
 works:
 
 ```bash
-kubectl port-forward -n ws-slot00 svc/risingwave-cloud-frontend 4567:4567 > /tmp/rw-cloud-pf.log 2>&1 &
+kubectl port-forward -n cloud-analytics svc/risingwave-cloud-frontend 4567:4567 > /tmp/rw-cloud-pf.log 2>&1 &
 RW_PF_PID=$!
 until grep -q "Forwarding from" /tmp/rw-cloud-pf.log 2>/dev/null; do sleep 1; done
 psql -h localhost -p 4567 -U root -d dev -c "SHOW MATERIALIZED VIEWS;"
@@ -84,21 +91,27 @@ Or leave the port-forward running in another terminal and connect interactively 
 
 ## Query the Views
 
-Once your edge nodes are running (Session 5), messages appear in the views within seconds:
+Once your edge nodes are running (Session 5), messages appear in the views within seconds.
+The shared instance holds every slot's rows, so filter on `deployment_id` to see only
+your own devices:
 
 ```sql
--- Poll for incoming messages
+-- Poll for incoming messages — this source has no deployment_id column yet
+-- (it's derived downstream, see sim_all_slots in ddl-cloud.sql), so LIMIT and
+-- eyeball your own site_id (ws-slot00-sim) among everyone else's.
 SELECT sensor, site_id, value, unit FROM sensors_raw_cloud LIMIT 10;
 
--- Latest reading per sensor per site
+-- Latest reading per sensor per site — your slot only
 SELECT sensor, site_id, round(value::numeric, 2) AS value, unit
 FROM mv_sensor_fleet_latest
+WHERE deployment_id = 'ws-slot00'
 ORDER BY sensor;
 
--- 1-minute bucket averages
+-- 1-minute bucket averages — your slot only
 SELECT sensor, site_id, round(avg_value::numeric, 2) AS avg_v,
        sample_count, window_start
 FROM mv_fleet_1min_avg
+WHERE deployment_id = 'ws-slot00'
 ORDER BY sensor, window_start DESC;
 ```
 

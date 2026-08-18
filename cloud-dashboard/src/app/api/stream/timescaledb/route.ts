@@ -1,10 +1,11 @@
 import { Client, Pool } from "pg";
+import { NextRequest } from "next/server";
 import { queryTimescaleDbFreshness } from "../../../../lib/freshness-queries";
 
 export const dynamic = "force-dynamic";
 
 /**
- * GET /api/stream/timescaledb
+ * GET /api/stream/timescaledb?did=<deploymentId>
  *
  * Server-Sent Events push for the TimescaleDB freshness tier (#160).
  * TimescaleDB/Postgres has no subscription primitive — instead a trigger on
@@ -15,6 +16,11 @@ export const dynamic = "force-dynamic";
  * aggregate query the polled /api/freshness route uses and pushes the result
  * to the browser. This replaces the 3-second setInterval poll that used to
  * drive this tier.
+ *
+ * #253: the notify trigger fires for INSERTs from every slot (one shared
+ * hypertable) — `did` scopes each re-aggregation to the caller's own slot, so
+ * a notification from another slot's ingest still wakes this connection but
+ * re-reads only this slot's unaffected rows.
  *
  * #210: a notification burst (one per INSERT statement under sustained
  * ingest) used to fan out into one full aggregate query per notification
@@ -32,7 +38,8 @@ export const dynamic = "force-dynamic";
 
 const DEBOUNCE_MS = 300;
 
-export async function GET(): Promise<Response> {
+export async function GET(req: NextRequest): Promise<Response> {
+  const deploymentId = req.nextUrl.searchParams.get("did") ?? process.env.WORKSHOP_DEPLOYMENT_ID ?? "";
   let controller!: ReadableStreamDefaultController<Uint8Array>;
   let closed = false;
 
@@ -128,7 +135,7 @@ export async function GET(): Promise<Response> {
     }
     inFlight = true;
     try {
-      const payload = await queryTimescaleDbFreshness(pool);
+      const payload = await queryTimescaleDbFreshness(pool, deploymentId);
       send("freshness", payload);
     } catch (err) {
       console.error("[stream/timescaledb] query error:", err);

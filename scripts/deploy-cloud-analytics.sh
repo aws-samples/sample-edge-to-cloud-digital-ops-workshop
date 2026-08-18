@@ -4,12 +4,22 @@
 # plus the manual `sed | psql` DDL apply in block-2-risingwave.md.
 #
 # Usage:
-#   scripts/deploy-cloud-analytics.sh --deployment-id ws-slot00
-#   scripts/deploy-cloud-analytics.sh --deployment-id ws-slot00 --skip-cluster-scoped
+#   scripts/deploy-cloud-analytics.sh --shared
+#   scripts/deploy-cloud-analytics.sh --shared --skip-cluster-scoped
+#   scripts/deploy-cloud-analytics.sh --deployment-id ws-slot00   # legacy per-slot mode (#253 superseded this)
+#
+# #253: cloud-analytics collapsed from one release PER SLOT into ONE shared
+# release for the whole workshop — every slot's telemetry flows through it,
+# filtered by `deployment_id` (see risingwave/ddl-cloud.sql). --shared deploys
+# that one release into the shared `cloud-analytics` namespace under a dedicated
+# `workshop-shared` MSK identity, instead of a per-slot namespace/identity.
+# --deployment-id still exists for a rollback/one-off per-slot deploy, but the
+# standard path (scripts/post-deploy-slot.sh, scripts/sandbox-all.sh) now calls
+# this with --shared exactly once per account, not once per slot.
 #
 # Idempotent — every step is safe to re-run (kubectl apply / helm upgrade
 # --install / CREATE ... IF NOT EXISTS DDL / --if-not-exists topics). Exits 0
-# on a repeat run against an already-deployed slot.
+# on a repeat run against an already-deployed slot/shared release.
 #
 # --migrate-risingwave-meta: required, opt-in flag to move a slot that still
 # has the old in-memory-backed RisingWave meta store onto the durable
@@ -31,6 +41,7 @@
 set -euo pipefail
 
 DEPLOYMENT_ID=""
+SHARED=false
 SKIP_CLUSTER_SCOPED=false
 DASHBOARD_IMAGE=""
 SKIP_DASHBOARD_BUILD=false
@@ -40,6 +51,7 @@ MIGRATE_RISINGWAVE_META=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --deployment-id)          DEPLOYMENT_ID="$2"; shift 2 ;;
+    --shared)                  SHARED=true; shift ;;
     --skip-cluster-scoped)     SKIP_CLUSTER_SCOPED=true; shift ;;
     --dashboard-image)         DASHBOARD_IMAGE="$2"; shift 2 ;;
     --skip-dashboard-build)     SKIP_DASHBOARD_BUILD=true; shift ;;
@@ -49,22 +61,34 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$DEPLOYMENT_ID" ]]; then
-  echo "Usage: $0 --deployment-id <ws-slotNN> [--skip-cluster-scoped] [--dashboard-image <repo:tag>] [--skip-dashboard-build] [--migrate-risingwave-meta]" >&2
+# #253: --shared deploys the one release every slot shares. It needs no
+# --deployment-id (there is no single slot), so default DEPLOYMENT_ID to the
+# "shared" sentinel values.yaml already expects; NAMESPACE — the one thing
+# that actually changes per-mode — is derived from it below.
+if [[ "$SHARED" == "true" ]]; then
+  DEPLOYMENT_ID="${DEPLOYMENT_ID:-shared}"
+elif [[ -z "$DEPLOYMENT_ID" ]]; then
+  echo "Usage: $0 --shared [--skip-cluster-scoped] [--dashboard-image <repo:tag>] [--skip-dashboard-build] [--migrate-risingwave-meta]" >&2
+  echo "   or: $0 --deployment-id <ws-slotNN> [--skip-cluster-scoped] [--dashboard-image <repo:tag>] [--skip-dashboard-build] [--migrate-risingwave-meta]  (legacy per-slot mode)" >&2
   exit 1
+fi
+
+NAMESPACE="$DEPLOYMENT_ID"
+if [[ "$SHARED" == "true" ]]; then
+  NAMESPACE="cloud-analytics"
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-echo ">>> Cloud analytics deploy — deployment ID: ${DEPLOYMENT_ID}"
+echo ">>> Cloud analytics deploy — deployment ID: ${DEPLOYMENT_ID} (namespace: ${NAMESPACE})"
 
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
 # ── 1. kubectl access to the shared EKS cluster ─────────────────────────────
 echo ">>> Configuring kubectl for workshop-eks..."
 aws eks update-kubeconfig --region "$REGION" --name workshop-eks >/dev/null
-kubectl create namespace "$DEPLOYMENT_ID" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 # ── 2. Cluster-scoped installs (skip if a participant without cluster-admin) ─
 if [[ "$SKIP_CLUSTER_SCOPED" == "false" ]]; then
@@ -140,30 +164,90 @@ if [[ -z "$MSK_CLUSTER_ARN" || "$MSK_CLUSTER_ARN" == "None" ]]; then
   exit 1
 fi
 
-MSK_PASS=$(aws secretsmanager get-secret-value \
-  --secret-id "AmazonMSK_workshop-${DEPLOYMENT_ID}" \
-  --query SecretString --output text | python3 -c 'import sys,json; print(json.load(sys.stdin)["password"])')
+MSK_SECRET_ID="AmazonMSK_workshop-${DEPLOYMENT_ID}"
 MSK_USER="workshop-${DEPLOYMENT_ID}"
+
+if [[ "$SHARED" == "true" ]]; then
+  # #253: the shared release has no CDK ParticipantStack minting+associating a
+  # SCRAM secret for it (that only happens per-slot), so create+associate one
+  # here, idempotently — MSK SASL/SCRAM only authenticates *associated*
+  # secrets and there is no admin SCRAM user to fall back to.
+  echo ">>> [shared] Ensuring MSK SCRAM secret ${MSK_SECRET_ID}..."
+  MSK_SECRET_ARN=$(aws secretsmanager describe-secret --secret-id "$MSK_SECRET_ID" \
+    --query ARN --output text 2>/dev/null || true)
+  if [[ -z "$MSK_SECRET_ARN" || "$MSK_SECRET_ARN" == "None" ]]; then
+    MSK_SCRAM_KEY_ARN=$(aws cloudformation list-exports \
+      --query "Exports[?Name=='workshop-platform-msk-scram-key-arn'].Value" --output text)
+    if [[ -z "$MSK_SCRAM_KEY_ARN" || "$MSK_SCRAM_KEY_ARN" == "None" ]]; then
+      echo "ERROR: could not resolve workshop-platform-msk-scram-key-arn CFN export." >&2
+      exit 1
+    fi
+    GENERATED_PASSWORD=$(aws secretsmanager get-random-password \
+      --exclude-punctuation --password-length 32 --query RandomPassword --output text)
+    MSK_SECRET_ARN=$(aws secretsmanager create-secret --name "$MSK_SECRET_ID" \
+      --description "MSK SASL/SCRAM credentials for the shared cloud-analytics release" \
+      --kms-key-id "$MSK_SCRAM_KEY_ARN" \
+      --secret-string "$(python3 -c "import json,sys; print(json.dumps({'username': sys.argv[1], 'password': sys.argv[2]}))" "$MSK_USER" "$GENERATED_PASSWORD")" \
+      --query ARN --output text)
+    echo "    created $MSK_SECRET_ARN"
+  else
+    echo "    $MSK_SECRET_ID already exists — reusing."
+  fi
+
+  # Associate, then poll list-scram-secrets until it sticks — Secrets
+  # Manager/KMS eventual consistency can leave the first attempt unprocessed
+  # (mirrors the retry loop in amplify/custom/participant-stack.ts:1251).
+  is_associated() {
+    aws kafka list-scram-secrets --cluster-arn "$MSK_CLUSTER_ARN" \
+      --query "SecretArnList" --output text 2>/dev/null | tr '\t' '\n' | grep -qx "$MSK_SECRET_ARN"
+  }
+  if ! is_associated; then
+    echo ">>> [shared] Associating $MSK_SECRET_ARN with the MSK cluster..."
+    for attempt in $(seq 1 8); do
+      aws kafka batch-associate-scram-secret --cluster-arn "$MSK_CLUSTER_ARN" \
+        --secret-arn-list "$MSK_SECRET_ARN" >/dev/null 2>&1 || true
+      is_associated && { echo "    associated after attempt $attempt"; break; }
+      echo "    attempt $attempt not yet associated — retrying..."
+      sleep 15
+    done
+    is_associated || { echo "ERROR: failed to associate $MSK_SECRET_ARN with the MSK cluster after 8 attempts." >&2; exit 1; }
+  else
+    echo "    already associated with the MSK cluster."
+  fi
+fi
+
+MSK_PASS=$(aws secretsmanager get-secret-value \
+  --secret-id "$MSK_SECRET_ID" \
+  --query SecretString --output text | python3 -c 'import sys,json; print(json.load(sys.stdin)["password"])')
 MSK_BOOTSTRAP=$(aws kafka get-bootstrap-brokers \
   --cluster-arn "$MSK_CLUSTER_ARN" --region "$REGION" \
   --query BootstrapBrokerStringSaslScram --output text)
 
 kubectl create secret generic msk-credentials \
-  --namespace "$DEPLOYMENT_ID" \
+  --namespace "$NAMESPACE" \
   --from-literal=MSK_USERNAME="$MSK_USER" \
   --from-literal=MSK_PASSWORD="$MSK_PASS" \
   --from-literal=MSK_BOOTSTRAP_SERVERS="$MSK_BOOTSTRAP" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 echo ">>> Ensuring MSK topics exist (MSK is VPC-private — run from inside the cluster)..."
-kubectl -n "$DEPLOYMENT_ID" delete pod kafka-admin --ignore-not-found >/dev/null
-kubectl -n "$DEPLOYMENT_ID" run kafka-admin --restart=Never --image=python:3.12-slim \
+kubectl -n "$NAMESPACE" delete pod kafka-admin --ignore-not-found >/dev/null
+kubectl -n "$NAMESPACE" run kafka-admin --restart=Never --image=python:3.12-slim \
   --command -- sleep 900 >/dev/null
-kubectl -n "$DEPLOYMENT_ID" wait --for=condition=Ready pod/kafka-admin --timeout=120s
-kubectl -n "$DEPLOYMENT_ID" exec kafka-admin -- pip install --quiet kafka-python
+kubectl -n "$NAMESPACE" wait --for=condition=Ready pod/kafka-admin --timeout=120s
+kubectl -n "$NAMESPACE" exec kafka-admin -- pip install --quiet kafka-python
 
-kubectl -n "$DEPLOYMENT_ID" exec -i kafka-admin -- \
-  env MSK_BOOTSTRAP="$MSK_BOOTSTRAP" MSK_USER="$MSK_USER" MSK_PASS="$MSK_PASS" DEPLOYMENT_ID="$DEPLOYMENT_ID" python3 - <<'PYEOF'
+# #253: in shared mode, the per-slot device topics (sensors.raw.<slot>-edge-N)
+# are each slot's own concern (created per-slot elsewhere) — this release only
+# needs the two topics every slot publishes onto: sensors.raw.sim, raw.telemetry.
+if [[ "$SHARED" == "true" ]]; then
+  TOPICS_PY='["sensors.raw.sim", "raw.telemetry"]'
+else
+  TOPICS_PY="[\"sensors.raw.sim\", \"raw.telemetry\"] + [f\"sensors.raw.${DEPLOYMENT_ID}-edge-{i}\" for i in range(3)]"
+fi
+
+kubectl -n "$NAMESPACE" exec -i kafka-admin -- \
+  env MSK_BOOTSTRAP="$MSK_BOOTSTRAP" MSK_USER="$MSK_USER" MSK_PASS="$MSK_PASS" TOPICS_PY="$TOPICS_PY" python3 - <<'PYEOF'
 import os
 from kafka.admin import KafkaAdminClient, NewTopic
 from kafka.errors import TopicAlreadyExistsError
@@ -171,10 +255,7 @@ admin = KafkaAdminClient(
     bootstrap_servers=os.environ["MSK_BOOTSTRAP"].split(","),
     security_protocol="SASL_SSL", sasl_mechanism="SCRAM-SHA-512",
     sasl_plain_username=os.environ["MSK_USER"], sasl_plain_password=os.environ["MSK_PASS"])
-deployment_id = os.environ["DEPLOYMENT_ID"]
-topics = ["sensors.raw.sim", "raw.telemetry"] + [
-    f"sensors.raw.{deployment_id}-edge-{i}" for i in range(3)
-]
+topics = eval(os.environ["TOPICS_PY"])
 for t in topics:
     try:
         admin.create_topics([NewTopic(name=t, num_partitions=3, replication_factor=2)])
@@ -183,7 +264,7 @@ for t in topics:
         print("exists", t)
 print("TOPICS:", sorted(admin.list_topics()))
 PYEOF
-kubectl -n "$DEPLOYMENT_ID" delete pod kafka-admin >/dev/null
+kubectl -n "$NAMESPACE" delete pod kafka-admin >/dev/null
 
 # ── 3b. Timestream for InfluxDB admin credentials (#229/#230) ───────────────
 # The shared managed hot tier. Surface its endpoint + admin creds into an
@@ -212,7 +293,7 @@ else
   INFLUX_URL="https://${INFLUX_ENDPOINT}:8086"
   echo ">>> Creating influxdb-admin secret (endpoint ${INFLUX_URL}, org ${INFLUX_ORG})..."
   kubectl create secret generic influxdb-admin \
-    --namespace "$DEPLOYMENT_ID" \
+    --namespace "$NAMESPACE" \
     --from-literal=INFLUX_URL="$INFLUX_URL" \
     --from-literal=INFLUX_ORG="$INFLUX_ORG" \
     --from-literal=INFLUX_ADMIN_USERNAME="$INFLUX_ADMIN_USER" \
@@ -244,13 +325,13 @@ fi
 # object, so `helm install` refuses it outright. Stamp that adoption metadata
 # on unconditionally (idempotent — a no-op on a SA Helm already owns, and a
 # no-op when the SA doesn't exist yet on a truly fresh slot).
-if kubectl get serviceaccount risingwave-cloud -n "$DEPLOYMENT_ID" >/dev/null 2>&1; then
+if kubectl get serviceaccount risingwave-cloud -n "$NAMESPACE" >/dev/null 2>&1; then
   echo ">>> Adopting pre-existing risingwave-cloud ServiceAccount into the Helm release..."
-  kubectl label serviceaccount risingwave-cloud -n "$DEPLOYMENT_ID" \
+  kubectl label serviceaccount risingwave-cloud -n "$NAMESPACE" \
     app.kubernetes.io/managed-by=Helm --overwrite >/dev/null
-  kubectl annotate serviceaccount risingwave-cloud -n "$DEPLOYMENT_ID" \
+  kubectl annotate serviceaccount risingwave-cloud -n "$NAMESPACE" \
     meta.helm.sh/release-name=cloud-analytics \
-    meta.helm.sh/release-namespace="$DEPLOYMENT_ID" --overwrite >/dev/null
+    meta.helm.sh/release-namespace="$NAMESPACE" --overwrite >/dev/null
 fi
 
 # ── 4c. Migrate an existing memory-backed RisingWave meta store, if any ─────
@@ -267,13 +348,13 @@ fi
 # effect of a routine deploy — hence the dedicated opt-in flag, same guard
 # philosophy as --delete-platform-stack in e2e/doc-runner-cli.ts.
 RW_CR_NAME="risingwave-cloud"
-if kubectl get risingwave "$RW_CR_NAME" -n "$DEPLOYMENT_ID" >/dev/null 2>&1; then
-  EXISTING_META_MEMORY=$(kubectl get risingwave "$RW_CR_NAME" -n "$DEPLOYMENT_ID" \
+if kubectl get risingwave "$RW_CR_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
+  EXISTING_META_MEMORY=$(kubectl get risingwave "$RW_CR_NAME" -n "$NAMESPACE" \
     -o jsonpath='{.spec.metaStore.memory}' 2>/dev/null || true)
   if [[ -n "$EXISTING_META_MEMORY" ]]; then
     if [[ "$MIGRATE_RISINGWAVE_META" == "true" ]]; then
       echo ">>> [migrate] Existing RisingWave CR '${RW_CR_NAME}' uses an in-memory meta store; deleting it and clearing its S3 Hummock state so it can be recreated on the durable PostgreSQL meta store (--migrate-risingwave-meta)..."
-      kubectl delete risingwave "$RW_CR_NAME" -n "$DEPLOYMENT_ID" --ignore-not-found --wait=true
+      kubectl delete risingwave "$RW_CR_NAME" -n "$NAMESPACE" --ignore-not-found --wait=true
       echo ">>> [migrate] Clearing s3://${STATE_BUCKET} — the leftover hummock/cluster_id marker from the old in-memory meta would otherwise collide with the new cluster_id. This is safe: RW state is expendable, TimescaleDB is the system of record."
       aws s3 rm "s3://${STATE_BUCKET}" --recursive --region "$REGION" >/dev/null
     else
@@ -316,7 +397,7 @@ else
 fi
 echo ">>> Dashboard image: ${DASHBOARD_REPO}:${DASHBOARD_TAG}"
 
-echo ">>> Deploying helm/cloud-analytics into namespace ${DEPLOYMENT_ID}..."
+echo ">>> Deploying helm/cloud-analytics into namespace ${NAMESPACE}..."
 helm dependency update "$REPO_ROOT/helm/cloud-analytics" >/dev/null
 # NOTE: intentionally NOT `--wait`. The dashboard/redpanda-connect pods block
 # (non-optional initContainer / secretRef) on the timescaledb-credentials +
@@ -326,7 +407,7 @@ helm dependency update "$REPO_ROOT/helm/cloud-analytics" >/dev/null
 # but that hook is exactly what unblocks readiness, so the two deadlock and
 # `helm --wait` times out on a fresh slot. We drive readiness ourselves below.
 helm upgrade --install cloud-analytics "$REPO_ROOT/helm/cloud-analytics" \
-  --namespace "$DEPLOYMENT_ID" \
+  --namespace "$NAMESPACE" \
   --set deploymentId="$DEPLOYMENT_ID" \
   --set-string accountId="$ACCOUNT_ID" \
   --set awsRegion="$REGION" \
@@ -344,35 +425,35 @@ helm upgrade --install cloud-analytics "$REPO_ROOT/helm/cloud-analytics" \
 TSDB_CR="timescaledb-cloud"
 echo ">>> Waiting for CNPG-generated ${TSDB_CR}-app secret (primary bootstrap ~1-3 min)..."
 for _ in $(seq 1 120); do
-  kubectl get secret "${TSDB_CR}-app" -n "$DEPLOYMENT_ID" >/dev/null 2>&1 && break
+  kubectl get secret "${TSDB_CR}-app" -n "$NAMESPACE" >/dev/null 2>&1 && break
   sleep 5
 done
-TSDB_PASSWORD=$(kubectl get secret "${TSDB_CR}-app" -n "$DEPLOYMENT_ID" \
+TSDB_PASSWORD=$(kubectl get secret "${TSDB_CR}-app" -n "$NAMESPACE" \
   -o jsonpath='{.data.password}' 2>/dev/null | base64 -d)
 if [[ -z "$TSDB_PASSWORD" ]]; then
   echo "ERROR: ${TSDB_CR}-app secret never appeared — CNPG cluster failed to bootstrap." >&2
   exit 1
 fi
-TSDB_DSN="postgres://workshop:${TSDB_PASSWORD}@${TSDB_CR}-rw.${DEPLOYMENT_ID}.svc:5432/edge"
+TSDB_DSN="postgres://workshop:${TSDB_PASSWORD}@${TSDB_CR}-rw.${NAMESPACE}.svc:5432/edge"
 echo ">>> Creating timescaledb-credentials + timescaledb-dashboard-env secrets..."
-kubectl create secret generic timescaledb-credentials -n "$DEPLOYMENT_ID" \
+kubectl create secret generic timescaledb-credentials -n "$NAMESPACE" \
   --from-literal=TIMESCALE_DSN="$TSDB_DSN" \
   --dry-run=client -o yaml | kubectl apply -f -
-kubectl create secret generic timescaledb-dashboard-env -n "$DEPLOYMENT_ID" \
+kubectl create secret generic timescaledb-dashboard-env -n "$NAMESPACE" \
   --from-literal=TIMESCALEDB_ENDPOINT="$TSDB_DSN" \
   --dry-run=client -o yaml | kubectl apply -f -
 
 # ── 7. Drive readiness ourselves (replaces the `--wait` we dropped above) ────
 echo ">>> Waiting for cloud-analytics workloads to become ready..."
-kubectl rollout status -n "$DEPLOYMENT_ID" deploy/cloud-analytics-dashboard --timeout=10m
-kubectl rollout status -n "$DEPLOYMENT_ID" deploy/cloud-analytics-redpanda-connect --timeout=10m
+kubectl rollout status -n "$NAMESPACE" deploy/cloud-analytics-dashboard --timeout=10m
+kubectl rollout status -n "$NAMESPACE" deploy/cloud-analytics-redpanda-connect --timeout=10m
 if [[ "$TELEGRAF_ENABLED" == "true" ]]; then
   # Telegraf blocks in its wait-for-influxdb-credentials initContainer until the
   # post-install provisioning Job mints the per-slot bucket/token — give that
   # hook time to run before we assert the sink is up.
-  kubectl rollout status -n "$DEPLOYMENT_ID" deploy/cloud-analytics-telegraf --timeout=10m
+  kubectl rollout status -n "$NAMESPACE" deploy/cloud-analytics-telegraf --timeout=10m
 fi
 
-echo ">>> Cloud analytics deploy complete for ${DEPLOYMENT_ID}."
+echo ">>> Cloud analytics deploy complete for ${DEPLOYMENT_ID} (namespace ${NAMESPACE})."
 echo ">>> Port-forward the dashboard with:"
-echo "      kubectl port-forward -n ${DEPLOYMENT_ID} svc/cloud-analytics-dashboard 3000:3000"
+echo "      kubectl port-forward -n ${NAMESPACE} svc/cloud-analytics-dashboard 3000:3000"

@@ -1,10 +1,11 @@
 import { Client } from "pg";
+import { NextRequest } from "next/server";
 import { queryRisingWaveFreshness } from "../../../../lib/freshness-queries";
 
 export const dynamic = "force-dynamic";
 
 /**
- * GET /api/stream/risingwave
+ * GET /api/stream/risingwave?did=<deploymentId>
  *
  * Server-Sent Events push for the RisingWave freshness tier (#160). Opens a
  * single long-lived pg connection, uses RisingWave's native subscription
@@ -14,12 +15,18 @@ export const dynamic = "force-dynamic";
  * resulting FreshnessPayload to the browser as a "freshness" SSE event. This
  * replaces the 3-second setInterval poll that used to drive this tier.
  *
+ * #253: the subscription itself is fleet-wide (every slot's changes flow
+ * through the one shared dashboard_freshness_sub) — `did` scopes each
+ * re-aggregation to the caller's own slot, so a change to another slot's rows
+ * still wakes this connection but re-reads only this slot's unaffected data.
+ *
  * If RISINGWAVE_ENDPOINT is unset (local dev / mock mode), falls back to
  * emitting a mock payload on a timer so the frontend still has something to
  * render — this is the one place a timer remains, and only when there is no
  * real subscription to attach to.
  */
-export async function GET(): Promise<Response> {
+export async function GET(req: NextRequest): Promise<Response> {
+  const deploymentId = req.nextUrl.searchParams.get("did") ?? process.env.WORKSHOP_DEPLOYMENT_ID ?? "";
   let controller!: ReadableStreamDefaultController<Uint8Array>;
   let closed = false;
 
@@ -114,13 +121,13 @@ export async function GET(): Promise<Response> {
       // first change event arrives.
       const { Pool } = await import("pg");
       const pool = new Pool({ connectionString: endpoint, connectionTimeoutMillis: 5000 });
-      send("freshness", await queryRisingWaveFreshness(pool));
+      send("freshness", await queryRisingWaveFreshness(pool, deploymentId));
 
       while (!closed) {
         const result = await client.query(`FETCH 100 FROM ${curName}`);
 
         if (result.rows.length > 0) {
-          send("freshness", await queryRisingWaveFreshness(pool));
+          send("freshness", await queryRisingWaveFreshness(pool, deploymentId));
         }
 
         // Brief pause to avoid hammering the DB when no new data arrives.

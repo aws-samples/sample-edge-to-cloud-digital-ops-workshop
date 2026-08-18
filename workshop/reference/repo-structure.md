@@ -30,7 +30,7 @@ edge-digital-ops-workshop/
 │   ├── deploy-k3s.sh               # Session 5: K3s cluster bootstrap
 │   └── add-shadows.sh              # Session 3: app-deployment + device-health shadows
 ├── scripts/
-│   ├── deploy-cloud-analytics.sh   # Session 4: stand up the cloud analytics stack for a slot
+│   ├── deploy-cloud-analytics.sh   # Session 4: stand up the ONE shared cloud analytics stack (--shared)
 │   ├── build-cloud-dashboard.sh    # Build + push the cloud-dashboard image to ECR
 │   ├── build-hmi.sh                # Build + side-load the HMI image to the edge K3s nodes
 │   ├── create-workshop-user.sh     # Create Cognito user for the front-end UI
@@ -102,34 +102,35 @@ The dashboard lifecycle, end to end:
 # deploy-cloud-analytics.sh rebuilds + pushes the image under the current
 # commit's short SHA (an immutable tag), then runs `helm upgrade` pointing the
 # Deployment at that exact tag — so a redeploy always serves current code.
-scripts/deploy-cloud-analytics.sh --deployment-id ws-slot00
+# #253: cloud-analytics is now ONE shared release for the whole workshop, not
+# one per slot — --shared deploys/updates it.
+scripts/deploy-cloud-analytics.sh --shared
 ```
 
 **Immutable SHA tags (fix for #197).** The dashboard image is tagged by the
 current commit's short SHA, **not** the floating `:latest`. This is deliberate:
-`:latest` with `imagePullPolicy: IfNotPresent` meant a redeploy against an
-existing slot kept serving whatever image the node first pulled — a stale image
-could silently outlive the code by days (the Query Latency chart from #187 was
-missing from live slots for exactly this reason). Because each code change gets a
-distinct tag, `helm upgrade` references a never-before-seen image and Kubernetes
-is forced to pull it; `IfNotPresent` stays correct (a new SHA is never already
-present) and cheap (an unchanged SHA is cached). It also sidesteps the old
-shared-`:latest` cross-slot trap, where one tag shared across all slots meant
-pushing it shipped your change — including uncommitted, unreviewed work — to
-*everyone*.
+`:latest` with `imagePullPolicy: IfNotPresent` meant a redeploy kept serving
+whatever image the node first pulled — a stale image could silently outlive the
+code by days (the Query Latency chart from #187 was missing for exactly this
+reason). Because each code change gets a distinct tag, `helm upgrade` references
+a never-before-seen image and Kubernetes is forced to pull it; `IfNotPresent`
+stays correct (a new SHA is never already present) and cheap (an unchanged SHA
+is cached).
 
 `deploy-cloud-analytics.sh` builds+pushes the SHA tag itself by default. To skip
 the rebuild (reuse an already-pushed SHA), pass `--skip-dashboard-build`; to pin
-an explicit image (e.g. a preview build), pass `--dashboard-image <repo:tag>`.
-To test a change on **one** slot without touching the others, build a scoped tag
-and point just that slot's Deployment at it:
+an explicit image (e.g. a preview build), pass `--dashboard-image <repo:tag>`:
 
 ```bash
-# Build + push under a scoped preview tag, then deploy that slot with it.
-scripts/build-cloud-dashboard.sh --tag slot00-preview-$(git rev-parse --short HEAD)
-scripts/deploy-cloud-analytics.sh --deployment-id ws-slot00 \
-  --dashboard-image <account>.dkr.ecr.<region>.amazonaws.com/workshop-cloud-dashboard:slot00-preview-<sha>
+# Build + push under a preview tag, then point the shared release at it.
+scripts/build-cloud-dashboard.sh --tag preview-$(git rev-parse --short HEAD)
+scripts/deploy-cloud-analytics.sh --shared \
+  --dashboard-image <account>.dkr.ecr.<region>.amazonaws.com/workshop-cloud-dashboard:preview-<sha>
 ```
+
+Because the release is now shared (#253), a preview image affects **every**
+slot's dashboard, not just one — there is no more "test on one slot without
+touching the others" path for this chart.
 
 The HMI follows the same build pattern via `scripts/build-hmi.sh` (which
 side-loads the image onto the edge K3s nodes rather than pushing to ECR, since

@@ -143,12 +143,12 @@ function DeviceHopChart({ rw, tsdb, athena, influx }: { rw: FreshnessPayload | n
 // and pushes a new FreshnessPayload every time the underlying store changes —
 // there is no fixed interval on this side, updates arrive as fast as the
 // store produces them.
-function usePushFreshness(tier: "risingwave" | "timescaledb") {
+function usePushFreshness(tier: "risingwave" | "timescaledb", deploymentId: string) {
   const [data, setData] = useState<FreshnessPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const es = new EventSource(`/api/stream/${tier}`);
+    const es = new EventSource(`/api/stream/${tier}?did=${encodeURIComponent(deploymentId)}`);
     es.addEventListener("freshness", (evt: MessageEvent) => {
       try {
         setData(JSON.parse(evt.data));
@@ -170,7 +170,7 @@ function usePushFreshness(tier: "risingwave" | "timescaledb") {
     });
     es.onerror = () => setError("stream disconnected");
     return () => es.close();
-  }, [tier]);
+  }, [tier, deploymentId]);
 
   return { data, error };
 }
@@ -178,7 +178,7 @@ function usePushFreshness(tier: "risingwave" | "timescaledb") {
 // ── poll hook: Athena (on-demand warehouse query) and InfluxDB (managed TSDB,
 // no subscribe primitive we use here) have no push path, so they stay on
 // setInterval (#160 keeps Athena as-is; #231 adds InfluxDB the same way).
-function usePolledFreshness(tier: "athena" | "influxdb", intervalMs: number) {
+function usePolledFreshness(tier: "athena" | "influxdb", intervalMs: number, deploymentId: string) {
   const [data, setData] = useState<FreshnessPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -186,7 +186,7 @@ function usePolledFreshness(tier: "athena" | "influxdb", intervalMs: number) {
     let cancelled = false;
     const poll = async () => {
       try {
-        const res = await fetch(`/api/freshness?tier=${tier}`);
+        const res = await fetch(`/api/freshness?tier=${tier}&did=${encodeURIComponent(deploymentId)}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json: FreshnessPayload = await res.json();
         if (!cancelled) { setData(json); setError(null); }
@@ -197,9 +197,22 @@ function usePolledFreshness(tier: "athena" | "influxdb", intervalMs: number) {
     poll();
     const id = setInterval(poll, intervalMs);
     return () => { cancelled = true; clearInterval(id); };
-  }, [tier, intervalMs]);
+  }, [tier, intervalMs, deploymentId]);
 
   return { data, error };
+}
+
+// ── deployment id: read once from `?did=` on the dashboard's own URL (#253 —
+// the dashboard is now one shared instance for every slot, port-forwarded
+// directly rather than served through the mkdocs site, so it has no access to
+// workshop/javascripts/deployment-id.js's sessionStorage value; each
+// participant appends their own `?did=` when they open the port-forwarded URL).
+function useDeploymentId(): string {
+  const [deploymentId, setDeploymentId] = useState("");
+  useEffect(() => {
+    setDeploymentId(new URLSearchParams(window.location.search).get("did") ?? "");
+  }, []);
+  return deploymentId;
 }
 
 // ── chart 1 component ─────────────────────────────────────────────────────────
@@ -429,22 +442,23 @@ function Pulse({ active }: { active: boolean }) {
 
 // ── page ──────────────────────────────────────────────────────────────────────
 export default function DashboardPage() {
-  const { data: rwData,   error: rwError   } = usePushFreshness("risingwave");
-  const { data: tsdbData, error: tsdbError } = usePushFreshness("timescaledb");
+  const deploymentId = useDeploymentId();
+  const { data: rwData,   error: rwError   } = usePushFreshness("risingwave", deploymentId);
+  const { data: tsdbData, error: tsdbError } = usePushFreshness("timescaledb", deploymentId);
   // Athena/Iceberg is the slow warehouse tier — a query takes seconds, and it
   // has no push/subscribe primitive, so it stays on a slow poll (#160).
-  const { data: athenaData, error: athenaError } = usePolledFreshness("athena", 15000);
+  const { data: athenaData, error: athenaError } = usePolledFreshness("athena", 15000, deploymentId);
   // Timestream for InfluxDB is a managed hot store fed by Telegraf off the same
   // MSK topics (#230). No subscribe primitive we use here, so it polls like
   // Athena — but it's a fast time-series read, so a tighter 5s cadence (#231).
-  const { data: influxData, error: influxError } = usePolledFreshness("influxdb", 5000);
+  const { data: influxData, error: influxError } = usePolledFreshness("influxdb", 5000, deploymentId);
 
   const isMock = rwData?.source === "mock" || tsdbData?.source === "mock" || athenaData?.source === "mock" || influxData?.source === "mock";
 
   return (
     <div className="page">
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "1.5rem", flexWrap: "wrap", gap: "0.5rem" }}>
-        <h1 className="page-title" style={{ margin: 0 }}>Cloud Analytics Dashboard</h1>
+        <h1 className="page-title" style={{ margin: 0 }}>Cloud Analytics Dashboard{deploymentId && ` — ${deploymentId}`}</h1>
         <div style={{ display: "flex", gap: "1rem", fontSize: "0.82rem", color: "#94a3b8" }}>
           <span><Pulse active={!rwError && rwData != null} />RisingWave {rwError ? `(${rwError})` : rwData?.source === "mock" ? "(mock)" : "live · push"}</span>
           <span><Pulse active={!tsdbError && tsdbData != null} />TimescaleDB {tsdbError ? `(${tsdbError})` : tsdbData?.source === "mock" ? "(mock)" : "live · push"}</span>

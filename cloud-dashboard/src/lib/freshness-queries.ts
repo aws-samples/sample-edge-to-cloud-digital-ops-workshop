@@ -67,26 +67,34 @@ function toPayload(
   };
 }
 
-export async function queryRisingWaveFreshness(pool: Pool): Promise<FreshnessPayload> {
+export async function queryRisingWaveFreshness(pool: Pool, deploymentId: string): Promise<FreshnessPayload> {
   const t0 = Date.now();
-  const { rows } = await pool.query<Row>(`
+  // #253: mv_sensor_fleet_latest and mv_device_hop_latency now hold every
+  // slot's rows in one shared MV (risingwave/ddl-cloud.sql) — deployment_id
+  // scopes each read to the caller's own slot.
+  const { rows } = await pool.query<Row>(
+    `
     SELECT
       site_id,
       AVG(CASE WHEN sensor = 'cpu_pct'      THEN 100.0 - value END) AS avg_free_cpu_pct,
       AVG(CASE WHEN sensor = 'mem_used_pct' THEN 100.0 - value END) AS avg_free_mem_pct,
       MAX(ts_ms)                                                     AS latest_ts_ms
     FROM mv_sensor_fleet_latest
+    WHERE deployment_id = $1
     GROUP BY site_id
     ORDER BY site_id
-  `);
+  `,
+    [deploymentId]
+  );
   const payload = toPayload(rows, "risingwave", Date.now() - t0);
 
-  // Device→ingest hop (#245): mv_device_hop_latency is a single-row bounded-
-  // window aggregate (risingwave/ddl-cloud.sql) — AVG is NULL when no recent
-  // row carries message_timestamp, which the FreshnessPayload contract treats
-  // as "no data" rather than an error.
+  // Device→ingest hop (#245): mv_device_hop_latency is now grouped by
+  // deployment_id (#253) — AVG is NULL when no recent row in this slot's
+  // window carries message_timestamp, which the FreshnessPayload contract
+  // treats as "no data" rather than an error.
   const { rows: hopRows } = await pool.query<{ avg_device_hop_ms: string | null }>(
-    `SELECT avg_device_hop_ms FROM mv_device_hop_latency`
+    `SELECT avg_device_hop_ms FROM mv_device_hop_latency WHERE deployment_id = $1`,
+    [deploymentId]
   );
   payload.deviceHopLatency.risingwave_ms =
     hopRows[0]?.avg_device_hop_ms != null ? parseFloat(hopRows[0].avg_device_hop_ms) : null;
@@ -94,7 +102,7 @@ export async function queryRisingWaveFreshness(pool: Pool): Promise<FreshnessPay
   return payload;
 }
 
-export async function queryTimescaleDbFreshness(pool: Pool): Promise<FreshnessPayload> {
+export async function queryTimescaleDbFreshness(pool: Pool, deploymentId: string): Promise<FreshnessPayload> {
   const t0 = Date.now();
   // Unlike RisingWave, TimescaleDB reads the RAW hypertable, not a pre-collapsed
   // MV — so the partition_time predicate is load-bearing for both the
@@ -118,16 +126,25 @@ export async function queryTimescaleDbFreshness(pool: Pool): Promise<FreshnessPa
   // 15 min is generous enough that steady-state telemetry always populates it;
   // if ingestion stalls longer, the query returns no rows (freshness → null),
   // correctly surfacing "no recent data" rather than a fast-but-stale number.
-  const { rows } = await pool.query<Row>(`
+  // #253: sensor_readings now holds every slot's rows in one shared
+  // hypertable — deployment_id (leading column of idx_sensor_readings_deployment,
+  // see helm/cloud-analytics/templates/timescaledb-cluster.yaml) scopes this
+  // read to the caller's own slot, same as the partition_time window keeps it
+  // chunk-excluded.
+  const { rows } = await pool.query<Row>(
+    `
     SELECT
       site_id,
       AVG(CASE WHEN sensor = 'cpu_pct'      THEN 100.0 - value END) AS avg_free_cpu_pct,
       AVG(CASE WHEN sensor = 'mem_used_pct' THEN 100.0 - value END) AS avg_free_mem_pct,
       MAX(ts_ms)                                                     AS latest_ts_ms
     FROM sensor_readings
-    WHERE partition_time > now() - interval '15 minutes'
+    WHERE deployment_id = $1
+      AND partition_time > now() - interval '15 minutes'
     GROUP BY site_id
     ORDER BY site_id
-  `);
+  `,
+    [deploymentId]
+  );
   return toPayload(rows, "timescaledb", Date.now() - t0);
 }

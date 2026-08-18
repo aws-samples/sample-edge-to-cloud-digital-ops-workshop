@@ -34,7 +34,7 @@ export default function RootLayout({
     <html lang="en">
       <body>
         <Authenticator>
-          {({ signOut, user }) => (
+          {({ signOut, user }: { signOut?: () => void; user?: { signInDetails?: { loginId?: string } } }) => (
             <main>
               <nav className="navbar">
                 <span className="navbar-title">Edge Digital Ops Workshop</span>

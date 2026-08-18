@@ -19,13 +19,12 @@ data:
           - "^sensors\\.raw\\."
           - "^raw\\.telemetry$"
         regexp_topics: true
-        # Slot-scope the consumer group. All slots' sinks read the SAME shared
-        # MSK topics (sensors.raw.*, raw.telemetry); a shared group name makes
-        # them one consumer group, so Kafka splits each topic's partitions
-        # across slots and every slot only sees a fraction of the messages (a
-        # fresh slot can see none). A per-slot group gives each slot its own
-        # independent offset cursor over the full topic set.
-        consumer_group: timescaledb-sink-{{ .Values.deploymentId }}
+        # #253: cloud-analytics is now ONE shared release reading the full,
+        # shared MSK topics for every slot — a single consumer group with one
+        # full-topic cursor is correct (there is no other consumer to split
+        # partitions against). deployment_id is carried per-record instead
+        # (see the mapping below) so a single sink can still tell slots apart.
+        consumer_group: timescaledb-sink
         tls:
           enabled: true
         sasl:
@@ -35,14 +34,17 @@ data:
 
     # Normalise messages from both topic shapes into the sensor_readings schema.
     #
-    # raw.telemetry carries flat IoT node metrics:
-    #   {thing_name, cpu_pct, mem_used_pct, disk_used_pct, net_io_bytes_sent,
-    #    net_io_bytes_recv, message_timestamp, mqtt_topic, ingest_ts}
-    #   → fan out into one message per metric (sensor, site_id, value, unit, ts_ms).
+    # raw.telemetry carries flat IoT node metrics, already stamped with
+    # deployment_id by the IoT rule (amplify/custom/participant-stack.ts):
+    #   {thing_name, deployment_id, cpu_pct, mem_used_pct, disk_used_pct,
+    #    net_io_bytes_sent, net_io_bytes_recv, message_timestamp, mqtt_topic, ingest_ts}
+    #   → fan out into one message per metric (sensor, site_id, value, unit, ts_ms),
+    #     carrying deployment_id through onto every fanned-out message.
     #
-    # sensors.raw.* topics carry pre-normalised industrial sensor messages:
+    # sensors.raw.* topics carry pre-normalised industrial sensor messages with
+    # no deployment_id field — site_id is `<deploymentId>-sim`, so #253 derives
+    # deployment_id from the `^ws-slot[0-9]+` prefix of site_id.
     #   {sensor, site_id, value, unit, ts_ms}
-    #   → pass through unchanged.
     #
     # A final mapping adds partition_time to every message regardless of origin.
     pipeline:
@@ -52,17 +54,19 @@ data:
               processors:
                 - mapping: |
                     root = [
-                      {"sensor": "cpu_pct",          "site_id": this.thing_name, "value": (this.cpu_pct | 0).number(),           "unit": "percent", "ts_ms": this.ingest_ts},
-                      {"sensor": "mem_used_pct",      "site_id": this.thing_name, "value": (this.mem_used_pct | 0).number(),      "unit": "percent", "ts_ms": this.ingest_ts},
-                      {"sensor": "disk_used_pct",     "site_id": this.thing_name, "value": (this.disk_used_pct | 0).number(),     "unit": "percent", "ts_ms": this.ingest_ts},
-                      {"sensor": "net_io_bytes_sent", "site_id": this.thing_name, "value": (this.net_io_bytes_sent | 0).number(), "unit": "bytes",   "ts_ms": this.ingest_ts},
-                      {"sensor": "net_io_bytes_recv", "site_id": this.thing_name, "value": (this.net_io_bytes_recv | 0).number(), "unit": "bytes",   "ts_ms": this.ingest_ts}
+                      {"sensor": "cpu_pct",          "site_id": this.thing_name, "deployment_id": this.deployment_id, "value": (this.cpu_pct | 0).number(),           "unit": "percent", "ts_ms": this.ingest_ts},
+                      {"sensor": "mem_used_pct",      "site_id": this.thing_name, "deployment_id": this.deployment_id, "value": (this.mem_used_pct | 0).number(),      "unit": "percent", "ts_ms": this.ingest_ts},
+                      {"sensor": "disk_used_pct",     "site_id": this.thing_name, "deployment_id": this.deployment_id, "value": (this.disk_used_pct | 0).number(),     "unit": "percent", "ts_ms": this.ingest_ts},
+                      {"sensor": "net_io_bytes_sent", "site_id": this.thing_name, "deployment_id": this.deployment_id, "value": (this.net_io_bytes_sent | 0).number(), "unit": "bytes",   "ts_ms": this.ingest_ts},
+                      {"sensor": "net_io_bytes_recv", "site_id": this.thing_name, "deployment_id": this.deployment_id, "value": (this.net_io_bytes_recv | 0).number(), "unit": "bytes",   "ts_ms": this.ingest_ts}
                     ]
                 - unarchive:
                     format: json_array
             - check: 'true'
               processors:
-                - mapping: 'root = this'
+                - mapping: |
+                    root = this
+                    root.deployment_id = this.site_id.re_replace_all("^(ws-slot[0-9]+).*", "$1")
         - mapping: |
             root = this
             root.partition_time = ((this.ts_ms / 60000).floor() * 60).ts_unix().format_timestamp("2006-01-02T15:04:00Z07:00")
@@ -75,6 +79,7 @@ data:
         columns:
           - sensor
           - site_id
+          - deployment_id
           - value
           - unit
           - ts_ms
@@ -83,6 +88,7 @@ data:
           root = [
             this.sensor,
             this.site_id,
+            this.deployment_id,
             this.value,
             this.unit,
             this.ts_ms,
