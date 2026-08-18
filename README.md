@@ -178,7 +178,8 @@ amplify/
 
 job-scripts/
   telemetry-v1.sh         # Shadow-driven telemetry config, integer-precision metrics (starting point)
-  telemetry-v2.sh         # Session 2 job exercise: 3-decimal measurement precision
+  telemetry-v2.sh         # Not committed — participants generate it in the Session 2 job exercise
+                          # (3-decimal measurement precision); see workshop/02-control/block-2-iot-job.md
   add-shadows.sh          # Deploys app-deployment and device-health shadow timers
   deploy-k3s.sh           # Installs K3s server/agent, writes kubeconfig to SSM
 
