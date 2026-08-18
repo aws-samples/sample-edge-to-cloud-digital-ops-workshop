@@ -103,6 +103,13 @@ function mockPayload(source: "risingwave" | "timescaledb" | "athena" | "influxdb
 
 export async function GET(req: NextRequest) {
   const tier = req.nextUrl.searchParams.get("tier") as "risingwave" | "timescaledb" | "athena" | "influxdb" | null;
+  // #253: cloud-analytics is now ONE shared instance for every slot — every
+  // read is scoped to the caller's own slot via `?did=` (the same param the
+  // browser's workshop/javascripts/deployment-id.js already persists), not a
+  // per-release env var. Falls back to WORKSHOP_DEPLOYMENT_ID (the pre-#253
+  // per-slot env var) only so a request with no `did` still resolves to
+  // *something* rather than silently querying an empty deployment_id.
+  const deploymentId = req.nextUrl.searchParams.get("did") ?? process.env.WORKSHOP_DEPLOYMENT_ID ?? "";
 
   if (tier === "risingwave") {
     const endpoint = process.env.RISINGWAVE_ENDPOINT;
@@ -111,7 +118,7 @@ export async function GET(req: NextRequest) {
     try {
       const { Pool } = await import("pg");
       const pool = new Pool({ connectionString: endpoint, connectionTimeoutMillis: 5000 });
-      const payload = await queryRisingWaveFreshness(pool);
+      const payload = await queryRisingWaveFreshness(pool, deploymentId);
       await pool.end();
       return NextResponse.json(payload);
     } catch (e: any) {
@@ -126,7 +133,7 @@ export async function GET(req: NextRequest) {
     try {
       const { Pool } = await import("pg");
       const pool = new Pool({ connectionString: endpoint, connectionTimeoutMillis: 5000 });
-      const payload = await queryTimescaleDbFreshness(pool);
+      const payload = await queryTimescaleDbFreshness(pool, deploymentId);
       await pool.end();
       return NextResponse.json(payload);
     } catch (e: any) {
@@ -149,9 +156,8 @@ export async function GET(req: NextRequest) {
     const workgroup = process.env.ATHENA_WORKGROUP ?? "workshop-shared";
     const table = process.env.ATHENA_TABLE ?? "telemetry";
     const region = process.env.AWS_REGION ?? "us-east-1";
-    // Optional: scope to one slot's rows. The Iceberg table is shared across
-    // slots and partitioned by deployment_id.
-    const deploymentId = process.env.WORKSHOP_DEPLOYMENT_ID;
+    // Scope to the caller's slot via `?did=` (see deploymentId above) — the
+    // Iceberg table is shared across slots and partitioned by deployment_id.
 
     try {
       const {
@@ -297,10 +303,14 @@ export async function GET(req: NextRequest) {
       // Latest point per (site_id, sensor) over the last 15m — enough to compute
       // freshness (now − MAX(ts)), per-node age, and fleet free CPU/mem, all off
       // the one dimensional sensor_reading schema Telegraf writes (see #230).
+      // #253: the bucket now holds every slot's points in one shared instance
+      // (helm/cloud-analytics/templates/telegraf-config.yaml tags each point
+      // with deployment_id) — filter on the caller's own slot via `?did=`.
+      const fluxDeploymentId = deploymentId.replace(/["\\]/g, "\\$&");
       const flux = `
         from(bucket: "${bucket}")
           |> range(start: -15m)
-          |> filter(fn: (r) => r._measurement == "sensor_reading" and r._field == "value")
+          |> filter(fn: (r) => r._measurement == "sensor_reading" and r._field == "value" and r.deployment_id == "${fluxDeploymentId}")
           |> group(columns: ["site_id", "sensor"])
           |> last()
       `;
