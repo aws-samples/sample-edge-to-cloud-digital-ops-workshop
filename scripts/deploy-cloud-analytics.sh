@@ -253,8 +253,7 @@ else
   TOPICS_PY="[\"sensors.raw.sim\", \"raw.telemetry\"] + [f\"sensors.raw.${DEPLOYMENT_ID}-edge-{i}\" for i in range(3)]"
 fi
 
-kubectl -n "$NAMESPACE" exec -i kafka-admin -- \
-  env MSK_BOOTSTRAP="$MSK_BOOTSTRAP" MSK_USER="$MSK_USER" MSK_PASS="$MSK_PASS" TOPICS_PY="$TOPICS_PY" python3 - <<'PYEOF'
+TOPIC_CREATE_PY=$(cat <<'PYEOF'
 import os
 from kafka.admin import KafkaAdminClient, NewTopic
 from kafka.errors import TopicAlreadyExistsError
@@ -271,6 +270,23 @@ for t in topics:
         print("exists", t)
 print("TOPICS:", sorted(admin.list_topics()))
 PYEOF
+)
+
+# Retry with backoff, same shape as the SCRAM-secret association retry loop
+# above: a just-associated SCRAM secret (shared mode) can take the brokers a
+# few seconds to propagate, and the admin client's first connection attempt
+# fails with "KafkaConnectionError: socket disconnected" until it does.
+TOPIC_CREATE_OK=false
+for attempt in $(seq 1 8); do
+  if kubectl -n "$NAMESPACE" exec -i kafka-admin -- \
+      env MSK_BOOTSTRAP="$MSK_BOOTSTRAP" MSK_USER="$MSK_USER" MSK_PASS="$MSK_PASS" TOPICS_PY="$TOPICS_PY" python3 - <<<"$TOPIC_CREATE_PY"; then
+    TOPIC_CREATE_OK=true
+    break
+  fi
+  echo "    attempt $attempt failed to create MSK topics (likely SCRAM-propagation lag) — retrying..."
+  sleep 15
+done
+[[ "$TOPIC_CREATE_OK" == "true" ]] || { echo "ERROR: failed to create MSK topics after 8 attempts." >&2; exit 1; }
 kubectl -n "$NAMESPACE" delete pod kafka-admin >/dev/null
 
 # ── 3b. Timestream for InfluxDB admin credentials (#229/#230) ───────────────
