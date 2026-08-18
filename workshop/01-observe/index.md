@@ -90,7 +90,7 @@ flowchart TD
     S3["S3 (Apache Iceberg)"]
     Athena["Athena"]
     AppSync["AppSync Events"]
-    UI["Cloud UI / Amplify<br/>(hosted cloud UI)"]
+    UI["Cloud UI (EKS)<br/>(served via ALB)"]
 
     IoTCore --> Rules
     MSK --> CloudRW -->|ALB SSE| UI

@@ -1,6 +1,6 @@
 dependencies:
 - name: connect
   repository: https://charts.redpanda.com
-  version: 3.2.24
-digest: sha256:d5ee2129d69d0f3358eb47e22e4a5dcffae699839fb12cf839478b9953eb156b
-generated: "2026-08-07T17:28:59.54422-05:00"
+  version: 3.2.25
+digest: sha256:4dfb9e443f38b5609112a422d98d8694f3c5c58a20d4308821a165c6a1a2766f
+generated: "2026-08-17T16:40:00.769134-05:00"

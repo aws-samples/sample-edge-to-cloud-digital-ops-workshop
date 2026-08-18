@@ -35,7 +35,7 @@ flowchart TB
         bridge_fn["λ AppSync Bridge"]
     end
 
-    subgraph amplify["Amplify — 1× per deployment"]
+    subgraph identity["Auth & Events — 1× per deployment"]
         cognito["Cognito User Pool"]
         appsync["AppSync Events API\nlive GraphQL subscriptions"]
     end
@@ -90,7 +90,7 @@ Each participant slot gets a unique **`DEPLOYMENT_ID`** (e.g., `ws-a1b2c3`). All
 | IoT Rule (MSK) | 1× per deployment | Same topic → Lambda → MSK `raw.telemetry`; Session 4 |
 | S3 bucket | 1× per deployment | IoT Rule writes JSON; Glue + Athena pre-created; Helm assets staged |
 | Athena workgroup | 1× per deployment | Engine v3; participants `AssumeRole` into it |
-| Amplify app + hosting | 1× per account, shared | Cognito user pool per deployment; AppSync Events API |
+| Cognito user pool + AppSync Events API | 1× per deployment | Per-slot auth; live GraphQL subscriptions |
 
 !!! info "VPC count"
     **2 shared VPCs total** (edge + cloud), regardless of participant count. Well within the default 5-VPC limit.
@@ -156,7 +156,6 @@ Devices publish OS metrics as soon as they register.
 
 ## References
 
-- [Amplify Gen 2 custom CDK backends](https://docs.amplify.aws/react/build-a-backend/add-aws-services/custom-resources/)
 - [AppSync Events HTTP publish](https://docs.aws.amazon.com/appsync/latest/eventapi/publish-http.html)
 - [IoT Fleet Provisioning by claim](https://docs.aws.amazon.com/iot/latest/developerguide/provision-wo-cert.html)
 - [IoT Rules Engine Kafka action](https://docs.aws.amazon.com/iot/latest/developerguide/apache-kafka-rule-action.html)

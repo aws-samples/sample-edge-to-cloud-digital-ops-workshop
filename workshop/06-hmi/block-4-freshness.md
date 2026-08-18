@@ -17,7 +17,7 @@ until grep -q "Forwarding from" /tmp/hmi-pf2.log 2>/dev/null; do sleep 1; done
 curl -sf http://localhost:3000 | head -c 200
 kill "$HMI_PF_PID" 2>/dev/null || true
 
-# (Cloud Amplify front end loads from its hosted URL — no port-forward needed)
+# (Cloud UI is served from EKS via its ALB URL — no port-forward needed)
 ```
 <!-- e2e:assert {"contains": "<"} -->
 

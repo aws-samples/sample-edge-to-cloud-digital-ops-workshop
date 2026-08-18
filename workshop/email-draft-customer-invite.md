@@ -34,7 +34,7 @@ Over 7 sessions, you'll build a complete edge-to-cloud pipeline from scratch:
 |---|---------|----------------|
 | 1 | **Observe** | IoT Core → Firehose → S3 → Athena; measure data freshness end-to-end |
 | 2 | **Control** | IoT Jobs, device updates, fleet indexing |
-| 3 | **State** | Named device shadows, Amplify front end, failure detection |
+| 3 | **State** | Named device shadows, cloud UI, failure detection |
 | 4 | **Analytics** | RisingWave materialized views, TimescaleDB continuous aggregates, freshness comparison |
 | 5 | **Edge Infrastructure** | K3s cluster via IoT Job, Helm edge stack (Redpanda, RisingWave, TimescaleDB) |
 | 6 | **HMI** | P&ID site view, Digital Ops metrics page, network failure simulation |

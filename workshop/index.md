@@ -104,7 +104,7 @@ The deep technical detail — the layered mental model, the full architecture di
 | Pre | [Admin Setup](00-prerequisites/index.md) | Deploy the platform stack |
 | 1 | [Observe — The Data in Motion](01-observe/index.md) | IoT Core → Firehose → S3 → Athena |
 | 2 | [Control — Fleet Management](02-control/index.md) | IoT Jobs, device update, fleet indexing |
-| 3 | [State — Device Shadows & UI](03-state/index.md) | Named shadows, Amplify front end, failure detection |
+| 3 | [State — Device Shadows & UI](03-state/index.md) | Named shadows, cloud UI, failure detection |
 | 4 | [Analytics — Cloud Telemetry](04-analytics/index.md) | RisingWave MVs, TimescaleDB CAGGs, freshness comparison |
 | 5 | [Edge Infrastructure — K3s](05-edge-infra/index.md) | K3s cluster via IoT Job, Helm edge stack |
 | 6 | [HMI — Edge Operator Interface](06-hmi/index.md) | P&ID site view, Digital Ops metrics, network failure |

@@ -7,8 +7,8 @@ edge-digital-ops-workshop/
 │   └── custom/
 │       ├── platform-app.ts         # CDK app entry: platform + one set of nested stacks per slot (WORKSHOP_SLOTS)
 │       ├── platform-stack.ts       # Shared VPCs, subnets, route tables, EKS, MSK, Firehose, S3
-│       ├── auth-stack.ts           # Per-slot NestedStack: Cognito user pool + client + identity pool (was Amplify defineAuth)
-│       ├── data-stack.ts           # Per-slot NestedStack: AppSync GraphQL API + JS resolvers (was Amplify defineData)
+│       ├── auth-stack.ts           # Per-slot NestedStack: Cognito user pool + client + identity pool
+│       ├── data-stack.ts           # Per-slot NestedStack: AppSync GraphQL API + JS resolvers
 │       ├── schema.graphql          # AppSync SDL consumed by data-stack.ts
 │       ├── participant-stack.ts    # Per-slot NestedStack: EC2, IoT, MSK topics, S3, AppSync Events
 │       ├── orchestrator-app.ts     # CDK app entry for the deploy orchestrator (deployed once per account)
@@ -41,7 +41,7 @@ edge-digital-ops-workshop/
 │   ├── delete-slot.sh              # Remove ONE slot: runtime cleanup + drop from list + platform update
 │   ├── trigger-deploy.sh           # Fire-and-forget: start the orchestrator CodeBuild, print the build-id handle
 │   ├── poll-deploy.sh              # Poll a deploy handle (CodeBuild build id) to completion
-│   ├── gen-amplify-outputs.sh      # Rebuild frontend/amplify_outputs.json from a slot's SSM params (replaces ampx output)
+│   ├── gen-amplify-outputs.sh      # Rebuild the frontend's client config from a slot's SSM params
 │   └── teardown.sh                 # Ordered per-slot runtime cleanup
 ├── e2e/                            # Doc-runner: executes annotated bash blocks in workshop/*.md
 │   │                               #   against a live slot; the published docs ARE the test suite
@@ -82,7 +82,7 @@ Participant) under `amplify/custom/` are **synthesized directly from the
 TypeScript** every time you run `pnpm run sandbox <slot>` or
 `pnpm run sandbox:all <slots>`. There is now a **single deploy target** —
 `WorkshopPlatformStack`, driven by the `WORKSHOP_SLOTS` list — rather than a
-separate `ampx sandbox` backend per slot. Edit `participant-stack.ts`, re-run the
+separate managed backend per slot. Edit `participant-stack.ts`, re-run the
 sandbox, and the change is live; there is no intermediate artefact to rebuild.
 Because the slot list is authoritative, the deploy scripts union the requested
 slots with the persisted active set in SSM (`scripts/slot-list.sh`) so bringing
