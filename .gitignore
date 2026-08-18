@@ -29,6 +29,12 @@ e2e/reports/
 # Local test scripts (not for distribution)
 job-scripts/telemetry-v4.sh
 
+# #257: telemetry-v2.sh is the Session 2 IoT Job exercise deliverable —
+# block-2-iot-job.md has participants generate it from telemetry-v1.sh, so it
+# must not be a pre-existing committed file (that would spoil the exercise and
+# the before/after precision demo).
+job-scripts/telemetry-v2.sh
+
 # Python / MkDocs
 .venv
 __pycache__
