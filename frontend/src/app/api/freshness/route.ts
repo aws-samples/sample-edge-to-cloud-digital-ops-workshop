@@ -45,6 +45,11 @@ function mockPayload(source: "risingwave" | "timescaledb" | "athena" | "mock"): 
 
 export async function GET(req: NextRequest) {
   const tier = req.nextUrl.searchParams.get("tier") as "risingwave" | "timescaledb" | null;
+  // #253: cloud-analytics is now ONE shared instance for every slot — scope
+  // every read to the caller's own slot via `?did=` (mirrors cloud-dashboard's
+  // freshness route). Falls back to WORKSHOP_DEPLOYMENT_ID (the pre-#253
+  // per-slot env var) so a request with no `did` still resolves to something.
+  const deploymentId = req.nextUrl.searchParams.get("did") ?? process.env.WORKSHOP_DEPLOYMENT_ID ?? "";
 
   if (tier === "risingwave") {
     const endpoint = process.env.RISINGWAVE_ENDPOINT;
@@ -55,22 +60,27 @@ export async function GET(req: NextRequest) {
       const pool = new Pool({ connectionString: endpoint, connectionTimeoutMillis: 5000 });
       const now = Date.now();
 
-      // All three datasets from mv_sensor_fleet_latest in one query
+      // All three datasets from mv_sensor_fleet_latest in one query, scoped to
+      // this slot (the shared MV now holds every slot's rows — #253).
       const { rows } = await pool.query<{
         site_id: string;
         avg_free_cpu_pct: string | null;
         avg_free_mem_pct: string | null;
         latest_ts_ms: string;
-      }>(`
+      }>(
+        `
         SELECT
           site_id,
           AVG(CASE WHEN sensor = 'cpu_pct'      THEN 100.0 - value END) AS avg_free_cpu_pct,
           AVG(CASE WHEN sensor = 'mem_used_pct' THEN 100.0 - value END) AS avg_free_mem_pct,
           MAX(ts_ms)                                                     AS latest_ts_ms
         FROM mv_sensor_fleet_latest
+        WHERE deployment_id = $1
         GROUP BY site_id
         ORDER BY site_id
-      `);
+      `,
+        [deploymentId]
+      );
       await pool.end();
 
       const latestTs = rows.length > 0 ? Math.max(...rows.map(r => Number(r.latest_ts_ms))) : 0;
@@ -118,16 +128,20 @@ export async function GET(req: NextRequest) {
         avg_free_cpu_pct: string | null;
         avg_free_mem_pct: string | null;
         latest_ts_ms: string;
-      }>(`
+      }>(
+        `
         SELECT
           site_id,
           AVG(CASE WHEN sensor = 'cpu_pct'      THEN 100.0 - value END) AS avg_free_cpu_pct,
           AVG(CASE WHEN sensor = 'mem_used_pct' THEN 100.0 - value END) AS avg_free_mem_pct,
           MAX(ts_ms)                                                     AS latest_ts_ms
         FROM sensor_readings
+        WHERE deployment_id = $1
         GROUP BY site_id
         ORDER BY site_id
-      `);
+      `,
+        [deploymentId]
+      );
       await pool.end();
 
       const latestTs = rows.length > 0 ? Math.max(...rows.map(r => Number(r.latest_ts_ms))) : 0;
@@ -174,9 +188,8 @@ export async function GET(req: NextRequest) {
     const workgroup = process.env.ATHENA_WORKGROUP ?? "workshop-shared";
     const table = process.env.ATHENA_TABLE ?? "telemetry";
     const region = process.env.AWS_REGION ?? "us-east-1";
-    // Optional: scope to one slot's rows. The Iceberg table is shared across
-    // slots and partitioned by deployment_id.
-    const deploymentId = process.env.WORKSHOP_DEPLOYMENT_ID;
+    // Scope to the caller's slot via `?did=` (see deploymentId above) — the
+    // Iceberg table is shared across slots and partitioned by deployment_id.
 
     try {
       const {

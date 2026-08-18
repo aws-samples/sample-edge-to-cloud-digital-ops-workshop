@@ -30,9 +30,16 @@ export default function FreshnessPage() {
     loading: true,
   });
 
+  // #253: cloud-analytics is now one shared instance for every slot — forward
+  // the same `?deployment` param the fleet page reads to /api/freshness as
+  // `did`, so this page's reads are scoped to the caller's own slot.
+  const deploymentId = typeof window !== "undefined"
+    ? new URLSearchParams(window.location.search).get("deployment") ?? ""
+    : "";
+
   const fetchTier = async (tier: "risingwave" | "timescaledb") => {
     try {
-      const res = await fetch(`/api/freshness?tier=${tier}`);
+      const res = await fetch(`/api/freshness?tier=${tier}&did=${encodeURIComponent(deploymentId)}`);
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       const setter = tier === "risingwave" ? setRisingwave : setTimescale;
