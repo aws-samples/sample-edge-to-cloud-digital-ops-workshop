@@ -114,7 +114,7 @@ pnpm run sandbox:all ws-slot00 ws-slot01 ws-slot02 ws-slot03 ws-slot04 ws-slot05
 ```
 
 !!! info "What `pnpm sandbox:all` does"
-    `scripts/sandbox-all.sh` runs a **single** `cdk deploy` of `WorkshopPlatformStack` — the shared VPCs/EKS/MSK plus, as nested stacks, every listed slot's Auth/Data/Participant resources (driven by `WORKSHOP_SLOTS`). It then runs the per-slot post-deploy tail (`scripts/post-deploy-slot.sh`: device-registration wait, shadow seeding, K3s + cloud-analytics pre-warm) in parallel. Logs are prefixed with `[ws-slot00]` etc. for readability.
+    `scripts/sandbox-all.sh` runs a **single** `cdk deploy` of `WorkshopPlatformStack` — the shared VPCs/EKS/MSK plus, as nested stacks, every listed slot's Auth/Data/Participant resources (driven by `WORKSHOP_SLOTS`). It then deploys the **one shared** `cloud-analytics` release for the whole workshop (`scripts/deploy-cloud-analytics.sh --shared` — #253) before running the per-slot post-deploy tail (`scripts/post-deploy-slot.sh`: device-registration wait, shadow seeding, K3s pre-warm) in parallel. Logs are prefixed with `[ws-slot00]` etc. for readability.
 
 !!! tip "Single participant"
     To deploy or iterate on one environment: `pnpm run sandbox ws-a1b2c3`

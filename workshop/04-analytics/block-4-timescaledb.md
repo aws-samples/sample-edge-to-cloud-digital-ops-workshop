@@ -17,7 +17,7 @@ time when a read gets too expensive. Contrast it with [Block 2](block-2-risingwa
 All telemetry lands in a single hypertable:
 
 ```
-sensor_readings(ts_ms, sensor, site_id, value, unit, partition_time)
+sensor_readings(ts_ms, sensor, site_id, deployment_id, value, unit, partition_time)
 ```
 
 One row per metric per reading. CPU readings arrive as rows where `sensor = 'cpu_pct'`,
@@ -26,12 +26,19 @@ device just appends narrow rows; nothing is rolled up, indexed into a cube, or
 propagated through a compute graph on the way in. Everything interesting happens
 later, when you query.
 
+!!! info "One shared hypertable, filtered by `deployment_id`"
+    This TimescaleDB cluster is **one shared instance for the whole workshop**, not one
+    per slot — `sensor_readings` holds every slot's rows in the same hypertable.
+    `deployment_id` leads a composite index (`idx_sensor_readings_deployment`) precisely
+    so a `WHERE deployment_id = 'ws-slot00'` predicate stays index-scoped instead of
+    scanning every slot's data — add it to every query below.
+
 ## Connect and query
 
 With a port-forward to the cluster's read-write service open, connect with `psql`:
 
 ```bash
-kubectl port-forward -n ws-slot00 svc/timescaledb-cloud-rw 5432:5432 &
+kubectl port-forward -n cloud-analytics svc/timescaledb-cloud-rw 5432:5432 &
 PGPASSWORD="$TSDB_PASS" psql -h localhost -p 5432 -U workshop -d edge -c "SELECT 1;"
 ```
 <!-- e2e:assert {"contains": "1 row"} -->
@@ -48,9 +55,19 @@ time: it pre-materialises the buckets and keeps them current with a background
 refresh policy, so the read becomes a flat lookup of a few rows instead of a scan
 of thousands.
 
+!!! warning "Name your CAGG with your slot — this database is shared"
+    Every participant runs this exercise against the **same shared** TimescaleDB
+    instance (#253). If everyone names their view `cpu_hourly`, the second participant's
+    `CREATE MATERIALIZED VIEW IF NOT EXISTS` silently no-ops and reuses the *first*
+    participant's object instead of creating their own. Suffix the name with your slot
+    (hyphens aren't valid in a Postgres identifier, so `ws-slot00` becomes `ws_slot00`) —
+    the examples below already do this.
+
 ```sql
--- Hourly CPU summary — pre-computes buckets so reads don't re-aggregate raw rows
-CREATE MATERIALIZED VIEW cpu_hourly
+-- Hourly CPU summary, this slot only — pre-computes buckets so reads don't
+-- re-aggregate raw rows. Slot-prefixed name + deployment_id filter avoid
+-- colliding with every other participant's object in the shared database.
+CREATE MATERIALIZED VIEW cpu_hourly_ws_slot00
 WITH (timescaledb.continuous) AS
 SELECT
   time_bucket('1 hour', partition_time) AS bucket,
@@ -59,10 +76,11 @@ SELECT
   MAX(value) AS max_cpu
 FROM sensor_readings
 WHERE sensor = 'cpu_pct'
+  AND deployment_id = 'ws-slot00'
 GROUP BY bucket, site_id;
 
 -- Refresh policy — this is where the deferred write-time work is scheduled
-SELECT add_continuous_aggregate_policy('cpu_hourly',
+SELECT add_continuous_aggregate_policy('cpu_hourly_ws_slot00',
   start_offset      => INTERVAL '3 hours',
   end_offset        => INTERVAL '1 hour',
   schedule_interval => INTERVAL '30 minutes');
@@ -73,7 +91,7 @@ make it safe to re-run):
 
 ```bash
 PGPASSWORD="$TSDB_PASS" psql -h localhost -p 5432 -U workshop -d edge -v ON_ERROR_STOP=1 <<'SQL'
-CREATE MATERIALIZED VIEW IF NOT EXISTS cpu_hourly
+CREATE MATERIALIZED VIEW IF NOT EXISTS cpu_hourly_ws_slot00
 WITH (timescaledb.continuous) AS
 SELECT time_bucket('1 hour', partition_time) AS bucket,
        site_id,
@@ -81,9 +99,10 @@ SELECT time_bucket('1 hour', partition_time) AS bucket,
        MAX(value) AS max_cpu
 FROM sensor_readings
 WHERE sensor = 'cpu_pct'
+  AND deployment_id = 'ws-slot00'
 GROUP BY bucket, site_id;
 
-SELECT add_continuous_aggregate_policy('cpu_hourly',
+SELECT add_continuous_aggregate_policy('cpu_hourly_ws_slot00',
   start_offset      => INTERVAL '3 hours',
   end_offset        => INTERVAL '1 hour',
   schedule_interval => INTERVAL '30 minutes',
@@ -99,7 +118,7 @@ SQL
 By default the CAGG is `materialized_only = true` — data newer than the last refresh is silently excluded. Enable real-time aggregation to fill the gap:
 
 ```sql
-ALTER MATERIALIZED VIEW cpu_hourly
+ALTER MATERIALIZED VIEW cpu_hourly_ws_slot00
   SET (timescaledb.materialized_only = false);
 ```
 
@@ -160,11 +179,11 @@ Compare freshness with real-time aggregation on vs off:
 
 ```sql
 -- With materialized_only = true: latest bucket may be ~1h stale
-SELECT MAX(bucket) AS latest_bucket FROM cpu_hourly;
+SELECT MAX(bucket) AS latest_bucket FROM cpu_hourly_ws_slot00;
 
 -- After ALTER ... SET (timescaledb.materialized_only = false):
 -- Latest bucket now reflects data up to NOW()
-SELECT MAX(bucket) AS latest_bucket FROM cpu_hourly;
+SELECT MAX(bucket) AS latest_bucket FROM cpu_hourly_ws_slot00;
 ```
 
 ---

@@ -159,6 +159,15 @@ it now and keep it up as you work through the rest of the session — Blocks 2�
 
 It runs in-cluster with no public endpoint, so reach it with `kubectl port-forward`.
 
+!!! info "One shared dashboard for every slot"
+    `cloud-analytics` used to be a separate release per slot; it's now **one shared
+    instance** (RisingWave + TimescaleDB + this dashboard) for the whole workshop,
+    living in the `cloud-analytics` namespace rather than your own — every slot's data
+    flows through it, filtered by `deployment_id`. You scope every read to *your* slot
+    by appending `?did=ws-slot00` to the dashboard URL — the same param
+    `workshop/javascripts/deployment-id.js` already substitutes with your real slot ID
+    elsewhere in these docs.
+
 1. Point `kubectl` at the shared cluster:
 
     ```bash
@@ -166,11 +175,13 @@ It runs in-cluster with no public endpoint, so reach it with `kubectl port-forwa
     ```
 
     !!! info "Namespace-scoped access via IAM"
-        If you're a participant without cluster-admin, your operations are scoped to your
-        own namespace (`ws-slot00`) via `WorkshopParticipantRole-ws-slot00`. Add
+        If you're a participant without cluster-admin, your operations are normally
+        scoped to your own namespace (`ws-slot00`) via `WorkshopParticipantRole-ws-slot00`.
+        Reaching the shared `cloud-analytics` namespace's dashboard Service additionally
+        requires your admin to have granted that role read access there (it's shared
+        cluster-wide infrastructure, not slot-scoped). Add
         `--role-arn arn:aws:iam::000000000000:role/WorkshopParticipantRole-ws-slot00` to the
-        command above, once your admin has granted your IAM identity `sts:AssumeRole` on
-        that role.
+        command above once that's in place.
 
 2. Start the port-forward on local port `8888` (`3000` is commonly taken by other dev
    servers). This clears any stale forwarder first, so it's safe to re-run:
@@ -178,7 +189,7 @@ It runs in-cluster with no public endpoint, so reach it with `kubectl port-forwa
     ```bash
     # Clear any previous forwarder on 8888 so this is safe to re-run.
     pkill -f "port-forward.*svc/cloud-analytics-dashboard" 2>/dev/null && sleep 1
-    kubectl port-forward -n ws-slot00 svc/cloud-analytics-dashboard 8888:3000 > /tmp/dashboard-pf.log 2>&1 &
+    kubectl port-forward -n cloud-analytics svc/cloud-analytics-dashboard 8888:3000 > /tmp/dashboard-pf.log 2>&1 &
     DASH_PF_PID=$!
     # Wait for the forward to come up, but bail if it dies (e.g. port in use, RBAC) instead of looping forever.
     for _ in $(seq 30); do
@@ -187,15 +198,16 @@ It runs in-cluster with no public endpoint, so reach it with `kubectl port-forwa
       sleep 1
     done
     curl -sf http://localhost:8888 | head -c 200
-    echo "Port-forward running (PID $DASH_PF_PID) — open http://localhost:8888 in your browser."
+    echo "Port-forward running (PID $DASH_PF_PID) — open http://localhost:8888/?did=ws-slot00 in your browser."
     ```
     <!-- e2e:assert {"contains": "<"} -->
 
-3. **Open [http://localhost:8888](http://localhost:8888) in your web browser.** You
-   should see the four-tier freshness comparison — RisingWave and TimescaleDB updating
-   live, Timestream for InfluxDB and Athena on their slower cadences. If a tier shows
-   `(mock)` or is empty, its telemetry source isn't live yet — that's expected until
-   your edge nodes are running (Session 5).
+3. **Open [http://localhost:8888/?did=ws-slot00](http://localhost:8888/?did=ws-slot00) in
+   your web browser** — the `?did=` scopes every panel to your own slot on the shared
+   instance. You should see the four-tier freshness comparison — RisingWave and
+   TimescaleDB updating live, Timestream for InfluxDB and Athena on their slower
+   cadences. If a tier shows `(mock)` or is empty, its telemetry source isn't live yet —
+   that's expected until your edge nodes are running (Session 5).
 
 The port-forward stays up in the background. When you're done, stop it with
 `kill "$DASH_PF_PID"`.

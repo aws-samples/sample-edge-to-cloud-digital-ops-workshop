@@ -158,11 +158,13 @@ Log in with user `admin`, password `workshop`, then:
 ## Part B — Cloud cluster (shared EKS)
 
 On the shared EKS cluster there is **one** Prometheus + Grafana for everyone,
-installed cluster-scoped by `scripts/deploy-cloud-analytics.sh` (alongside
-cert-manager and the operators) — so if you deployed your slot with that script,
-**it's already running**. Each slot's `cloud-analytics` release emits its own
-PodMonitors, which the shared Prometheus discovers, so every slot appears in the
-same Grafana filtered by namespace.
+installed cluster-scoped by `scripts/deploy-cloud-analytics.sh --shared` (alongside
+cert-manager and the operators) — so if the facilitator already deployed the
+shared cloud-analytics release, **it's already running**. `cloud-analytics` is
+now one shared release for every slot (#253), not one per slot, and it emits
+one set of PodMonitors in the `cloud-analytics` namespace — every slot's
+RisingWave/TimescaleDB telemetry flows through those same monitors, filtered
+by `deployment_id` rather than by namespace.
 
 ??? example "View source — cluster-scoped monitoring install in the deploy script"
     [:simple-github: Open in GitHub](https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop/blob/main/scripts/deploy-cloud-analytics.sh){ .md-button target=_blank }
@@ -180,19 +182,20 @@ kubectl get pods -n monitoring
 <!-- e2e:assert {"contains": "monitoring-grafana"} -->
 
 If the `monitoring` namespace is empty, the cluster-scoped install hasn't run —
-re-run `scripts/deploy-cloud-analytics.sh --deployment-id ws-slot00` (without
+re-run `scripts/deploy-cloud-analytics.sh --shared` (without
 `--skip-cluster-scoped`), or install it by hand with
 `helm/monitoring-values-cloud.yaml`.
 
-### Step 2 — Confirm your slot's monitors exist
+### Step 2 — Confirm the shared release's monitors exist
 
 ```bash
-kubectl get podmonitors -n ws-slot00
+kubectl get podmonitors -n cloud-analytics
 ```
 <!-- e2e:assert {"contains": "risingwave-cloud"} -->
 
 You should see the RisingWave PodMonitor and the CNPG-managed TimescaleDB
-PodMonitor for your namespace.
+PodMonitor for the shared `cloud-analytics` namespace — every slot's data
+flows through these same two monitors (#253).
 
 ### Step 3 — Open Grafana
 
@@ -207,8 +210,12 @@ kill "$GRAFANA_PF_PID" 2>/dev/null || true
 <!-- e2e:assert {"contains": "200"} -->
 
 Open **http://localhost:3002** (admin / `workshop`) and find **Cloud
-Analytics — Health (ws-slot00)**. Use the `namespace` dropdown at the top to
-switch between slots and compare.
+Analytics — Health (cloud-analytics)** — pod/container-level health (restarts,
+CPU, memory, RisingWave barrier latency, CNPG connections) for the one shared
+release. This is cluster-level metrics, not `deployment_id`-scoped (#253), so
+it reflects every slot's traffic together — the `namespace` dropdown at the
+top still exists but has nothing else to switch to now that there's only the
+one shared release.
 
 ---
 
@@ -249,7 +256,7 @@ You now have both a *what's-deployed* view (`k9s`) and a *health-over-time* view
 
 ```
 Edge K3s      → kube-prometheus-stack (trimmed) → Grafana "Edge Data Stack — Health"
-Shared EKS    → kube-prometheus-stack (shared)   → Grafana "Cloud Analytics — Health", per-namespace
+Shared EKS    → kube-prometheus-stack (shared)   → Grafana "Cloud Analytics — Health" (one shared release, #253)
 Both          → k9s (local binary, current kubeconfig)
 ```
 

@@ -84,8 +84,10 @@ is why both tiers can answer the identical fleet-freshness question.
 TimescaleDB is fed by Redpanda Connect; the managed tier is fed by **Telegraf**,
 InfluxData's own agent, reading the **same MSK topics**. Conceptually the path is
 short: **MSK → Telegraf → line protocol** (`measurement,tag=v field=v timestamp`)
-written to the per-slot bucket. Telegraf consumes the Kafka topics, maps the JSON
-onto the dimensional model above, and writes points out on a flush interval.
+written to one shared bucket for the whole workshop. Telegraf consumes the Kafka
+topics, maps the JSON onto the dimensional model above, tags every point with
+`deployment_id` (derived from `site_id` for sim/sensor points, carried through from
+the raw record for node telemetry), and writes points out on a flush interval.
 
 Every point is timestamped with `ts_ms` — the IoT-Core **ingest** epoch-ms, the
 same basis every other tier uses — so the freshness numbers on the dashboard are
@@ -113,45 +115,48 @@ store lets you choose per query which side of that trade to pay on.
 ## Read the store's shape with Flux
 
 The clearest way to *understand* a store is to query it. Point a Flux client at the
-per-slot bucket and ask for the newest point per series — the same query shape the
-dashboard's `/api/freshness?tier=influxdb` route runs. The instance is VPC-private,
-so read its connection details from the in-cluster credentials Secret and reach it
-over a short-lived port-forward:
+shared bucket and ask for the newest point per series — the same query shape the
+dashboard's `/api/freshness?tier=influxdb` route runs, filtered to your own slot via
+`deployment_id`. The instance is VPC-private, so read its connection details from the
+in-cluster credentials Secret and reach it over a short-lived port-forward:
 
 ```bash
-# Connection details for the per-slot bucket (URL, token, org, bucket name).
-IX_URL=$(kubectl get secret influxdb-credentials -n ws-slot00 -o jsonpath='{.data.INFLUX_URL}' | base64 -d)
-IX_TOKEN=$(kubectl get secret influxdb-credentials -n ws-slot00 -o jsonpath='{.data.INFLUX_TOKEN}' | base64 -d)
-IX_ORG=$(kubectl get secret influxdb-credentials -n ws-slot00 -o jsonpath='{.data.INFLUX_ORG}' | base64 -d)
-IX_BUCKET=$(kubectl get secret influxdb-credentials -n ws-slot00 -o jsonpath='{.data.INFLUX_BUCKET}' | base64 -d)
+# Connection details for the shared bucket (URL, token, org, bucket name) — this
+# instance is one shared release for the whole workshop (#253), so its Secret
+# lives in the shared cloud-analytics namespace, not your own.
+IX_URL=$(kubectl get secret influxdb-credentials -n cloud-analytics -o jsonpath='{.data.INFLUX_URL}' | base64 -d)
+IX_TOKEN=$(kubectl get secret influxdb-credentials -n cloud-analytics -o jsonpath='{.data.INFLUX_TOKEN}' | base64 -d)
+IX_ORG=$(kubectl get secret influxdb-credentials -n cloud-analytics -o jsonpath='{.data.INFLUX_ORG}' | base64 -d)
+IX_BUCKET=$(kubectl get secret influxdb-credentials -n cloud-analytics -o jsonpath='{.data.INFLUX_BUCKET}' | base64 -d)
 IX_HOST=$(echo "$IX_URL" | sed -E 's#^https?://##; s#:.*##')
-kubectl run influx-q-$$ -n ws-slot00 --image=alpine/socat --restart=Never --command -- \
+kubectl run influx-q-$$ -n cloud-analytics --image=alpine/socat --restart=Never --command -- \
   socat TCP-LISTEN:8086,fork,reuseaddr "TCP:${IX_HOST}:8086" >/dev/null 2>&1 || true
-kubectl wait --for=condition=Ready pod/influx-q-$$ -n ws-slot00 --timeout=60s >/dev/null 2>&1 || true
-kubectl port-forward -n ws-slot00 pod/influx-q-$$ 8086:8086 > /tmp/ix-q-pf.log 2>&1 &
+kubectl wait --for=condition=Ready pod/influx-q-$$ -n cloud-analytics --timeout=60s >/dev/null 2>&1 || true
+kubectl port-forward -n cloud-analytics pod/influx-q-$$ 8086:8086 > /tmp/ix-q-pf.log 2>&1 &
 IX_PF_PID=$!
 until grep -q "Forwarding from" /tmp/ix-q-pf.log 2>/dev/null; do sleep 1; done
 ```
 
-Now ask for the newest point per series:
+Now ask for the newest point per series, scoped to your own slot:
 
 ```bash
-# Count series and show the most recent reading per (site_id, sensor).
+# Count series and show the most recent reading per (site_id, sensor) for ws-slot00.
 curl -sf -k "https://localhost:8086/api/v2/query?org=${IX_ORG}" \
   -H "Authorization: Token ${IX_TOKEN}" \
   -H 'Accept: application/csv' \
   -H 'Content-Type: application/vnd.flux' \
-  -d 'from(bucket:"'"$IX_BUCKET"'") |> range(start:-15m) |> filter(fn:(r)=> r._measurement=="sensor_reading" and r._field=="value") |> group(columns:["site_id","sensor"]) |> last()'
+  -d 'from(bucket:"'"$IX_BUCKET"'") |> range(start:-15m) |> filter(fn:(r)=> r._measurement=="sensor_reading" and r._field=="value" and r.deployment_id=="ws-slot00") |> group(columns:["site_id","sensor"]) |> last()'
 kill "$IX_PF_PID" 2>/dev/null || true
-kubectl delete pod influx-q-$$ -n ws-slot00 --wait=false >/dev/null 2>&1 || true
+kubectl delete pod influx-q-$$ -n cloud-analytics --wait=false >/dev/null 2>&1 || true
 ```
 <!-- e2e:assert {"contains": "sensor_reading"} -->
 
 Read the pipeline left to right — it *is* the dimensional model in action:
 
 1. `from(bucket:…) |> range(start:-15m)` — scan the last 15 minutes of the bucket.
-2. `filter(… r._measurement=="sensor_reading" and r._field=="value")` — one
-   measurement family, one field.
+2. `filter(… r._measurement=="sensor_reading" and r._field=="value" and
+   r.deployment_id=="ws-slot00")` — one measurement family, one field, your slot
+   only (the bucket holds every slot's points — #253).
 3. `group(columns:["site_id","sensor"])` — regroup by the two identity tags, i.e.
    one group **per series**.
 4. `last()` — the newest point in each group.
@@ -176,6 +181,6 @@ tier holding the identical fleet view TimescaleDB serves next door.
   as the 4th bar (`live · poll`, cyan) alongside RisingWave, TimescaleDB, and
   Athena, and its CLI section has a matching InfluxDB freshness block the e2e suite
   records.
-- The **[decisions log](../reference/decisions.md)** captures why the tier is a
-  shared instance with per-slot buckets, and why Telegraf (not a second Redpanda
-  Connect pipeline) is the ingest path.
+- The **[decisions log](../reference/decisions.md)** captures why the tier is one
+  shared instance and bucket for every slot, and why Telegraf (not a second
+  Redpanda Connect pipeline) is the ingest path.
