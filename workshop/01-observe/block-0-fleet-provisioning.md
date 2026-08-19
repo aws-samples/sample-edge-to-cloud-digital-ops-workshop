@@ -17,6 +17,16 @@
 !!! tip "The sharpest distinction"
     By-claim and JITP/JITR both look like "device self-registers on first connection," but they differ fundamentally. With **by-claim** the device arrives as a blank slate and AWS mints its identity on first boot. With **JITP/JITR** the device already holds its permanent identity from the factory floor — AWS just learns about it when it first connects.
 
+!!! info "AWS IoT CA vs. JITP — it's about the factory's trust boundary, not the cert"
+    You can also give a device a permanent, unique identity **at manufacturing time** using the AWS IoT CA — mint a per-device cert (via `CreateCertificateFromCsr`, so the private key never leaves the secure element) and flash it in. That produces an identity that is **cryptographically just as strong** as a JITP identity signed by your own CA. So JITP is *not* "the more secure cert."
+
+    The biggest real difference is **whether the location where the image is flashed onto the device has access to your AWS environment:**
+
+    - **AWS IoT CA at the factory** — the flashing station must hold **live credentials to your AWS account** and call AWS IoT **per unit**. That extends your account's trust boundary onto the factory floor (often a third-party contract manufacturer) and couples line throughput to your cloud being reachable.
+    - **JITP with a CA you own** (e.g. **AWS Private CA**) — the factory signs certs **locally with the CA**, never touching your AWS account. The manufacturer can even run their own AWS Private CA in their **own** AWS account; you just register that CA's public cert in your IoT account. No cross-account credentials, no per-unit call to your cloud.
+
+    So the trade-off is a **process / trust-boundary** property, not a property of the identity. If the factory *is* trusted with your AWS credentials and has reliable connectivity (e.g. it's your own facility), minting via AWS IoT CA is a sound, equally-secure design with less machinery. JITP earns its keep when you **can't or won't put your AWS credentials in the factory**, need the line to be independent of your cloud, or must be your own root of trust for compliance/portability.
+
 ---
 
 ## Claim Flow Walkthrough
