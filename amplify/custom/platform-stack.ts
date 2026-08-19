@@ -786,6 +786,27 @@ export class PlatformStack extends Stack {
       },
     });
 
+    // ⚠️ INVARIANT — DO NOT CHANGE THIS PATH (or the `/telemetry` suffix on the
+    // table `location` below) on an account that already has data.
+    //
+    // The Iceberg table `location` is the physical prefix its data files are
+    // written under. Iceberg snapshots reference data files by ABSOLUTE path, so
+    // changing the location does NOT move or re-home existing files — it only
+    // redirects NEW writes. Every prior data file stays referenced by the live
+    // snapshot chain at its OLD path. If those old files are then deleted (e.g.
+    // a teardown/cleanup of the "stale" prefix), the table's manifests dangle and
+    // EVERY Athena query fails with ICEBERG_CANNOT_OPEN_SPLIT.
+    //
+    // This is exactly what PR #163 caused: it changed this from
+    // `s3://<bucket>/telemetry` → `s3://<bucket>` (collapsing the doubled
+    // `telemetry/telemetry` prefix). New data went to `telemetry/data/`, but
+    // ~6k files remained referenced at the deleted `telemetry/telemetry/data/`
+    // path, breaking the shared table for all slots. Recovery required dropping
+    // and recreating the table.
+    //
+    // If the location EVER must change, it is a data migration, not a config
+    // edit: recreate the table at the new location and re-register (or re-ingest)
+    // the data — never just edit the string and redeploy.
     const icebergWarehousePath = `s3://${workshopBucket.bucketName}`;
     const icebergSchemaFields: CfnTable.IcebergStructFieldProperty[] = [
       { id: 1, name: "thing_name", type: "string", required: true },
