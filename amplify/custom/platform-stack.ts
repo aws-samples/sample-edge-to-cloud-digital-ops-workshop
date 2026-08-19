@@ -907,6 +907,18 @@ export class PlatformStack extends Stack {
                 { sourceId: 13, name: "hour", transform: "identity" },
               ],
             },
+            // Keep Firehose's data-file layout FLAT under `<location>/data/<partition>/`.
+            // `write.object-storage.enabled=true` (Athena's CREATE-TABLE default, but
+            // NOT Glue's) injects a random hash segment before the partition path
+            // (e.g. `data/nvamGg/deployment_id=.../file.parquet`). That layout is
+            // legal, but if the table is ever recreated by hand via Athena the hash
+            // changes, orphaning every prior data file and yielding
+            // ICEBERG_CANNOT_OPEN_SPLIT (PR #163 follow-up incident). Pin it OFF so
+            // the physical path is deterministic and matches what the docs/queries
+            // assume, and so a manual Athena recreate must opt IN to hashing.
+            properties: {
+              "write.object-storage.enabled": "false",
+            },
           },
         },
       },
