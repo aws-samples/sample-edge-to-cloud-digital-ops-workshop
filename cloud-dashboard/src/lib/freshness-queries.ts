@@ -33,6 +33,7 @@ function toPayload(
       timescaledb_ms: source === "timescaledb" && latestTs > 0 ? now - latestTs : null,
       athena_ms: null,
       influxdb_ms: null,
+      appsync_ms: null,
     },
     // Query latency — wall-clock ms to execute this tier's read. Distinct from
     // tierFreshness (data staleness): this is the read-path cost, the metric
@@ -44,6 +45,7 @@ function toPayload(
       timescaledb_ms: source === "timescaledb" ? queryLatencyMs : null,
       athena_ms: null,
       influxdb_ms: null,
+      appsync_ms: null,
     },
     // Device→ingest hop (#245) — populated by queryRisingWaveFreshness after
     // this function returns; both stores see the same device hop, but only
@@ -53,6 +55,7 @@ function toPayload(
       timescaledb_ms: null,
       athena_ms: null,
       influxdb_ms: null,
+      appsync_ms: null,
     },
     fleetResources: {
       avg_free_cpu_pct: avgFreeCpu,
