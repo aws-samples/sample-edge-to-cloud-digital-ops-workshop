@@ -89,7 +89,8 @@ const ON_TELEMETRY_SUBSCRIPTION = `subscription OnTelemetry {
 async function signAppSyncRequest(
   host: string,
   region: string,
-  body: string
+  body: string,
+  path: string
 ): Promise<Record<string, string>> {
   const signer = new SignatureV4({
     credentials: defaultProvider(),
@@ -102,7 +103,7 @@ async function signAppSyncRequest(
     method: "POST",
     protocol: "https:",
     hostname: host,
-    path: "/graphql",
+    path,
     headers: {
       host,
       "content-type": "application/json; charset=UTF-8",
@@ -112,12 +113,18 @@ async function signAppSyncRequest(
 
   const signed = await signer.sign(request);
   const headers = signed.headers as Record<string, string>;
+  // Return every header the signer actually signed over — Authorization's
+  // SignedHeaders list references all of them (including x-amz-content-sha256,
+  // which SignatureV4 adds automatically), so AppSync's realtime endpoint
+  // rejects the handshake with IncompleteSignatureException if any are missing
+  // from this object, even ones we didn't set explicitly above.
   return {
     host,
     "content-type": headers["content-type"],
+    "x-amz-date": headers["x-amz-date"],
     Authorization: headers["authorization"] ?? headers["Authorization"],
-    "X-Amz-Date": headers["x-amz-date"] ?? headers["X-Amz-Date"],
     ...(headers["x-amz-security-token"] ? { "X-Amz-Security-Token": headers["x-amz-security-token"] } : {}),
+    ...(headers["x-amz-content-sha256"] ? { "x-amz-content-sha256": headers["x-amz-content-sha256"] } : {}),
   };
 }
 
@@ -148,11 +155,19 @@ export async function subscribeToTelemetry(opts: {
   const host = httpUrl.host;
   const realtimeHost = host.replace("appsync-api", "appsync-realtime-api");
 
-  const connectHeader = await signAppSyncRequest(host, region, "{}");
+  // The CONNECT handshake is signed against "/connect", not "/graphql" — a
+  // separate, AppSync-realtime-specific virtual path. Signing against the
+  // wrong path produces a signature AppSync rejects with BadRequestException
+  // even though every header is otherwise correct.
+  const connectHeader = await signAppSyncRequest(host, region, "{}", "/graphql/connect");
   const wsUrl =
     `wss://${realtimeHost}/graphql?header=${toBase64Url(connectHeader)}&payload=${toBase64Url({})}`;
 
-  const ws = new WebSocket(wsUrl, { headers: { "Sec-WebSocket-Protocol": "graphql-ws" } });
+  // The subprotocol must go through `ws`'s dedicated `protocols` argument
+  // (which negotiates Sec-WebSocket-Protocol itself), not a raw header — AppSync
+  // rejects/mismatches the handshake otherwise ("Server sent a subprotocol but
+  // none was requested").
+  const ws = new WebSocket(wsUrl, "graphql-ws");
   const subscriptionId = `appsync-telemetry-${Math.random().toString(36).slice(2)}`;
   let closed = false;
   let keepaliveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -182,7 +197,7 @@ export async function subscribeToTelemetry(opts: {
       armKeepaliveWatchdog();
       try {
         const query = JSON.stringify({ query: ON_TELEMETRY_SUBSCRIPTION, variables: {} });
-        const authorization = await signAppSyncRequest(host, region, query);
+        const authorization = await signAppSyncRequest(host, region, query, "/graphql");
         ws.send(
           JSON.stringify({
             id: subscriptionId,
