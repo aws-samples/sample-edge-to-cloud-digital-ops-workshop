@@ -80,6 +80,18 @@ spec:
             - name: ATHENA_TABLE
               value: {{ .Values.dashboard.athenaTable | quote }}
             {{- end }}
+            {{- if .Values.dashboard.appsyncGraphqlEndpoint }}
+            # AppSync live-push tier (#259) — static single-slot/local-dev
+            # override. The dashboard is one shared instance for every slot
+            # (#253) but each slot owns its own AppSync API, so in normal
+            # multi-slot operation lib/appsync-realtime.ts resolves the
+            # per-slot endpoint from SSM (`/workshop/<did>/graphql-endpoint`,
+            # published by amplify/custom/data-stack.ts) instead of this var.
+            # Optional like ATHENA_DATABASE above — unset falls back to mock
+            # data, same graceful-fallback contract as every other tier.
+            - name: APPSYNC_GRAPHQL_ENDPOINT
+              value: {{ .Values.dashboard.appsyncGraphqlEndpoint | quote }}
+            {{- end }}
             {{- if .Values.telegraf.enabled }}
             # InfluxDB tier (#231): url/token/org/bucket from the per-slot
             # influxdb-credentials secret the provision Job mints (#230). The

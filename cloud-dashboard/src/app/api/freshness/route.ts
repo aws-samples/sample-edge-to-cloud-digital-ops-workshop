@@ -16,6 +16,12 @@ export interface FreshnessPayload {
     timescaledb_ms: number | null;
     athena_ms: number | null;
     influxdb_ms: number | null;
+    // AppSync live-push tier (#259): no store, no query — the browser
+    // subscribes directly to onTelemetry and computes this itself as
+    // Date.now() - msg.messageTimestamp on arrival (see
+    // src/app/api/stream/appsync/route.ts + page.tsx's useAppSyncFreshness).
+    // Always populated client-side; this route never computes it server-side.
+    appsync_ms: number | null;
   };
   // Chart 1b — query latency per tier (single numbers, ms). Wall-clock to run
   // this tier's read. Distinct axis from freshness: this is the read-path cost
@@ -26,6 +32,10 @@ export interface FreshnessPayload {
     timescaledb_ms: number | null;
     athena_ms: number | null;
     influxdb_ms: number | null;
+    // AppSync has no read step to time — it pushes straight to the browser,
+    // so there is no query-latency number to report. Always null; this is
+    // the point of the "no storage" comparison, not a gap to fill in later.
+    appsync_ms: number | null;
   };
   // Chart 1c — device→ingest hop latency (#245), ms. ingest_ts (IoT-Core-
   // stamped) minus message_timestamp (device-stamped immediately before
@@ -39,6 +49,7 @@ export interface FreshnessPayload {
     timescaledb_ms: number | null;
     athena_ms: number | null;
     influxdb_ms: number | null;
+    appsync_ms: number | null;
   };
   // Chart 2 — fleet-wide free CPU and memory (percentage)
   fleetResources: {
@@ -47,11 +58,11 @@ export interface FreshnessPayload {
   };
   // Chart 3 — per-node time since last message (seconds)
   nodeAge: Array<{ site_id: string; age_seconds: number }>;
-  source: "risingwave" | "timescaledb" | "athena" | "influxdb" | "mock";
+  source: "risingwave" | "timescaledb" | "athena" | "influxdb" | "appsync" | "mock";
   sampled_at: number; // epoch ms on server
 }
 
-function mockPayload(source: "risingwave" | "timescaledb" | "athena" | "influxdb" | "mock"): FreshnessPayload {
+function mockPayload(source: "risingwave" | "timescaledb" | "athena" | "influxdb" | "appsync" | "mock"): FreshnessPayload {
   const now = Date.now();
   const rw_ms = source === "risingwave" ? 350 + Math.random() * 200 : null;
   const ts_ms = source === "timescaledb" ? 1500 + Math.random() * 800 : null;
@@ -59,6 +70,12 @@ function mockPayload(source: "risingwave" | "timescaledb" | "athena" | "influxdb
   // InfluxDB is a managed hot store fed by Telegraf on a 1s flush — fresh, but
   // polled (no subscribe primitive), so a touch behind the pushed live tiers.
   const ix_ms = source === "influxdb" ? 1200 + Math.random() * 600 : null;
+  // AppSync live-push (#259): no store, no query — just the subscription's
+  // transport latency, ~10-80ms per architecture.md. In real operation this
+  // is always measured client-side (see the FreshnessPayload comment above);
+  // this mock value only matters for the initial /api/freshness?tier=appsync
+  // fetch, before the SSE stream in stream/appsync/route.ts takes over.
+  const as_ms = source === "appsync" ? 15 + Math.random() * 65 : null;
   // Mock query latency: RW's in-memory MV is fastest, TSDB's scan a bit slower,
   // Athena's warehouse round-trip slowest — the ordering the read-path axis
   // is meant to show. InfluxDB's time-series query sits between TSDB and Athena.
@@ -76,18 +93,23 @@ function mockPayload(source: "risingwave" | "timescaledb" | "athena" | "influxdb
       timescaledb_ms: ts_ms,
       athena_ms: at_ms,
       influxdb_ms: ix_ms,
+      appsync_ms: as_ms,
     },
     tierLatency: {
       risingwave_ms: rw_lat,
       timescaledb_ms: ts_lat,
       athena_ms: at_lat,
       influxdb_ms: ix_lat,
+      // AppSync never has a query step to time — always null (see the
+      // tierLatency.appsync_ms comment above).
+      appsync_ms: null,
     },
     deviceHopLatency: {
       risingwave_ms: rw_hop,
       timescaledb_ms: null,
       athena_ms: null,
       influxdb_ms: null,
+      appsync_ms: null,
     },
     fleetResources: {
       avg_free_cpu_pct: 85 + Math.random() * 10,
@@ -102,7 +124,7 @@ function mockPayload(source: "risingwave" | "timescaledb" | "athena" | "influxdb
 }
 
 export async function GET(req: NextRequest) {
-  const tier = req.nextUrl.searchParams.get("tier") as "risingwave" | "timescaledb" | "athena" | "influxdb" | null;
+  const tier = req.nextUrl.searchParams.get("tier") as "risingwave" | "timescaledb" | "athena" | "influxdb" | "appsync" | null;
   // #253: cloud-analytics is now ONE shared instance for every slot — every
   // read is scoped to the caller's own slot via `?did=` (the same param the
   // browser's workshop/javascripts/deployment-id.js already persists), not a
@@ -250,18 +272,21 @@ export async function GET(req: NextRequest) {
           timescaledb_ms: null,
           athena_ms: latestTs > 0 ? now - latestTs : null,
           influxdb_ms: null,
+          appsync_ms: null,
         },
         tierLatency: {
           risingwave_ms: null,
           timescaledb_ms: null,
           athena_ms: Date.now() - queryT0,
           influxdb_ms: null,
+          appsync_ms: null,
         },
         deviceHopLatency: {
           risingwave_ms: null,
           timescaledb_ms: null,
           athena_ms: null,
           influxdb_ms: null,
+          appsync_ms: null,
         },
         fleetResources: {
           avg_free_cpu_pct: avgFreeCpu,
@@ -346,18 +371,21 @@ export async function GET(req: NextRequest) {
           timescaledb_ms: null,
           athena_ms: null,
           influxdb_ms: latestTs > 0 ? now - latestTs : null,
+          appsync_ms: null,
         },
         tierLatency: {
           risingwave_ms: null,
           timescaledb_ms: null,
           athena_ms: null,
           influxdb_ms: queryMs,
+          appsync_ms: null,
         },
         deviceHopLatency: {
           risingwave_ms: null,
           timescaledb_ms: null,
           athena_ms: null,
           influxdb_ms: null,
+          appsync_ms: null,
         },
         fleetResources: {
           avg_free_cpu_pct: avg(cpuFree),
@@ -376,5 +404,15 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  return NextResponse.json({ error: "tier param must be risingwave, timescaledb, athena, or influxdb" }, { status: 400 });
+  if (tier === "appsync") {
+    // The AppSync live-push tier has no server-side aggregate to poll — its
+    // whole point is "no store, no query". The real number is only ever
+    // produced client-side, from a live onTelemetry subscription frame (see
+    // /api/stream/appsync/route.ts + page.tsx's useAppSyncFreshness). This
+    // branch exists so a direct GET (initial paint, or a manual curl) still
+    // gets a well-formed payload instead of a 400.
+    return NextResponse.json(mockPayload("appsync"));
+  }
+
+  return NextResponse.json({ error: "tier param must be risingwave, timescaledb, athena, influxdb, or appsync" }, { status: 400 });
 }

@@ -67,9 +67,9 @@ export async function GET(req: NextRequest): Promise<Response> {
       while (!closed) {
         const now = Date.now();
         send("freshness", {
-          tierFreshness: { risingwave_ms: 350 + Math.random() * 200, timescaledb_ms: null, athena_ms: null, influxdb_ms: null },
-          tierLatency: { risingwave_ms: 3 + Math.random() * 5, timescaledb_ms: null, athena_ms: null, influxdb_ms: null },
-          deviceHopLatency: { risingwave_ms: 20 + Math.random() * 60, timescaledb_ms: null, athena_ms: null, influxdb_ms: null },
+          tierFreshness: { risingwave_ms: 350 + Math.random() * 200, timescaledb_ms: null, athena_ms: null, influxdb_ms: null, appsync_ms: null },
+          tierLatency: { risingwave_ms: 3 + Math.random() * 5, timescaledb_ms: null, athena_ms: null, influxdb_ms: null, appsync_ms: null },
+          deviceHopLatency: { risingwave_ms: 20 + Math.random() * 60, timescaledb_ms: null, athena_ms: null, influxdb_ms: null, appsync_ms: null },
           fleetResources: { avg_free_cpu_pct: 85 + Math.random() * 10, avg_free_mem_pct: 60 + Math.random() * 10 },
           nodeAge: ["ws-slot00-edge-0", "ws-slot00-edge-1", "ws-slot00-edge-2"].map((id, i) => ({
             site_id: id,

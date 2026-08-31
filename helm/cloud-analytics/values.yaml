@@ -297,3 +297,14 @@ dashboard:
   athenaDatabase: ""
   athenaWorkgroup: workshop-shared
   athenaTable: telemetry
+  # AppSync live-push ("no storage") tier — optional, same story as
+  # athenaDatabase above. Each slot owns its own AppSync GraphQL API
+  # (amplify/custom/data-stack.ts), so the dashboard normally resolves the
+  # endpoint per-request from SSM by `?did=` (see
+  # cloud-dashboard/src/lib/appsync-realtime.ts) rather than this static
+  # value. Set it only for a local/dev/single-slot override. Either way, the
+  # pod's IAM role must be granted `appsync:GraphQL` (and, for the SSM path,
+  # `ssm:GetParameter` on `/workshop/*/graphql-endpoint`) — wiring that IRSA
+  # grant is left to the deployer, same as Athena's IAM story above. Falls
+  # back to mock data when unset/ungranted, never crashes the pod.
+  appsyncGraphqlEndpoint: ""

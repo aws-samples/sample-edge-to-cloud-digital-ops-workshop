@@ -8,12 +8,13 @@ import {
 import type { FreshnessPayload } from "./api/freshness/route";
 
 // ── colour palette ────────────────────────────────────────────────────────────
-const COLOUR_RW     = "#6366f1"; // indigo — RisingWave
-const COLOUR_TSDB   = "#10b981"; // emerald — TimescaleDB
-const COLOUR_ATHENA = "#f59e0b"; // amber — Athena
-const COLOUR_INFLUX = "#06b6d4"; // cyan — Timestream for InfluxDB
-const COLOUR_CPU    = "#3b82f6"; // blue
-const COLOUR_MEM    = "#a855f7"; // purple
+const COLOUR_RW      = "#6366f1"; // indigo — RisingWave
+const COLOUR_TSDB    = "#10b981"; // emerald — TimescaleDB
+const COLOUR_ATHENA  = "#f59e0b"; // amber — Athena
+const COLOUR_INFLUX  = "#06b6d4"; // cyan — Timestream for InfluxDB
+const COLOUR_APPSYNC = "#f43f5e"; // rose — AppSync live push (no storage)
+const COLOUR_CPU     = "#3b82f6"; // blue
+const COLOUR_MEM     = "#a855f7"; // purple
 
 // ── chart 1: freshness (log scale) ───────────────────────────────────────────
 // recharts doesn't support log scale natively, so we store log10 values and
@@ -38,22 +39,26 @@ interface FreshnessBarDatum {
   tsdb: number | null;
   athena: number | null;
   influx: number | null;
+  appsync: number | null;
 }
 
 // A single log-scale grouped bar chart of a per-tier ms metric. Shared by the
 // freshness chart (data staleness) and the query-latency chart (read-path cost)
-// — same four tiers, same log axis, different metric.
+// — same five tiers, same log axis, different metric. `appsync` is optional
+// (defaults to null/omitted) so callers like DeviceHopChart, which never
+// compute it, don't need to pass anything.
 function TierMsBarChart({
-  title, blurb, axisLabel, rw, tsdb, athena, influx,
+  title, blurb, axisLabel, rw, tsdb, athena, influx, appsync = null,
 }: {
   title: string; blurb: string; axisLabel: string;
-  rw: number | null; tsdb: number | null; athena: number | null; influx: number | null;
+  rw: number | null; tsdb: number | null; athena: number | null; influx: number | null; appsync?: number | null;
 }) {
   const chartData: FreshnessBarDatum[] = [
-    { tier: "RisingWave",  rw: logVal(rw),  tsdb: null,          athena: null,           influx: null           },
-    { tier: "TimescaleDB", rw: null,        tsdb: logVal(tsdb),  athena: null,           influx: null           },
-    { tier: "InfluxDB",    rw: null,        tsdb: null,          athena: null,           influx: logVal(influx) },
-    { tier: "Athena/S3",   rw: null,        tsdb: null,          athena: logVal(athena), influx: null           },
+    { tier: "RisingWave",  rw: logVal(rw),  tsdb: null,          athena: null,           influx: null,           appsync: null            },
+    { tier: "TimescaleDB", rw: null,        tsdb: logVal(tsdb),  athena: null,           influx: null,           appsync: null            },
+    { tier: "InfluxDB",    rw: null,        tsdb: null,          athena: null,           influx: logVal(influx), appsync: null            },
+    { tier: "Athena/S3",   rw: null,        tsdb: null,          athena: logVal(athena), influx: null,           appsync: null            },
+    { tier: "AppSync",     rw: null,        tsdb: null,          athena: null,           influx: null,           appsync: logVal(appsync) },
   ];
 
   const CustomTooltip = ({ active, payload, label }: any) => {
@@ -83,17 +88,19 @@ function TierMsBarChart({
             label={{ value: axisLabel, angle: -90, position: "insideLeft", fill: "#64748b", fontSize: 11 }}
           />
           <Tooltip content={<CustomTooltip />} cursor={{ fill: "rgba(255,255,255,0.05)" }} />
-          <Bar dataKey="rw"     name="RisingWave"  fill={COLOUR_RW}     radius={[4,4,0,0]} />
-          <Bar dataKey="tsdb"   name="TimescaleDB" fill={COLOUR_TSDB}   radius={[4,4,0,0]} />
-          <Bar dataKey="influx" name="InfluxDB"    fill={COLOUR_INFLUX} radius={[4,4,0,0]} />
-          <Bar dataKey="athena" name="Athena/S3"   fill={COLOUR_ATHENA} radius={[4,4,0,0]} />
+          <Bar dataKey="rw"      name="RisingWave"  fill={COLOUR_RW}      radius={[4,4,0,0]} />
+          <Bar dataKey="tsdb"    name="TimescaleDB" fill={COLOUR_TSDB}    radius={[4,4,0,0]} />
+          <Bar dataKey="influx"  name="InfluxDB"    fill={COLOUR_INFLUX}  radius={[4,4,0,0]} />
+          <Bar dataKey="athena"  name="Athena/S3"   fill={COLOUR_ATHENA}  radius={[4,4,0,0]} />
+          <Bar dataKey="appsync" name="AppSync"     fill={COLOUR_APPSYNC} radius={[4,4,0,0]} />
         </BarChart>
       </ResponsiveContainer>
       <div style={{ display: "flex", gap: "1.5rem", marginTop: "0.5rem", fontSize: "0.85rem", color: "#94a3b8", flexWrap: "wrap" }}>
-        <span><span style={{ color: COLOUR_RW,     fontWeight: 600 }}>● </span>RisingWave: {msLabel(rw)}</span>
-        <span><span style={{ color: COLOUR_TSDB,   fontWeight: 600 }}>● </span>TimescaleDB: {msLabel(tsdb)}</span>
-        <span><span style={{ color: COLOUR_INFLUX, fontWeight: 600 }}>● </span>InfluxDB: {msLabel(influx)}</span>
-        <span><span style={{ color: COLOUR_ATHENA, fontWeight: 600 }}>● </span>Athena: {msLabel(athena)}</span>
+        <span><span style={{ color: COLOUR_RW,      fontWeight: 600 }}>● </span>RisingWave: {msLabel(rw)}</span>
+        <span><span style={{ color: COLOUR_TSDB,    fontWeight: 600 }}>● </span>TimescaleDB: {msLabel(tsdb)}</span>
+        <span><span style={{ color: COLOUR_INFLUX,  fontWeight: 600 }}>● </span>InfluxDB: {msLabel(influx)}</span>
+        <span><span style={{ color: COLOUR_ATHENA,  fontWeight: 600 }}>● </span>Athena: {msLabel(athena)}</span>
+        <span><span style={{ color: COLOUR_APPSYNC, fontWeight: 600 }}>● </span>AppSync: {msLabel(appsync)}</span>
       </div>
     </div>
   );
@@ -103,16 +110,17 @@ function TierMsBarChart({
 // Read-path cost per tier — the metric where RisingWave's pre-aggregated
 // in-memory MV is expected to beat TimescaleDB's relational scan, and both beat
 // Athena's warehouse round-trip. Orthogonal to freshness (data staleness).
-function LatencyChart({ rw, tsdb, athena, influx }: { rw: FreshnessPayload | null; tsdb: FreshnessPayload | null; athena: FreshnessPayload | null; influx: FreshnessPayload | null }) {
+function LatencyChart({ rw, tsdb, athena, influx, appsync }: { rw: FreshnessPayload | null; tsdb: FreshnessPayload | null; athena: FreshnessPayload | null; influx: FreshnessPayload | null; appsync?: FreshnessPayload | null }) {
   return (
     <TierMsBarChart
       title="Query Latency (log scale)"
-      blurb="Wall-clock time to run each tier's read query. Lower is better. This is the read-path cost — in-memory MV vs relational scan vs managed-TSDB query vs warehouse round-trip — independent of how stale the data is."
+      blurb="Wall-clock time to run each tier's read query. Lower is better. This is the read-path cost — in-memory MV vs relational scan vs managed-TSDB query vs warehouse round-trip — independent of how stale the data is. AppSync has no query step at all — it pushes straight to the browser — so it always shows n/a here, which is the point of the no-storage comparison, not a gap."
       axisLabel="latency (log)"
       rw={rw?.tierLatency.risingwave_ms ?? null}
       tsdb={tsdb?.tierLatency.timescaledb_ms ?? null}
       athena={athena?.tierLatency.athena_ms ?? null}
       influx={influx?.tierLatency.influxdb_ms ?? null}
+      appsync={appsync?.tierLatency.appsync_ms ?? null}
     />
   );
 }
@@ -202,6 +210,54 @@ function usePolledFreshness(tier: "athena" | "influxdb", intervalMs: number, dep
   return { data, error };
 }
 
+// ── push hook: AppSync live-push tier (#259) ─────────────────────────────────
+// The "no storage" leg of the comparison — no aggregate query, no server-side
+// freshness computation. /api/stream/appsync relays each onTelemetry frame
+// (or a synthetic one, when unconfigured) essentially as-is; freshness is
+// computed HERE, client-side, as Date.now() - messageTimestamp the instant
+// the SSE frame is parsed — the truest "no storage" measurement, since it
+// includes no server-side hop beyond the relay itself.
+function useAppSyncFreshness(deploymentId: string) {
+  const [data, setData] = useState<FreshnessPayload | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const es = new EventSource(`/api/stream/appsync?did=${encodeURIComponent(deploymentId)}`);
+    es.addEventListener("telemetry", (evt: MessageEvent) => {
+      try {
+        const msg = JSON.parse(evt.data);
+        const freshnessMs = Date.now() - msg.messageTimestamp;
+        setData({
+          tierFreshness: { risingwave_ms: null, timescaledb_ms: null, athena_ms: null, influxdb_ms: null, appsync_ms: freshnessMs },
+          // No query step exists for this tier by design — see the
+          // LatencyChart blurb.
+          tierLatency: { risingwave_ms: null, timescaledb_ms: null, athena_ms: null, influxdb_ms: null, appsync_ms: null },
+          deviceHopLatency: { risingwave_ms: null, timescaledb_ms: null, athena_ms: null, influxdb_ms: null, appsync_ms: null },
+          fleetResources: { avg_free_cpu_pct: null, avg_free_mem_pct: null },
+          nodeAge: [],
+          source: msg.source === "mock" ? "mock" : "appsync",
+          sampled_at: Date.now(),
+        });
+        setError(null);
+      } catch {
+        // ignore malformed event
+      }
+    });
+    es.addEventListener("tier-error", (evt: MessageEvent) => {
+      try {
+        const { message } = JSON.parse(evt.data);
+        setError(message ?? "tier error");
+      } catch {
+        setError("tier error");
+      }
+    });
+    es.onerror = () => setError("stream disconnected");
+    return () => es.close();
+  }, [deploymentId]);
+
+  return { data, error };
+}
+
 // ── deployment id: read once from `?did=` on the dashboard's own URL (#253 —
 // the dashboard is now one shared instance for every slot, port-forwarded
 // directly rather than served through the mkdocs site, so it has no access to
@@ -218,16 +274,17 @@ function useDeploymentId(): string {
 // ── chart 1 component ─────────────────────────────────────────────────────────
 // Data freshness = now − MAX(ts): how stale the newest row is (ingestion-lag,
 // not read cost). See LatencyChart for the orthogonal read-path metric.
-function FreshnessChart({ rw, tsdb, athena, influx }: { rw: FreshnessPayload | null; tsdb: FreshnessPayload | null; athena: FreshnessPayload | null; influx: FreshnessPayload | null }) {
+function FreshnessChart({ rw, tsdb, athena, influx, appsync }: { rw: FreshnessPayload | null; tsdb: FreshnessPayload | null; athena: FreshnessPayload | null; influx: FreshnessPayload | null; appsync?: FreshnessPayload | null }) {
   return (
     <TierMsBarChart
       title="Data Freshness (log scale)"
-      blurb="How stale is the most recent message in each store. Lower is better. RisingWave and TimescaleDB update by push; InfluxDB and Athena update on their own poll cadence."
+      blurb="How stale is the most recent message in each store. Lower is better. RisingWave and TimescaleDB update by push; InfluxDB and Athena update on their own poll cadence. AppSync has no store at all — its number is the live subscription's transport latency, measured in the browser the instant a message arrives."
       axisLabel="staleness (log)"
       rw={rw?.tierFreshness.risingwave_ms ?? null}
       tsdb={tsdb?.tierFreshness.timescaledb_ms ?? null}
       athena={athena?.tierFreshness.athena_ms ?? null}
       influx={influx?.tierFreshness.influxdb_ms ?? null}
+      appsync={appsync?.tierFreshness.appsync_ms ?? null}
     />
   );
 }
@@ -382,26 +439,30 @@ function LatencyMapRow({
   label, color, storeLabel, ingestMs, queryMs, pushMode,
 }: {
   label: string; color: string; storeLabel: string;
-  ingestMs: number | null; queryMs: number | null; pushMode: "push" | "poll";
+  ingestMs: number | null; queryMs: number | null; pushMode: "push" | "poll" | "no-query";
 }) {
+  const hopLabel =
+    pushMode === "push" ? "query · live push" :
+    pushMode === "poll" ? "query · on-demand poll" :
+    "no query — direct push";
   return (
     <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.6rem 0", borderTop: "1px solid #1e293b", flexWrap: "wrap" }}>
       <div style={{ width: 100, fontSize: "0.8rem", color, fontWeight: 600, flexShrink: 0 }}>{label}</div>
       <LatencyMapNode>Edge device</LatencyMapNode>
       <HopArrow label="ingest lag" ms={ingestMs} color={color} />
       <LatencyMapNode accent={color}>{storeLabel}</LatencyMapNode>
-      <HopArrow label={pushMode === "push" ? "query · live push" : "query · on-demand poll"} ms={queryMs} color={color} />
+      <HopArrow label={hopLabel} ms={queryMs} color={color} />
       <LatencyMapNode>Dashboard</LatencyMapNode>
     </div>
   );
 }
 
-function LatencyMap({ rw, tsdb, athena, influx }: { rw: FreshnessPayload | null; tsdb: FreshnessPayload | null; athena: FreshnessPayload | null; influx: FreshnessPayload | null }) {
+function LatencyMap({ rw, tsdb, athena, influx, appsync }: { rw: FreshnessPayload | null; tsdb: FreshnessPayload | null; athena: FreshnessPayload | null; influx: FreshnessPayload | null; appsync?: FreshnessPayload | null }) {
   return (
     <div className="card">
       <h2 style={{ marginBottom: "0.25rem", fontSize: "1rem" }}>Edge → Cloud Latency Map</h2>
       <p style={{ color: "#888", fontSize: "0.8rem", marginBottom: "0.75rem" }}>
-        The same freshness/latency numbers as the charts above, laid out along each tier&apos;s path: how stale the newest row is by the time it lands in the store (ingest lag), then how long that store takes to answer the fleet aggregate (query).
+        The same freshness/latency numbers as the charts above, laid out along each tier&apos;s path: how stale the newest row is by the time it lands in the store (ingest lag), then how long that store takes to answer the fleet aggregate (query). AppSync has no store, so its lane skips straight from the ingest hop to the dashboard — there is no query leg to show.
       </p>
       <LatencyMapRow
         label="RisingWave" color={COLOUR_RW} storeLabel="RisingWave MV" pushMode="push"
@@ -422,6 +483,11 @@ function LatencyMap({ rw, tsdb, athena, influx }: { rw: FreshnessPayload | null;
         label="Athena/S3" color={COLOUR_ATHENA} storeLabel="Iceberg/Athena" pushMode="poll"
         ingestMs={athena?.tierFreshness.athena_ms ?? null}
         queryMs={athena?.tierLatency.athena_ms ?? null}
+      />
+      <LatencyMapRow
+        label="AppSync" color={COLOUR_APPSYNC} storeLabel="No store" pushMode="no-query"
+        ingestMs={appsync?.tierFreshness.appsync_ms ?? null}
+        queryMs={appsync?.tierLatency.appsync_ms ?? null}
       />
     </div>
   );
@@ -452,8 +518,11 @@ export default function DashboardPage() {
   // MSK topics (#230). No subscribe primitive we use here, so it polls like
   // Athena — but it's a fast time-series read, so a tighter 5s cadence (#231).
   const { data: influxData, error: influxError } = usePolledFreshness("influxdb", 5000, deploymentId);
+  // AppSync live-push (#259) — the "no storage" leg: no aggregate query, no
+  // poll cadence, just a direct onTelemetry subscription relayed over SSE.
+  const { data: appsyncData, error: appsyncError } = useAppSyncFreshness(deploymentId);
 
-  const isMock = rwData?.source === "mock" || tsdbData?.source === "mock" || athenaData?.source === "mock" || influxData?.source === "mock";
+  const isMock = rwData?.source === "mock" || tsdbData?.source === "mock" || athenaData?.source === "mock" || influxData?.source === "mock" || appsyncData?.source === "mock";
 
   return (
     <div className="page">
@@ -464,17 +533,18 @@ export default function DashboardPage() {
           <span><Pulse active={!tsdbError && tsdbData != null} />TimescaleDB {tsdbError ? `(${tsdbError})` : tsdbData?.source === "mock" ? "(mock)" : "live · push"}</span>
           <span><Pulse active={!influxError && influxData != null} />InfluxDB {influxError ? `(${influxError})` : influxData?.source === "mock" ? "(mock)" : "live · poll"}</span>
           <span><Pulse active={!athenaError && athenaData != null} />Athena {athenaError ? `(${athenaError})` : athenaData?.source === "mock" ? "(mock)" : "live · poll"}</span>
+          <span><Pulse active={!appsyncError && appsyncData != null} />AppSync {appsyncError ? `(${appsyncError})` : appsyncData?.source === "mock" ? "(mock)" : "live · push · no storage"}</span>
           {isMock && (
             <span style={{ color: "#f59e0b" }}>
-              ⚠ Mock data — set RISINGWAVE_ENDPOINT, TIMESCALEDB_ENDPOINT, ATHENA_DATABASE, and INFLUXDB_ENDPOINT env vars to connect to live sources
+              ⚠ Mock data — set RISINGWAVE_ENDPOINT, TIMESCALEDB_ENDPOINT, ATHENA_DATABASE, INFLUXDB_ENDPOINT, and APPSYNC_GRAPHQL_ENDPOINT env vars to connect to live sources
             </span>
           )}
         </div>
       </div>
 
-      <FreshnessChart  rw={rwData}   tsdb={tsdbData} athena={athenaData} influx={influxData} />
+      <FreshnessChart  rw={rwData}   tsdb={tsdbData} athena={athenaData} influx={influxData} appsync={appsyncData} />
       <div style={{ height: "1rem" }} />
-      <LatencyChart    rw={rwData}   tsdb={tsdbData} athena={athenaData} influx={influxData} />
+      <LatencyChart    rw={rwData}   tsdb={tsdbData} athena={athenaData} influx={influxData} appsync={appsyncData} />
       <div style={{ height: "1rem" }} />
       <DeviceHopChart  rw={rwData}   tsdb={tsdbData} athena={athenaData} influx={influxData} />
       <div style={{ height: "1rem" }} />
@@ -482,7 +552,7 @@ export default function DashboardPage() {
       <div style={{ height: "1rem" }} />
       <NodeAgeChart    rw={rwData}   tsdb={tsdbData} />
       <div style={{ height: "1rem" }} />
-      <LatencyMap      rw={rwData}   tsdb={tsdbData} athena={athenaData} influx={influxData} />
+      <LatencyMap      rw={rwData}   tsdb={tsdbData} athena={athenaData} influx={influxData} appsync={appsyncData} />
     </div>
   );
 }
