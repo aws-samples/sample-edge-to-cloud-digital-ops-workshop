@@ -475,6 +475,57 @@ export class PlatformStack extends Stack {
       value: risingwaveS3Role.roleArn,
     });
 
+    // ── Cloud-analytics dashboard IRSA role (AppSync Events live-push tier) ────
+    // The shared cloud-analytics dashboard (#253 — one instance for every slot)
+    // subscribes to each slot's per-slot AppSync Events API to render the
+    // "no storage" freshness leg. Its `cloud-analytics-dashboard` ServiceAccount
+    // assumes this role via IRSA so the pod can (a) read each slot's Events API
+    // endpoint from SSM and (b) connect + subscribe to the realtime WebSocket
+    // with SigV4 — never handing AWS credentials to the browser. The Events APIs
+    // live in the per-slot ParticipantStacks (created after this shared stack),
+    // so the resource ARNs are wildcarded rather than cross-stack referenced.
+    const dashboardAudCondition = new CfnJson(this, "DashboardAudCondition", {
+      value: { [`${oidcProviderHost}:aud`]: "sts.amazonaws.com" },
+    });
+    const dashboardSubCondition = new CfnJson(this, "DashboardSubCondition", {
+      value: {
+        [`${oidcProviderHost}:sub`]:
+          "system:serviceaccount:*:cloud-analytics-dashboard",
+      },
+    });
+    const dashboardRole = new Role(this, "CloudDashboardRole", {
+      roleName: "workshop-cloud-dashboard-v1",
+      assumedBy: new FederatedPrincipal(
+        eksOidcProvider.openIdConnectProviderArn,
+        {
+          StringEquals: dashboardAudCondition,
+          StringLike: dashboardSubCondition,
+        } as unknown as Conditions,
+        "sts:AssumeRoleWithWebIdentity"
+      ),
+    });
+    // Connect + subscribe to any slot's Events API (the shared dashboard serves
+    // every slot; EventConnect is on the API, EventSubscribe on its namespaces).
+    dashboardRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["appsync:EventConnect", "appsync:EventSubscribe"],
+      resources: [
+        `arn:aws:appsync:${this.region}:${this.account}:apis/*`,
+        `arn:aws:appsync:${this.region}:${this.account}:apis/*/channelNamespace/*`,
+      ],
+    }));
+    // Read each slot's `/workshop/<id>/events-api-endpoint` SSM parameter.
+    dashboardRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["ssm:GetParameter"],
+      resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/workshop/*`],
+    }));
+
+    new CfnOutput(this, "CloudDashboardRoleArn", {
+      exportName: "workshop-platform-cloud-dashboard-role-arn",
+      value: dashboardRole.roleArn,
+    });
+
     // ── Shared S3 bucket ─────────────────────────────────────────────────────
     // All participant slots share one bucket. Data is partitioned by deployment_id
     // inside the bucket (e.g. telemetry/deployment_id=ws-slot00/…).

@@ -99,8 +99,11 @@ for (const deploymentId of slots) {
 
   const participant = new ParticipantStack(platform, `Participant-${deploymentId}`, {
     deploymentId,
-    // Direct URL from the sibling DataNestedStack (was a CFN export name +
-    // Fn.importValue). CDK wires this cross-nested-stack ref as a parameter.
+    // Retained for back-compat / potential future GraphQL consumers. The IoT
+    // telemetry bridge Lambda no longer targets this GraphQL API — it publishes
+    // to the per-slot AppSync Events API the ParticipantStack creates itself
+    // (#259), so ParticipantStack no longer *needs* this prop. CDK wires the
+    // cross-nested-stack ref as a parameter when it is used.
     graphqlEndpoint: data.api.graphqlUrl,
     shared: platform.shared,
     participantRoleTrustedPrincipalArns:
@@ -108,9 +111,10 @@ for (const deploymentId of slots) {
         ? participantRoleTrustedPrincipalArns
         : undefined,
   });
-  // The AppSync bridge Lambda's APPSYNC_GRAPHQL_ENDPOINT comes from the data
-  // stack; make the dependency explicit (the prop reference already implies it,
-  // but this keeps slot bring-up ordering obvious).
+  // Keep the data stack ordered before the participant stack for stable slot
+  // bring-up (the GraphQL API + its SSM endpoint are still per-slot resources
+  // the frontend/e2e read), even though the telemetry bridge no longer depends
+  // on it now that live-push runs through the Events API (#259).
   participant.node.addDependency(data);
 }
 

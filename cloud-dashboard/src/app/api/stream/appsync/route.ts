@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { resolveGraphqlEndpoint, subscribeToTelemetry } from "../../../../lib/appsync-realtime";
+import { resolveEventsEndpoint, subscribeToTelemetry } from "../../../../lib/appsync-realtime";
 
 export const dynamic = "force-dynamic";
 
@@ -14,13 +14,14 @@ export const dynamic = "force-dynamic";
  * instant the frame arrives (see page.tsx's useAppSyncFreshness), which is
  * the truest "no storage" measurement — no server-side hop is folded in.
  *
- * The per-slot AppSync GraphQL endpoint is resolved by `did` (see
- * lib/appsync-realtime.ts — SSM lookup, falling back to the static
- * APPSYNC_GRAPHQL_ENDPOINT env var). If neither resolves, or the pod's IRSA
- * role hasn't been granted appsync:GraphQL yet, this falls back to emitting
- * synthetic telemetry frames on a timer — same graceful-fallback contract as
- * the RisingWave/TimescaleDB streams, so an unconfigured/not-yet-authorized
- * dashboard still renders and never crashes the container.
+ * The per-slot AppSync Events API endpoint is resolved by `did` (see
+ * lib/appsync-realtime.ts — SSM lookup `/workshop/<did>/events-api-endpoint`,
+ * falling back to the static APPSYNC_EVENTS_ENDPOINT env var). If neither
+ * resolves, or the pod's IRSA role hasn't been granted appsync:EventConnect/
+ * EventSubscribe yet, this falls back to emitting synthetic telemetry frames on
+ * a timer — same graceful-fallback contract as the RisingWave/TimescaleDB
+ * streams, so an unconfigured/not-yet-authorized dashboard still renders and
+ * never crashes the container.
  */
 export async function GET(req: NextRequest): Promise<Response> {
   const deploymentId = req.nextUrl.searchParams.get("did") ?? process.env.WORKSHOP_DEPLOYMENT_ID ?? "";
@@ -71,7 +72,7 @@ export async function GET(req: NextRequest): Promise<Response> {
   }
 
   (async () => {
-    const endpoint = await resolveGraphqlEndpoint(deploymentId, region).catch(() => null);
+    const endpoint = await resolveEventsEndpoint(deploymentId, region).catch(() => null);
 
     if (!endpoint) {
       sendComment("connected (mock)");
@@ -84,7 +85,8 @@ export async function GET(req: NextRequest): Promise<Response> {
 
     try {
       const sub = await subscribeToTelemetry({
-        httpEndpoint: endpoint,
+        eventsEndpoint: endpoint,
+        deploymentId,
         region,
         onEvent: (msg) => {
           send("telemetry", {

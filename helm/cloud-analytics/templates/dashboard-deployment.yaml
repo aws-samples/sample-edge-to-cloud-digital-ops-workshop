@@ -80,17 +80,17 @@ spec:
             - name: ATHENA_TABLE
               value: {{ .Values.dashboard.athenaTable | quote }}
             {{- end }}
-            {{- if .Values.dashboard.appsyncGraphqlEndpoint }}
-            # AppSync live-push tier (#259) — static single-slot/local-dev
-            # override. The dashboard is one shared instance for every slot
-            # (#253) but each slot owns its own AppSync API, so in normal
-            # multi-slot operation lib/appsync-realtime.ts resolves the
-            # per-slot endpoint from SSM (`/workshop/<did>/graphql-endpoint`,
-            # published by amplify/custom/data-stack.ts) instead of this var.
+            {{- if .Values.dashboard.appsyncEventsEndpoint }}
+            # AppSync Events API live-push tier (#259) — static single-slot/
+            # local-dev override. The dashboard is one shared instance for every
+            # slot (#253) but each slot owns its own Events API, so in normal
+            # multi-slot operation lib/appsync-realtime.ts resolves the per-slot
+            # endpoint from SSM (`/workshop/<did>/events-api-endpoint`, published
+            # by amplify/custom/participant-stack.ts) instead of this var.
             # Optional like ATHENA_DATABASE above — unset falls back to mock
             # data, same graceful-fallback contract as every other tier.
-            - name: APPSYNC_GRAPHQL_ENDPOINT
-              value: {{ .Values.dashboard.appsyncGraphqlEndpoint | quote }}
+            - name: APPSYNC_EVENTS_ENDPOINT
+              value: {{ .Values.dashboard.appsyncEventsEndpoint | quote }}
             {{- end }}
             {{- if .Values.telegraf.enabled }}
             # InfluxDB tier (#231): url/token/org/bucket from the per-slot
@@ -133,6 +133,15 @@ metadata:
   labels:
     {{- include "cloud-analytics.labels" . | nindent 4 }}
     app.kubernetes.io/component: dashboard
+  {{- if .Values.dashboard.serviceAccountRoleArn }}
+  # IRSA: assume the platform's cloud-dashboard role (platform-stack.ts
+  # CloudDashboardRole — appsync:EventConnect/EventSubscribe + ssm:GetParameter)
+  # so the pod can read each slot's Events API endpoint from SSM and sign the
+  # realtime WebSocket handshake. Unset → the AppSync live-push tier falls back
+  # to mock data (same graceful-fallback contract as the other tiers).
+  annotations:
+    eks.amazonaws.com/role-arn: {{ .Values.dashboard.serviceAccountRoleArn }}
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
