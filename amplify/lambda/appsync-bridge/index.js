@@ -10,8 +10,16 @@ const { SignatureV4 } = require("@aws-sdk/signature-v4");
 
 let credProvider;
 
+// AwsCrypto-compatible hash for SignatureV4. SigV4 uses this constructor in TWO
+// modes: a plain SHA-256 (payload hash) AND — critically — a keyed HMAC when
+// given a secret (`new NodeSha256(signingKey)`) during signing-key derivation.
+// It MUST honour that key: a plain-hash-only impl silently derives the wrong
+// signing key, so every publish is rejected with a 400 "signature we calculated
+// does not match" that the fire-and-forget response handling below would hide.
 class NodeSha256 {
-  constructor() { this.hash = crypto.createHash("sha256"); }
+  constructor(secret) {
+    this.hash = secret ? crypto.createHmac("sha256", secret) : crypto.createHash("sha256");
+  }
   update(data) { this.hash.update(data); return this; }
   async digest() { return this.hash.digest(); }
 }
@@ -53,7 +61,19 @@ exports.handler = async (event) => {
   await new Promise((resolve, reject) => {
     const req = https.request(
       { hostname: host, path: "/event", method: "POST", headers: signed.headers },
-      (res) => { res.resume(); res.on("end", resolve); }
+      (res) => {
+        let payload = "";
+        res.on("data", (chunk) => { payload += chunk; });
+        res.on("end", () => {
+          // Surface non-2xx (e.g. a 400 signature mismatch) instead of silently
+          // dropping it — a swallowed 400 once made every publish a no-op while
+          // the Lambda reported clean, successful invocations (#259).
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            console.error(`AppSync publish failed: ${res.statusCode} channel=${channel} body=${payload.slice(0, 300)}`);
+          }
+          resolve();
+        });
+      }
     );
     req.on("error", reject);
     req.write(body);
