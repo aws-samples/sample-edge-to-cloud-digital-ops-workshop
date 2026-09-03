@@ -297,14 +297,18 @@ dashboard:
   athenaDatabase: ""
   athenaWorkgroup: workshop-shared
   athenaTable: telemetry
-  # AppSync live-push ("no storage") tier — optional, same story as
-  # athenaDatabase above. Each slot owns its own AppSync GraphQL API
-  # (amplify/custom/data-stack.ts), so the dashboard normally resolves the
-  # endpoint per-request from SSM by `?did=` (see
-  # cloud-dashboard/src/lib/appsync-realtime.ts) rather than this static
-  # value. Set it only for a local/dev/single-slot override. Either way, the
-  # pod's IAM role must be granted `appsync:GraphQL` (and, for the SSM path,
-  # `ssm:GetParameter` on `/workshop/*/graphql-endpoint`) — wiring that IRSA
-  # grant is left to the deployer, same as Athena's IAM story above. Falls
-  # back to mock data when unset/ungranted, never crashes the pod.
-  appsyncGraphqlEndpoint: ""
+  # AppSync Events API live-push ("no storage") tier — optional. Each slot owns
+  # its own AppSync Events API (amplify/custom/participant-stack.ts), so the
+  # dashboard normally resolves the endpoint per-request from SSM by `?did=`
+  # (see cloud-dashboard/src/lib/appsync-realtime.ts) rather than this static
+  # value. Set it only for a local/dev/single-slot override. Falls back to mock
+  # data when unset/ungranted, never crashes the pod.
+  appsyncEventsEndpoint: ""
+  # IRSA role ARN annotated onto the dashboard ServiceAccount. Set this to the
+  # platform's `workshop-platform-cloud-dashboard-role-arn` CFN export
+  # (platform-stack.ts CloudDashboardRole) so the pod can read each slot's
+  # Events API endpoint from SSM and sign the realtime WebSocket handshake —
+  # this is what makes the live-push tier show REAL device→AppSync freshness
+  # instead of mock. scripts/deploy-cloud-analytics.sh wires it automatically;
+  # unset (local dev) → the tier falls back to mock data.
+  serviceAccountRoleArn: ""

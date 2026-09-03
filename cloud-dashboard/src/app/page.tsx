@@ -536,7 +536,7 @@ export default function DashboardPage() {
           <span><Pulse active={!appsyncError && appsyncData != null} />AppSync {appsyncError ? `(${appsyncError})` : appsyncData?.source === "mock" ? "(mock)" : "live · push · no storage"}</span>
           {isMock && (
             <span style={{ color: "#f59e0b" }}>
-              ⚠ Mock data — set RISINGWAVE_ENDPOINT, TIMESCALEDB_ENDPOINT, ATHENA_DATABASE, INFLUXDB_ENDPOINT, and APPSYNC_GRAPHQL_ENDPOINT env vars to connect to live sources
+              ⚠ Mock data — set RISINGWAVE_ENDPOINT, TIMESCALEDB_ENDPOINT, ATHENA_DATABASE, INFLUXDB_ENDPOINT, and APPSYNC_EVENTS_ENDPOINT env vars to connect to live sources
             </span>
           )}
         </div>
