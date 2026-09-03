@@ -69,13 +69,21 @@ export interface TelemetryMessage {
   memUsedPct?: number | null;
   diskUsedPct?: number | null;
   deploymentId?: string | null;
+  // Per-hop latency instrumentation (#263, epic #246) — optional, omitted by
+  // older bridge deploys / the SSE relay's mock fallback. See index.js and
+  // stream/appsync/route.ts for what each stamp marks.
+  ruleDispatchTs?: number | null;
+  publishSentTs?: number | null;
+  appsyncArrivalTs?: number | null;
 }
 
 // Maps a raw Events API telemetry frame (snake_case, as the device publishes and
 // the bridge Lambda forwards verbatim — see job-scripts/telemetry-v1.sh) onto
 // the camelCase shape the dashboard uses. message_timestamp is epoch-ms,
 // device-stamped immediately before publish, so freshness = Date.now() - it.
-function parseTelemetry(raw: Record<string, unknown>): TelemetryMessage | null {
+// `appsyncArrivalTs` is stamped by the caller (the instant this WS frame was
+// received), not read off the raw frame — AppSync doesn't stamp fan-out time.
+function parseTelemetry(raw: Record<string, unknown>, appsyncArrivalTs: number): TelemetryMessage | null {
   const ts = raw.message_timestamp ?? raw.messageTimestamp;
   const messageTimestamp = typeof ts === "number" ? ts : Number(ts);
   if (!Number.isFinite(messageTimestamp)) return null;
@@ -91,6 +99,9 @@ function parseTelemetry(raw: Record<string, unknown>): TelemetryMessage | null {
     memUsedPct: num(raw.mem_used_pct ?? raw.memUsedPct),
     diskUsedPct: num(raw.disk_used_pct ?? raw.diskUsedPct),
     deploymentId: raw.deployment_id != null ? String(raw.deployment_id) : null,
+    ruleDispatchTs: num(raw.ruleDispatchTs),
+    publishSentTs: num(raw.publishSentTs),
+    appsyncArrivalTs,
   };
 }
 
@@ -239,6 +250,11 @@ export async function subscribeToTelemetry(opts: {
         return;
       case "data": {
         if (msg.id !== subscriptionId) return;
+        // Hop 4 boundary (#263): the instant this subscription frame reaches
+        // the relay process, i.e. the end of "sign + network + AppSync
+        // fan-out". Stamped once for the whole WS message, not per sub-event
+        // below — they arrived in the same frame.
+        const appsyncArrivalTs = Date.now();
         // `event` is an array of stringified JSON values (the bridge publishes
         // one telemetry object per frame).
         const events: unknown[] = Array.isArray(msg.event) ? msg.event : [msg.event];
@@ -250,7 +266,7 @@ export async function subscribeToTelemetry(opts: {
             parsed = null;
           }
           if (!parsed) continue;
-          const telemetry = parseTelemetry(parsed);
+          const telemetry = parseTelemetry(parsed, appsyncArrivalTs);
           if (telemetry) onEvent(telemetry);
         }
         return;

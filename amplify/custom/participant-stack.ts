@@ -1170,6 +1170,24 @@ systemctl start sensor-sim
     telemetryEventsApi.addChannelNamespace("telemetry");
 
     // ── AppSync bridge Lambda (live push — no persistence) ───────────────────
+    //
+    // #262 (epic #246) evaluated removing this Lambda hop in favor of a direct
+    // IoT Rule http action straight to the Events API above (SigV4-signed, no
+    // compute in the path). That requires the action's destination URL to be a
+    // *confirmed* TopicRuleDestination. Per AWS IoT's confirmation protocol,
+    // the `confirmationToken` needed to call ConfirmTopicRuleDestination is
+    // delivered ONLY inside the confirmation POST that IoT sends to the
+    // destination's own `confirmationUrl` -- and `confirmationUrl` must be a
+    // prefix of the delivery `url`, i.e. a path on the AppSync endpoint itself.
+    // We don't run code on that AWS-managed host, so we can never receive that
+    // POST body or its token, and there is no other API to retrieve a lost
+    // token. The destination is therefore stuck IN_PROGRESS forever and the
+    // http action can never go ENABLED -- a hard blocker, with no declarative
+    // or manual workaround (see amplify/lambda/appsync-bridge/index.js for the
+    // full citation). The Lambda stays; the mitigation taken instead is
+    // cutting its per-message overhead (module-scope keep-alive HTTPS agent in
+    // index.js, killing the per-call TLS handshake) and instrumenting the hops
+    // that remain (#263).
     const appSyncBridgeRole = new Role(this, "AppSyncBridgeRole", {
       assumedBy: new ServicePrincipal("lambda.amazonaws.com"),
       managedPolicies: [

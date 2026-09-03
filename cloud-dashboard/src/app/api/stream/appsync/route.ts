@@ -22,6 +22,16 @@ export const dynamic = "force-dynamic";
  * a timer — same graceful-fallback contract as the RisingWave/TimescaleDB
  * streams, so an unconfigured/not-yet-authorized dashboard still renders and
  * never crashes the container.
+ *
+ * Per-hop latency instrumentation (#263, epic #246): each frame carries
+ * optional `ruleDispatchTs` / `publishSentTs` (stamped in the bridge Lambda,
+ * amplify/lambda/appsync-bridge/index.js — hops 2-3) and `appsyncArrivalTs`
+ * (stamped in lib/appsync-realtime.ts the instant the WS subscription frame
+ * reaches this process — hop 4), plus `relayForwardTs` stamped right here
+ * (hop 5). Absent on mock/error-fallback frames. The full chain:
+ *   messageTimestamp (device) -> ruleDispatchTs (hop2) -> publishSentTs
+ *   (hop3 start) -> appsyncArrivalTs (hop3 end / hop4) -> relayForwardTs
+ *   (hop5 start) -> browser arrival (hop5 end, computed client-side).
  */
 export async function GET(req: NextRequest): Promise<Response> {
   const deploymentId = req.nextUrl.searchParams.get("did") ?? process.env.WORKSHOP_DEPLOYMENT_ID ?? "";
@@ -89,11 +99,21 @@ export async function GET(req: NextRequest): Promise<Response> {
         deploymentId,
         region,
         onEvent: (msg) => {
+          // Hop 5 boundary (#263): the instant this relay is about to forward
+          // the frame over SSE — the browser's own arrival stamp (page.tsx)
+          // closes out "relay -> browser". thingName/messageTimestamp/source
+          // stay exactly as before; the ruleDispatchTs..relayForwardTs fields
+          // are additive and optional (absent for mock/error fallback frames).
+          const relayForwardTs = Date.now();
           send("telemetry", {
             thingName: msg.thingName,
             messageTimestamp: msg.messageTimestamp,
             deploymentId: msg.deploymentId ?? deploymentId,
             source: "appsync",
+            ruleDispatchTs: msg.ruleDispatchTs ?? null,
+            publishSentTs: msg.publishSentTs ?? null,
+            appsyncArrivalTs: msg.appsyncArrivalTs ?? null,
+            relayForwardTs,
           });
         },
         onError: (message) => {
