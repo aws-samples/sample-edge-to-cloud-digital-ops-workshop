@@ -341,6 +341,18 @@ if [[ -z "$RISINGWAVE_S3_ROLE_ARN" || "$RISINGWAVE_S3_ROLE_ARN" == "None" ]]; th
   exit 1
 fi
 
+# Dashboard IRSA role (platform-stack.ts CloudDashboardRole) — lets the shared
+# dashboard pod read each slot's Events API endpoint from SSM and sign the
+# realtime WebSocket handshake, so the AppSync live-push tier shows REAL
+# freshness instead of mock. Non-fatal if absent (older platform stack): the
+# tier just falls back to mock, same as every other unwired tier.
+CLOUD_DASHBOARD_ROLE_ARN=$(aws cloudformation list-exports \
+  --query "Exports[?Name=='workshop-platform-cloud-dashboard-role-arn'].Value" --output text)
+if [[ -z "$CLOUD_DASHBOARD_ROLE_ARN" || "$CLOUD_DASHBOARD_ROLE_ARN" == "None" ]]; then
+  echo "WARNING: workshop-platform-cloud-dashboard-role-arn CFN export not found — AppSync live-push tier will show mock data until the platform stack is redeployed." >&2
+  CLOUD_DASHBOARD_ROLE_ARN=""
+fi
+
 # ── 4b. Adopt a stale non-Helm risingwave-cloud ServiceAccount, if present ──
 # A leftover SA from an earlier partial run / pre-Helm manual apply (#175)
 # lacks the app.kubernetes.io/managed-by=Helm label + meta.helm.sh/release-*
@@ -437,6 +449,7 @@ helm upgrade --install cloud-analytics "$REPO_ROOT/helm/cloud-analytics" \
   --set dashboard.image.repository="$DASHBOARD_REPO" \
   --set dashboard.image.tag="$DASHBOARD_TAG" \
   --set risingwave.serviceAccountRoleArn="$RISINGWAVE_S3_ROLE_ARN" \
+  --set dashboard.serviceAccountRoleArn="$CLOUD_DASHBOARD_ROLE_ARN" \
   --set telegraf.enabled="$TELEGRAF_ENABLED" \
   --set-file risingwaveDdl="$REPO_ROOT/risingwave/ddl-cloud.sql" \
   --timeout 15m

@@ -22,6 +22,10 @@ import {
 } from "aws-cdk-lib/aws-iam";
 import { CfnAccessEntry } from "aws-cdk-lib/aws-eks";
 import {
+  EventApi,
+  AppSyncAuthorizationType,
+} from "aws-cdk-lib/aws-appsync";
+import {
   CfnProvisioningTemplate,
   CfnPolicy as IotPolicy,
   CfnThingGroup,
@@ -58,14 +62,14 @@ export interface ParticipantStackProps extends NestedStackProps {
   deploymentId: string;
 
   /**
-   * The slot's AppSync GraphQL endpoint URL. Passed directly from the sibling
-   * DataNestedStack (same parent app), so the participant stack no longer needs
-   * the old CFN export-name + `Fn.importValue` cross-env workaround. A nested
-   * stack cannot `Fn::ImportValue` an export created by its own still-in-progress
-   * parent, so all cross-stack values arrive as props (CDK wires them as nested
-   * CfnParameters) — see #181.
+   * The slot's AppSync GraphQL endpoint URL, passed directly from the sibling
+   * DataNestedStack (same parent app) — see #181 for why cross-stack values
+   * arrive as props rather than `Fn.importValue`. Retained for wiring/back-compat
+   * even though the live-push bridge now targets this stack's own AppSync
+   * **Events** API (`TelemetryEventsApi`), not the GraphQL `publishTelemetry`
+   * mutation.
    */
-  graphqlEndpoint: string;
+  graphqlEndpoint?: string;
 
   /**
    * Shared platform resource identifiers, passed in from the parent
@@ -136,7 +140,7 @@ export class ParticipantStack extends NestedStack {
   constructor(scope: Construct, id: string, props: ParticipantStackProps) {
     super(scope, id, props);
 
-    const { deploymentId, graphqlEndpoint, shared } = props;
+    const { deploymentId, shared } = props;
 
     // Shared platform resources, handed down as props from the parent
     // PlatformStack (see #181). These were previously `Fn.importValue` on the
@@ -1144,7 +1148,46 @@ systemctl start sensor-sim
       ],
     });
 
+    // ── AppSync Events API (live push — no persistence) ──────────────────────
+    // The "no storage" leg of the freshness comparison: device MQTT → IoT Rule →
+    // bridge Lambda → AppSync Events API `/event` channel → dashboard WebSocket,
+    // no database in the path. IAM auth on every operation so the bridge Lambda
+    // (IAM role, below) can publish and the shared cloud-analytics dashboard pod
+    // (IRSA role in platform-stack.ts) can connect + subscribe. Channels are
+    // `/telemetry/<deploymentId>/<thingName>` — namespace `telemetry`, then one
+    // segment per slot and per device — so a subscriber filters to its own slot
+    // with `/telemetry/<deploymentId>/*`.
+    const telemetryEventsApi = new EventApi(this, "TelemetryEventsApi", {
+      apiName: `workshop-${deploymentId}-events`,
+      authorizationConfig: {
+        authProviders: [{ authorizationType: AppSyncAuthorizationType.IAM }],
+        connectionAuthModeTypes: [AppSyncAuthorizationType.IAM],
+        defaultPublishAuthModeTypes: [AppSyncAuthorizationType.IAM],
+        defaultSubscribeAuthModeTypes: [AppSyncAuthorizationType.IAM],
+      },
+    });
+    // Namespace id == name == the first channel segment (`telemetry`).
+    telemetryEventsApi.addChannelNamespace("telemetry");
+
     // ── AppSync bridge Lambda (live push — no persistence) ───────────────────
+    //
+    // #262 (epic #246) evaluated removing this Lambda hop in favor of a direct
+    // IoT Rule http action straight to the Events API above (SigV4-signed, no
+    // compute in the path). That requires the action's destination URL to be a
+    // *confirmed* TopicRuleDestination. Per AWS IoT's confirmation protocol,
+    // the `confirmationToken` needed to call ConfirmTopicRuleDestination is
+    // delivered ONLY inside the confirmation POST that IoT sends to the
+    // destination's own `confirmationUrl` -- and `confirmationUrl` must be a
+    // prefix of the delivery `url`, i.e. a path on the AppSync endpoint itself.
+    // We don't run code on that AWS-managed host, so we can never receive that
+    // POST body or its token, and there is no other API to retrieve a lost
+    // token. The destination is therefore stuck IN_PROGRESS forever and the
+    // http action can never go ENABLED -- a hard blocker, with no declarative
+    // or manual workaround (see amplify/lambda/appsync-bridge/index.js for the
+    // full citation). The Lambda stays; the mitigation taken instead is
+    // cutting its per-message overhead (module-scope keep-alive HTTPS agent in
+    // index.js, killing the per-call TLS handshake) and instrumenting the hops
+    // that remain (#263).
     const appSyncBridgeRole = new Role(this, "AppSyncBridgeRole", {
       assumedBy: new ServicePrincipal("lambda.amazonaws.com"),
       managedPolicies: [
@@ -1160,14 +1203,19 @@ systemctl start sensor-sim
       role: appSyncBridgeRole,
       timeout: Duration.seconds(5),
       environment: {
-        // #181: the sibling DataNestedStack's GraphQL URL is passed straight in
-        // as a prop (was a CFN export name resolved via Fn.importValue).
-        APPSYNC_GRAPHQL_ENDPOINT: graphqlEndpoint,
+        // The bridge SigV4-signs a POST to `https://<host>/event` on the Events
+        // API HTTP endpoint (index.js reads APPSYNC_HTTP_ENDPOINT). `httpDns` is
+        // the bare host (`<id>.appsync-api.<region>.amazonaws.com`), no scheme.
+        APPSYNC_HTTP_ENDPOINT: telemetryEventsApi.httpDns,
         DEPLOYMENT_ID: deploymentId,
         REGION: this.region,
       },
       code: Code.fromAsset("amplify/lambda/appsync-bridge"),
     });
+
+    // Let the bridge publish to the Events API (appsync:EventPublish on the
+    // API's channel namespaces).
+    telemetryEventsApi.grantPublish(this.appSyncBridgeFn);
 
     this.appSyncBridgeFn.addPermission("AllowIoTInvoke", {
       principal: new ServicePrincipal("iot.amazonaws.com"),
@@ -1186,6 +1234,15 @@ systemctl start sensor-sim
         ],
         ruleDisabled: false,
       },
+    });
+
+    // The shared cloud-analytics dashboard resolves each slot's Events API by
+    // `?did=` at request time (same per-slot SSM pattern as
+    // `/workshop/<id>/graphql-endpoint`), then derives the realtime WebSocket
+    // host from it. Full HTTPS `/event` URL so the client can `new URL(...)`.
+    new StringParameter(this, "EventsApiEndpointSsmParam", {
+      parameterName: `/workshop/${deploymentId}/events-api-endpoint`,
+      stringValue: `https://${telemetryEventsApi.httpDns}/event`,
     });
 
     // ── Per-participant MSK SASL/SCRAM secret ─────────────────────────────────
