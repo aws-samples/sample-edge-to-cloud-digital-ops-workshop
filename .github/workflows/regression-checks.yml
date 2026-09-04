@@ -1,0 +1,33 @@
+name: Regression Checks
+
+# Static, offline self-checks that guard against reintroducing bugs already
+# fixed once (see the individual scripts for the incident each one guards).
+# These are text/AST-style assertions over source — no AWS credentials, no
+# live deploy — so they run on every PR that touches the guarded files.
+on:
+  pull_request:
+    paths:
+      - 'scripts/sandbox.sh'
+      - 'scripts/sandbox-all.sh'
+      - 'scripts/verify-boot-artifact-ordering.sh'
+      - 'scripts/verify-telemetry-guard-anchoring.sh'
+      - 'job-scripts/telemetry-v1.sh'
+      - '.github/workflows/regression-checks.yml'
+
+jobs:
+  regression:
+    name: Static regression self-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # #248 round-1: boot-time S3 artifacts must be staged before the cdk
+      # deploy that launches edge instances (else the persistent-MQTT publisher
+      # install races the upload and 404s).
+      - name: Boot-artifact ordering
+        run: bash scripts/verify-boot-artifact-ordering.sh
+
+      # #248 round-6: the IoT-Job write-verification guard regex must stay
+      # anchored so it doesn't false-match its own explanatory comment.
+      - name: Telemetry-guard anchoring
+        run: bash scripts/verify-telemetry-guard-anchoring.sh
