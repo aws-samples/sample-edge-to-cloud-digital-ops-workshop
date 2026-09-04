@@ -129,11 +129,14 @@ aws s3 cp /tmp/telemetry-v2-job-doc.json \
     <!-- e2e:assert {"jsonPath": "jobId", "matches": "telemetry-v2-\\d+$", "jobSucceeds": true} -->
 
     > **Note:** `--destination-package-versions` links this job to the published
-    > `telemetry-agent` catalog version. On `SUCCEEDED`, IoT Jobs writes the reserved
-    > `$package` shadow (`telemetry-agent.version: 2.0.0`) for you — the handler no
-    > longer writes it by hand. The handler still writes the app-level
-    > `device-config.reported.config_version` shadow, which package deployment does
-    > not manage.
+    > catalog version. On `SUCCEEDED`, IoT Jobs writes the reserved `$package`
+    > shadow for you — the handler no longer writes it by hand. It writes the
+    > version under a key named after the **package**, i.e.
+    > `$package.reported["ws-slot00-telemetry-agent"].version = 2.0.0` — **not** a
+    > bare `telemetry-agent` key. (An older hand-writing handler used the bare key;
+    > that's why the block-3 fleet query has to check the package-name key first.)
+    > The handler still writes the app-level `device-config.reported.config_version`
+    > shadow, which package deployment does not manage.
 
 **4. Observe job status** per device: `IN_PROGRESS` → `SUCCEEDED`
 

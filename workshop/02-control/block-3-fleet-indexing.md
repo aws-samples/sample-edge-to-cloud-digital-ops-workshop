@@ -64,10 +64,11 @@
     | jq -r '["THING","CONNECTED","CONFIG_VERSION","TELEMETRY_AGENT"],
              (.things[]
               | (.shadow // "{}" | fromjson) as $s
+              | ($s.name["$package"].reported // {}) as $pkg
               | [ .thingName,
                   (if .connectivity.connected then "online" else "offline" end),
                   ($s.name["device-config"].reported.config_version // "—"),
-                  ($s.name["$package"].reported["telemetry-agent"].version // "—") ]
+                  ($pkg["ws-slot00-telemetry-agent"].version // $pkg["telemetry-agent"].version // "—") ]
              ) | @tsv' | column -t
     ```
     <!-- e2e:assert {"contains": "TELEMETRY_AGENT"} -->
@@ -80,6 +81,18 @@
     shadow as an empty object, and each `// "—"` fills in for a field the device
     hasn't reported. Without them you only see the handful of devices before the
     first gap.
+
+    The `TELEMETRY_AGENT` lookup is deliberately two-pronged. The reserved
+    `$package` shadow keys each entry **by package name**, so the version that IoT
+    Jobs writes on a package-linked deployment lands under
+    `ws-slot00-telemetry-agent`, not a bare `telemetry-agent`. Devices updated by
+    an earlier hand-writing handler (before package deployment existed) instead
+    carry a bare `telemetry-agent` key. A device that has run the block-2 job shows
+    **both** — the frozen hand-written `1.0.0` *and* the package-managed `2.0.0` —
+    so the query reads `ws-slot00-telemetry-agent` first and only falls back to the
+    bare key. Reading the bare key alone is the classic "the job succeeded but the
+    version still says v1" trap: the package-managed value is right there under a
+    different key.
 
     Output — one row per device:
 

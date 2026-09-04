@@ -37,8 +37,11 @@ if not things:
     sys.exit("No devices report a config_version yet — wait for the job to finish.")
 print("THING_NAME".ljust(40), "REPORTED config_version")
 for t in things:
-    reported = json.loads(t["shadow"])["name"]["device-config"]["reported"]
-    print(t["thingName"].ljust(40), reported["config_version"])
+    shadow = t.get("shadow")
+    if not shadow:
+        continue
+    cfg = json.loads(shadow).get("name", {}).get("device-config", {})
+    print(t["thingName"].ljust(40), cfg.get("reported", {}).get("config_version", "-"))
 '
 ```
 <!-- e2e:assert {"contains": "REPORTED config_version", "notContains": "Traceback"} -->
@@ -51,9 +54,14 @@ for t in things:
 **3. Simulate configuration drift** — push a stale `desired` version to one device:
 
 ```bash
-THING_NAME=$(aws iot list-things-in-thing-group \
-  --thing-group-name ws-slot00-devices \
-  --query 'things[0]' --output text)
+# Pick a device that has actually upgraded (reported != 1.0.0) so pushing a stale
+# desired:1.0.0 produces a real delta. If every device is still on 1.0.0, fall back
+# to the first device in the group.
+THING_NAME=$(aws iot search-index --index-name AWS_Things \
+  --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.device-config.reported.config_version:* AND NOT shadow.name.device-config.reported.config_version:1.0.0' \
+  --query 'things[0].thingName' --output text)
+[ "$THING_NAME" = "None" ] && THING_NAME=$(aws iot list-things-in-thing-group \
+  --thing-group-name ws-slot00-devices --query 'things[0]' --output text)
 
 # Save the device's current reported version so the drift can be reverted below.
 aws iot-data get-thing-shadow \
@@ -77,14 +85,21 @@ cat /tmp/shadow-update-response.json
 
 **4. Run a drift detection query** — find devices where `desired` ≠ `reported`, and see both values:
 
-Fleet Indexing takes a few seconds to reflect the shadow update, so this polls
-until the drifted device appears, then prints the desired-vs-reported gap per
-device:
+Fleet Indexing maintains a per-shadow boolean, `shadow.name.<name>.hasDelta`,
+that is `true` exactly when that shadow's `desired` and `reported` differ — so
+`shadow.name.device-config.hasDelta:true` is the drift filter. (Fleet Indexing
+**cannot** compare two fields to each other in the query string — a term like
+`desired.config_version:shadow.name.device-config.reported.config_version`
+treats the right-hand side as a *literal string value*, not a field reference,
+so it silently matches almost everything and never actually detects drift. Use
+`hasDelta` instead.) Fleet Indexing takes a few seconds to reflect the shadow
+update, so this polls until the drifted device appears, then prints the
+desired-vs-reported gap per device:
 
 ```bash
 for _i in $(seq 1 12); do
   RESULT=$(aws iot search-index --index-name AWS_Things \
-    --query-string 'attributes.deploymentId:ws-slot00 AND NOT (shadow.name.device-config.desired.config_version:shadow.name.device-config.reported.config_version)' \
+    --query-string 'attributes.deploymentId:ws-slot00 AND shadow.name.device-config.hasDelta:true' \
     --output json)
   COUNT=$(echo "$RESULT" | python3 -c "import sys,json; print(len(json.load(sys.stdin)['things']))")
   [ "$COUNT" != "0" ] && break
@@ -98,7 +113,10 @@ if not things:
     sys.exit("No drifted devices found.")
 print("THING_NAME".ljust(40), "DESIRED".ljust(8), "REPORTED")
 for t in things:
-    cfg = json.loads(t["shadow"])["name"]["device-config"]
+    shadow = t.get("shadow")
+    if not shadow:
+        continue
+    cfg = json.loads(shadow).get("name", {}).get("device-config", {})
     desired = cfg.get("desired", {}).get("config_version", "-")
     reported = cfg.get("reported", {}).get("config_version", "-")
     print(t["thingName"].ljust(40), desired.ljust(8), reported)

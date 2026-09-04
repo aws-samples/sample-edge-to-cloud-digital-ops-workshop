@@ -285,9 +285,9 @@ Participants create an IoT Job that deploys an updated telemetry script to all 3
   shadow.name.device-config.reported.config_version:2.0.0
   ```
 - Simulate drift: manually edit one device's shadow desired state back to `1.0.0`
-- Run drift detection query:
+- Run drift detection query (Fleet Indexing can't compare two fields; use the managed delta flag):
   ```
-  NOT (shadow.name.device-config.desired.config_version:shadow.name.device-config.reported.config_version)
+  shadow.name.device-config.hasDelta:true
   ```
 - Discuss: this is how you find devices that haven't converged
 

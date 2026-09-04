@@ -236,9 +236,11 @@ Console links for IoT Fleet Indexing searches must follow these rules or the sea
 
 4. **Never wrap the entire query in quotes** — `%22(...)%22` turns the expression into a phrase match, not a field comparison. Quotes are only valid around literal string values.
 
+5. **Fleet Indexing cannot compare two fields to each other** — a term like `shadow.name.device-config.desired.config_version:shadow.name.device-config.reported.config_version` does **not** compare desired against reported; the right-hand side is parsed as a *literal string value*, so the term matches almost everything and silently fails to detect drift. To find drifted devices, use the managed per-shadow delta flag `shadow.name.<name>.hasDelta:true` (it is `true` exactly when that shadow's `desired` ≠ `reported`).
+
 Example of a correct drift-detection URL:
 ```
-https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=attributes.deploymentId%3Aws-slot00%20AND%20NOT%20(shadow.name.device-config.desired.config_version%3Ashadow.name.device-config.reported.config_version)
+https://us-east-1.console.aws.amazon.com/iot/home?region=us-east-1#/search?indexType=AWS_Things&search=attributes.deploymentId%3Aws-slot00%20AND%20shadow.name.device-config.hasDelta%3Atrue
 ```
 
 ## Monitoring Long-Running AWS Operations From Your Laptop
