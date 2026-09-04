@@ -1,0 +1,3122 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A 7-session hands-on workshop covering IoT fleet management, real-time data pipelines, and edge computing on AWS.">
+      
+      
+        <meta name="author" content="NOV Digital Operations">
+      
+      
+      
+        <link rel="prev" href="../../07-capstone/block-4-teardown/">
+      
+      
+        <link rel="next" href="../architecture/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Roadmap & E2E Status - Edge Digital Operations Workshop</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#roadmap-e2e-coverage-status" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="Edge Digital Operations Workshop" class="md-header__button md-logo" aria-label="Edge Digital Operations Workshop" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Edge Digital Operations Workshop
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Roadmap & E2E Status
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    sample-edge-to-cloud-digital-ops-workshop
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../00-prerequisites/" class="md-tabs__link">
+          
+  
+  
+  Prerequisites
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../01-observe/" class="md-tabs__link">
+          
+  
+  
+  Session 1 — Observe
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../02-control/" class="md-tabs__link">
+          
+  
+  
+  Session 2 — Control
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../03-state/" class="md-tabs__link">
+          
+  
+  
+  Session 3 — State
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../04-analytics/" class="md-tabs__link">
+          
+  
+  
+  Session 4 — Analytics
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../05-edge-infra/" class="md-tabs__link">
+          
+  
+  
+  Session 5 — Edge Infrastructure
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../06-hmi/" class="md-tabs__link">
+          
+  
+  
+  Session 6 — HMI
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../07-capstone/" class="md-tabs__link">
+          
+  
+  
+  Session 7 — Capstone
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="./" class="md-tabs__link">
+          
+  
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="Edge Digital Operations Workshop" class="md-nav__button md-logo" aria-label="Edge Digital Operations Workshop" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Edge Digital Operations Workshop
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/aws-samples/sample-edge-to-cloud-digital-ops-workshop" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    sample-edge-to-cloud-digital-ops-workshop
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Prerequisites
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Prerequisites
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../00-prerequisites/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Admin Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Session 1 — Observe
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Session 1 — Observe
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../01-observe/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../01-observe/block-0-fleet-provisioning/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 0 — Fleet Provisioning
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../01-observe/block-1-console-tour/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 1 — Console Tour
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../01-observe/block-2-s3/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 2 — S3 Observation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../01-observe/block-3-athena/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 3 — Athena Freshness
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Session 2 — Control
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Session 2 — Control
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../02-control/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../02-control/block-1-device-client/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 1 — Device Client Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../02-control/block-2-iot-job/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 2 — Create and Deploy a Job
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../02-control/block-3-fleet-indexing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 3 — Fleet Indexing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../02-control/block-4-fleet-management/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 4 — Fleet Management Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../02-control/block-5-observe/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 5 — Observe Updated Data Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Session 3 — State
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Session 3 — State
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../03-state/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../03-state/block-1-shadows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 1 — Named Shadow Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../03-state/block-2-shadow-job/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 2 — Deploy Shadow Update Job
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../03-state/block-3-failure/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 3 — Failure Detection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Session 4 — Analytics
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Session 4 — Analytics
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../04-analytics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../04-analytics/block-1-storage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 1 — Storage Tiers Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../04-analytics/block-2-risingwave/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 2 — RisingWave In-Memory Streaming MVs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../04-analytics/block-3-appsync/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 3 — Data Delivery Patterns & Freshness
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../04-analytics/block-4-timescaledb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 4 — TimescaleDB Continuous Aggregates
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../04-analytics/block-5-timestream-influxdb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 5 — Timestream for InfluxDB (Managed Hot Tier)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../04-analytics/block-6-dashboard/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 6 — The Four Stores, Side by Side
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Session 5 — Edge Infrastructure
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Session 5 — Edge Infrastructure
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../05-edge-infra/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../05-edge-infra/block-1-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 1 — Edge Stack Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../05-edge-infra/block-2-k3s-launch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 2 — Launch K3s + Sensor EC2
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../05-edge-infra/block-3-helm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 3 — Deploy Edge Helm Stack
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../05-edge-infra/block-4-verify/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 4 — Verify Edge Pipeline
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../05-edge-infra/block-5-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 5 — Cluster Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_8" >
+        
+          
+          <label class="md-nav__link" for="__nav_8" id="__nav_8_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Session 6 — HMI
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_8">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Session 6 — HMI
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../06-hmi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../06-hmi/block-1-port-forward/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 1 — Port-Forward and Load HMI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../06-hmi/block-2-site-view/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 2 — Site View Exploration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../06-hmi/block-3-failure-sim/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 3 — Digital Ops & Network Failure
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../06-hmi/block-4-freshness/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 4 — Compare Edge vs Cloud Freshness
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../06-hmi/block-5-load-burst/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 5 — Realistic Data Volume Burst
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_9" >
+        
+          
+          <label class="md-nav__link" for="__nav_9" id="__nav_9_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Session 7 — Capstone
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_9_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_9">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Session 7 — Capstone
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../07-capstone/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../07-capstone/block-1-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 1 — Architecture Walkthrough
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../07-capstone/block-2-scale/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 2 — Fleet Scale Discussion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../07-capstone/block-3-day2/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 3 — Day-2 Operations Scenario
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../07-capstone/block-4-teardown/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block 4 — Teardown
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_10" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_10" id="__nav_10_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_10_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_10">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Roadmap & E2E Status
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Roadmap & E2E Status
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#testing-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing model
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Testing model">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#personas-admin-vs-participant" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Personas — admin vs participant
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#latest-run-2026-07-30-on-ws-slot06-4766-blocks-passed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Latest run — 2026-07-30 on ws-slot06: 47/66 blocks passed
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#latest-full-slot-run-37-release-baseline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Latest full-slot run — #37 release baseline
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../decisions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture Decisions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-client-vs-greengrass/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Device Client vs. Greengrass
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../register-device-over-ssh/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registering a Device over SSH
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../gotchas/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Gotchas & Watch-Outs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../repo-structure/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Repository Structure
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing to the Docs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#testing-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing model
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Testing model">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#personas-admin-vs-participant" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Personas — admin vs participant
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#latest-run-2026-07-30-on-ws-slot06-4766-blocks-passed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Latest run — 2026-07-30 on ws-slot06: 47/66 blocks passed
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#latest-full-slot-run-37-release-baseline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Latest full-slot run — #37 release baseline
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+                
+
+
+
+  
+
+
+  <nav class="md-path" aria-label="Navigation" >
+    <ol class="md-path__list">
+      
+        
+  
+  
+    <li class="md-path__item">
+      <a href="../.." class="md-path__link">
+        
+  <span class="md-ellipsis">
+    Home
+  </span>
+
+      </a>
+    </li>
+  
+
+      
+      
+        
+  
+  
+    
+    
+      <li class="md-path__item">
+        <a href="./" class="md-path__link">
+          
+  <span class="md-ellipsis">
+    Reference
+  </span>
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ol>
+  </nav>
+
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="roadmap-e2e-coverage-status">Roadmap &amp; E2E Coverage Status<a class="headerlink" href="#roadmap-e2e-coverage-status" title="Permanent link">&para;</a></h1>
+<p>Maintainer-facing tracker for workshop build-out and end-to-end (doc-runner) test
+coverage. Participant instructions live in the session docs; this page tracks the
+work <em>behind</em> them. Keep it current as issues open, land, and close.</p>
+<p><em>Last updated: 2026-07-30.</em></p>
+<h2 id="testing-model">Testing model<a class="headerlink" href="#testing-model" title="Permanent link">&para;</a></h2>
+<p><code>e2e/runner.ts</code> has been removed. The <strong>doc-runner</strong> (<code>e2e/doc-runner.ts</code> +
+<code>e2e/doc-runner-cli.ts</code>) is now the sole end-to-end test: it extracts bash blocks
+annotated with <code>&lt;!-- e2e:assert {...} --&gt;</code> from the published workshop docs and
+executes them against a live slot, so the thing under test is the literal command a
+participant copy-pastes.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nb">cd</span><span class="w"> </span>e2e<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>npx<span class="w"> </span>tsx<span class="w"> </span>doc-runner-cli.ts<span class="w"> </span>workshop/02-control<span class="w"> </span>--deployment-id<span class="w"> </span>ws-slot00
+</code></pre></div>
+<p>Pass <code>--report-out &lt;path&gt;</code> (or set <code>E2E_REPORT_OUT</code>) to also persist the run
+summary to a markdown file — replaces the old copy-paste-the-terminal habit.
+A directory argument (default <code>e2e/reports/</code>) is named <code>YYYY-MM-DD-&lt;slot&gt;.md</code>;
+stdout output is unchanged either way:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="nb">cd</span><span class="w"> </span>e2e<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>npx<span class="w"> </span>tsx<span class="w"> </span>doc-runner-cli.ts<span class="w"> </span>workshop<span class="w"> </span>--deployment-id<span class="w"> </span>ws-slot06<span class="w"> </span>--report-out<span class="w"> </span>e2e/reports/
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="c1"># =&gt; writes e2e/reports/2026-07-31-ws-slot06.md</span>
+</code></pre></div>
+<h3 id="personas-admin-vs-participant">Personas — admin vs participant<a class="headerlink" href="#personas-admin-vs-participant" title="Permanent link">&para;</a></h3>
+<p>The runner can execute a doc under one of two identities (<code>--persona</code> /
+<code>E2E_PERSONA</code>), because a single doc (e.g. <code>04-analytics/block-1-deploy.md</code>)
+interleaves cluster-scoped facilitator steps with namespace-scoped attendee steps:</p>
+<table>
+<thead>
+<tr>
+<th>Persona</th>
+<th>Credentials</th>
+<th>Runs which blocks</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><em>(unset, default)</em></td>
+<td>calling principal, granted cluster access</td>
+<td><strong>every</strong> annotated block — unchanged <code>pnpm run e2e</code></td>
+</tr>
+<tr>
+<td><code>admin</code> (<code>pnpm run e2e:admin</code>)</td>
+<td>calling principal; <code>grant-ci-access.sh</code> grants it cluster-scoped EKS/Cognito access first</td>
+<td>blocks tagged <code>"persona":"admin"</code> <strong>plus</strong> untagged blocks</td>
+</tr>
+<tr>
+<td><code>participant</code> (<code>pnpm run e2e:participant</code>)</td>
+<td><strong><code>WorkshopParticipantRole-&lt;slot&gt;</code>, assumed via STS for both <code>aws</code> CLI and <code>kubectl</code>/<code>helm</code></strong></td>
+<td>blocks tagged <code>"persona":"participant"</code> <strong>plus</strong> untagged blocks</td>
+</tr>
+</tbody>
+</table>
+<p>A block opts into a persona with a <code>"persona"</code> key in its <code>e2e:assert</code> JSON
+(<code>{"contains":"Ready","persona":"admin"}</code>); <strong>omitting it means the block runs
+under both</strong>.</p>
+<p>The participant persona models the real attendee identity — per #123's Model 2
+decision, <code>WorkshopParticipantRole-&lt;slot&gt;</code> is the participant's <strong>full</strong>
+identity, not an EKS-only assume-role: an attendee assumes the role once and
+runs every non-admin step (<code>iot</code>, <code>s3</code>, <code>secretsmanager</code>, <code>athena</code>, <code>kubectl</code>,
+<code>helm</code>, …) as that role. The runner implements this with a single STS
+<code>AssumeRole</code> call (after SSM config resolution, which still runs on ambient
+creds — the participant role can't read <code>/workshop/&lt;slot&gt;/*</code>), injecting the
+returned credentials into <code>process.env</code> so every subsequent <code>aws</code> call in a
+block runs as the role. It also builds a dedicated kubeconfig (exec plugin
+calling <code>aws eks get-token</code> with <strong>no</strong> <code>--role-arn</code> — the injected env creds
+already <em>are</em> the role, so adding <code>--role-arn</code> would make the plugin assume the
+participant role <em>from</em> the participant role, a self-assume that fails
+<code>AccessDenied</code>) and points <code>KUBECONFIG</code> at it, so the doc's cluster-admin
+<code>update-kubeconfig</code> (Step 1 of block-1-deploy) — tagged <code>persona:admin</code> and
+skipped in the participant run — can't clobber it.</p>
+<h2 id="latest-run-2026-07-30-on-ws-slot06-4766-blocks-passed">Latest run — 2026-07-30 on <code>ws-slot06</code>: 47/66 blocks passed<a class="headerlink" href="#latest-run-2026-07-30-on-ws-slot06-4766-blocks-passed" title="Permanent link">&para;</a></h2>
+<p>Full doc-runner run against <code>ws-slot06</code> on 2026-07-30 (report:
+<code>e2e/reports/2026-07-30-slot06.md</code>). <strong>47/66 asserted blocks passed.</strong> The 19 reds
+fall into three buckets — two real defects and one test-runner precondition:</p>
+<p><strong>1. Flink Iceberg sink not running (real defect) — #117 / #118</strong>
+- <code>01-observe/block-3-athena.md</code> block 2 <strong>and</strong> <code>02-control/block-5-observe.md</code>
+  block 1 both fail with <code>ICEBERG_MISSING_METADATA: Metadata not found in metadata
+  location for table workshop_telemetry.telemetry</code>. Same root cause: the Managed
+  Flink app <code>workshop-iceberg-sink</code> <strong>crash-loops back to <code>READY</code></strong> and never writes
+  the Iceberg table metadata (<code>telemetry/</code> S3 prefix is empty). <code>FlinkAppAutoStart</code>
+  fired but the job doesn\'t stay RUNNING. <strong>#117</strong>, blocked by <strong>#118</strong> (app has
+  <strong>no CloudWatch logging</strong> attached → crash undiagnosable until logging is added).</p>
+<p><strong>2. Docs still say "Hudi" (real defect) — #119</strong>
+- The archive tier was migrated MSK-Connect-Hudi → Managed-Flink-Iceberg
+  (commits <code>63b1a30</code>, <code>7c6853c</code>/PR #82) but ~10 doc files still describe it as Hudi,
+  including <code>reference/decisions.md</code>\'s now-inverted "Hudi over Iceberg" row. No Hudi
+  component is deployed (<code>kafkaconnect list-connectors</code> → <code>[]</code>). Doc-only fix.</p>
+<p><strong>3. EKS auth not granted to the test-runner role (precondition, NOT a defect) — FIXED</strong>
+- All of <code>04-analytics</code> (block-1-deploy 3/15, block-2-risingwave 0/2,
+  block-4-timescaledb 0/2) failed with <em>"the server has asked for the client to
+  provide credentials"</em> / port-4567 connection-refused. Cause: the local
+  <code>admin/waltmayf-Isengard</code> role was <strong>not</strong> in <code>workshop-eks</code> access entries.
+  (Participant roles already get a namespace-scoped <code>AmazonEKSEditPolicy</code> entry
+  from the CDK — only a CI/facilitator role that didn\'t create the cluster is
+  affected.) <strong>Fixed</strong>: <code>doc-runner-cli.ts</code> now runs <code>scripts/grant-ci-access.sh</code>
+  for the calling role at startup (best-effort, skips participant roles, opt out
+  with <code>E2E_SKIP_EKS_GRANT=true</code>). Verified: the auth error is gone; a fresh
+  sequential run creates the <code>ws-slot06</code> namespace in block-1 before the later
+  blocks query it. Not a workshop bug — no issue filed.
+- <code>05-edge-infra/index.md</code> block 1 (docker build) is the <strong>same local buildx/ECR
+  artifact</strong> as the #37 baseline — not a product defect.</p>
+<blockquote>
+<p>The #37 baseline (below) was on <code>ws-slot38</code> with the Flink sink healthy and CI
+EKS access pre-granted; #117/#119 are genuine regressions/drift to fix, while the
+04-analytics reds here are just this run\'s missing EKS grant.</p>
+</blockquote>
+<h2 id="latest-full-slot-run-37-release-baseline">Latest full-slot run — #37 release baseline<a class="headerlink" href="#latest-full-slot-run-37-release-baseline" title="Permanent link">&para;</a></h2>
+<p>Against a <strong>clean slot <code>ws-slot38</code></strong> on 2026-07-29 (all code fixes deployed:</p>
+<h1 id="102-creategrant-103-device-client-restart-doc-fixes-from-105107108">102 CreateGrant, #103 device-client restart; doc fixes from #105/#107/#108):<a class="headerlink" href="#102-creategrant-103-device-client-restart-doc-fixes-from-105107108" title="Permanent link">&para;</a></h1>
+<p><strong>65/66 asserted blocks pass.</strong> The single red is <code>05-edge-infra/index.md</code>'s
+docker build — a local buildx/ECR-login artifact (<code>public.ecr.aws</code> 403 on the
+metadata HEAD; direct <code>docker pull</code> succeeds), not a product defect. This is the
+release baseline that closed #37.</p>
+<table>
+<thead>
+<tr>
+<th>Session</th>
+<th>Result</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>01-observe</td>
+<td>✅</td>
+<td>Athena/Glue green</td>
+</tr>
+<tr>
+<td>02-control</td>
+<td>✅</td>
+<td>iot-job 6/6 after #103 fix (notify-next race gone); fleet-indexing/management green</td>
+</tr>
+<tr>
+<td>03-state</td>
+<td>✅</td>
+<td>shadow-job + ui green</td>
+</tr>
+<tr>
+<td>04-analytics</td>
+<td>✅ 15/15 + 2/2 + 2/2</td>
+<td>after clearing shared-EKS capacity exhaustion (see ops note below)</td>
+</tr>
+<tr>
+<td>05-edge-infra</td>
+<td>✅</td>
+<td>k3s-launch 4/4, helm 4/4, verify 6/6; only <code>index.md</code> docker build red (local runner artifact)</td>
+</tr>
+<tr>
+<td>06-hmi</td>
+<td>✅</td>
+<td></td>
+</tr>
+<tr>
+<td>07-capstone</td>
+<td>✅</td>
+<td>teardown block</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Ops note:</strong> don't stack multiple slots' analytics workloads on the shared
+2-node EKS at once — leftover namespaces pin both nodes at ~99% memory and new
+slots' RisingWave/TimescaleDB pods stay <code>Pending</code>. Delete stale <code>ws-slotNN</code>
+namespaces before a fresh analytics run.</p>
+</blockquote>
+<h2 id="session-4-analytics-fixes-landed-on-fixanalytics-storage-and-docrunner">Session-4 analytics fixes (landed on <code>fix/analytics-storage-and-docrunner</code>)<a class="headerlink" href="#session-4-analytics-fixes-landed-on-fixanalytics-storage-and-docrunner" title="Permanent link">&para;</a></h2>
+<p>The 04-analytics doc-runner went from <strong>1/14 → all-paths-green</strong> after fixing a
+chain of infra + doc bugs, each verified live on a fresh test slot:</p>
+<ul>
+<li><strong>Storage tier never provisioned</strong> — platform stack shipped no EBS CSI driver
+  and no default <code>StorageClass</code>, so every PVC (TimescaleDB, RisingWave) stayed
+  <code>Pending</code>. Fixed: install EBS CSI + OIDC audience in the platform stack
+  (commit <code>9c919b0</code>); doc creates a <code>gp3</code> default <code>StorageClass</code> once per cluster.</li>
+<li><strong>MSK SCRAM secret never associated</strong> — <code>batchAssociateScramSecret</code> returns
+  HTTP 200 with per-secret failures in <code>UnprocessedScramSecrets[]</code> and never
+  throws, so the <code>AwsCustomResource</code> reported success while every SASL/SCRAM
+  login failed "invalid credentials". Fixed: Lambda-backed custom resource that
+  polls <code>ListScramSecrets</code> and retries until association verifiably takes
+  (<code>participant-stack.ts</code>).</li>
+<li><strong>MSK topics never created / MSK is VPC-private</strong> — <code>PublicAccess: DISABLED</code>
+  means <code>create-msk-topics.sh</code> can't run from a laptop. Fixed: block-1 doc now
+  creates topics from an in-cluster <code>python:3.12-slim</code> pod with <code>kafka-python</code>
+  (the JVM Kafka CLI OOMs on the memory-constrained nodes).</li>
+<li><strong>block-4 wrong service/db names</strong> — connected to <code>timescaledb-rw</code>/<code>telemetry</code>;
+  actual deployed names are <code>timescaledb-cloud-rw</code>/<code>edge</code> with a CNPG-generated
+  password. Fixed the connect block + documented the local port-5432 collision
+  and the <code>psql</code>-client prerequisite (commit <code>a70a619</code>).</li>
+<li><strong>RisingWave DDL assert mismatch</strong> — RisingWave emits <code>CREATE_MATERIALIZED_VIEW</code>
+  (underscores), not the spaced PostgreSQL form; asserts corrected in block-1 and
+  block-2 (commit <code>e740f52</code>).</li>
+<li><strong>doc-runner placeholder substitution</strong> — assert <em>expected</em> values weren't being
+  run through the same <code>ws-slot00</code>/account substitution as the commands, and two
+  host-only asserts were dropped (commit <code>5bec387</code>).</li>
+</ul>
+<p><strong>#88 (closed)</strong> — block-4 continuous aggregates now run for real. The cloud
+"TimescaleDB" was plain <code>postgresql:16.3</code> (no timescaledb extension), so the CAGG
+SQL couldn't run and referenced a nonexistent <code>telemetry_raw</code>/<code>cpu_pct</code> schema.
+Fixed by keeping CNPG (operator owns HA/failover/backups) and swapping only the
+<em>operand</em> image to a CNPG-compatible build with timescaledb baked in
+(<code>ghcr.io/clevyr/cloudnativepg-timescale:16.4-ts2.16</code> — the official
+<code>timescale/timescaledb-ha</code> tags are non-semver and fail CNPG's validator).
+<code>postInitApplicationSQL</code> now <code>CREATE EXTENSION</code>, promotes <code>sensor_readings</code> to a
+hypertable, and <code>ALTER TABLE ... OWNER TO workshop</code> (a CAGG needs ownership of the
+source table). block-4 DDL rewritten against the real <code>sensor_readings</code> schema
+with an e2e-asserted bash block; verified live (doc-runner 2/2).</p>
+<h2 id="milestones">Milestones<a class="headerlink" href="#milestones" title="Permanent link">&para;</a></h2>
+<ul>
+<li>[x] Broaden <code>e2e:assert</code> annotation coverage to every session (#67)</li>
+<li>[x] Consolidate on doc-runner; remove <code>runner.ts</code> (#68 — closed, commit <code>2703c4e</code>)</li>
+<li>[x] IAM-driven EKS access entries so participants can <code>helm</code>/<code>kubectl</code> (#70 item 1)</li>
+<li>[x] Fix <code>set -e</code> session-abort masking in doc-runner (#72)</li>
+<li>[x] Fix non-exported var threading between blocks (#74) — PR #76 (fleet-management 4/6 → 6/6)</li>
+<li>[x] Fix <code>deployment-summary.sh</code> CFN export names so per-slot fields populate (#36) — PR #78</li>
+<li>[x] SSH device-registration flow verified end-to-end; fixed stale fleet-provisioning runtime state on re-register (#38) — PR #79</li>
+<li>[x] Doc-runner exposed via <code>pnpm run test*</code> scripts, verified on a live slot (#23)</li>
+<li>[x] Resolve IoT Job block timeouts (#75/#103) — root cause was the aws-iot-device-client v1.10.0 fleet-provisioning jobs-subscription race, NOT a poll-ceiling bug. Fixed with a sentinel-guarded one-time post-provision restart (PR #105).</li>
+<li>[x] SSM port-forward path for session-5 K3s Helm blocks (#70 item 3) — <code>scripts/edge-kubeconfig.sh</code> (PR #109)</li>
+<li>[x] Provision EKS storage tier (EBS CSI + default <code>StorageClass</code>) so analytics PVCs bind</li>
+<li>[x] Reliable MSK SCRAM association via Lambda custom resource (was silently failing)</li>
+<li>[x] MSK SCRAM Lambda needs <code>kms:CreateGrant</code> on the SCRAM CMK — clean-slot deploy blocker exposed by #37 (PR #102)</li>
+<li>[x] VPC-private MSK topic creation from an in-cluster pod (04-analytics block 1)</li>
+<li>[x] Full-suite green-run sign-off on a fresh slot (#37) — <strong>65/66 asserted blocks</strong> on clean slot ws-slot38; sole red is a local buildx/ECR artifact, not a defect. CLOSED.</li>
+</ul>
+<h2 id="issue-board">Issue board<a class="headerlink" href="#issue-board" title="Permanent link">&para;</a></h2>
+<h3 id="unblocked-actionable-now">Unblocked (actionable now)<a class="headerlink" href="#unblocked-actionable-now" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Type</th>
+<th>Title</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>~~#23~~</td>
+<td>needs-review</td>
+<td>Test doc runner</td>
+<td>✅ Closed — satisfied by <code>pnpm run test*</code> scripts, verified on ws-slot00</td>
+</tr>
+<tr>
+<td>~~#29~~</td>
+<td>feature</td>
+<td>3-way data-freshness comparison (Athena/Iceberg tier)</td>
+<td>✅ Closed (PR #82)</td>
+</tr>
+<tr>
+<td>~~#31~~</td>
+<td>feature</td>
+<td>Edge digital-ops backlog metric</td>
+<td>✅ Closed (PR #84) — Redpanda consumer-group lag scraped from <code>/public_metrics</code></td>
+</tr>
+<tr>
+<td>~~#36~~</td>
+<td>ops</td>
+<td>Populate per-slot fields in DEPLOYMENT_SUMMARY.md</td>
+<td>✅ Closed (PR #78)</td>
+</tr>
+<tr>
+<td>~~#38~~</td>
+<td>feature</td>
+<td>Register a new IoT device over SSH</td>
+<td>✅ Closed (PR #79) — verified end-to-end</td>
+</tr>
+<tr>
+<td>~~#68~~</td>
+<td>e2e</td>
+<td>Doc-runner as sole e2e test</td>
+<td>✅ Closed — <code>runner.ts</code>/<code>report-writer.ts</code> removed, scripts repointed, CLAUDE.md updated (commit <code>2703c4e</code>)</td>
+</tr>
+<tr>
+<td>~~#74~~</td>
+<td>bug/e2e</td>
+<td>Block isolation drops non-exported shell vars → "unbound variable"</td>
+<td>✅ Closed (PR #76)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="closed-since-last-update-2026-07-29-session">Closed since last update (2026-07-29 session)<a class="headerlink" href="#closed-since-last-update-2026-07-29-session" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Title</th>
+<th>Resolution</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>~~#27~~</td>
+<td>Re-run shadow-job on slots, confirm green</td>
+<td>✅ Closed (blocker for #37)</td>
+</tr>
+<tr>
+<td>~~#28~~</td>
+<td>Exercise per-slot teardown verification</td>
+<td>✅ Closed — verified clean via live AWS API</td>
+</tr>
+<tr>
+<td>~~#37~~</td>
+<td>Full-suite green-run sign-off on a fresh slot</td>
+<td>✅ Closed — 65/66 on clean slot ws-slot38; sole red is a local buildx/ECR artifact</td>
+</tr>
+<tr>
+<td>~~#41~~</td>
+<td>Exercise platform teardown verification (Phase 9)</td>
+<td>✅ Closed — <code>WorkshopPlatformStack</code> DELETE_COMPLETE, all shared EKS/MSK/VPCs/peering/bucket/exports gone (verified live). Exposed #111.</td>
+</tr>
+<tr>
+<td>~~#70~~</td>
+<td>Doc-runner IAM + network path for sessions 03–05</td>
+<td>✅ Closed (PR #109) — EKS access entry + Cognito grant applied live &amp; codified in <code>grant-ci-access.sh</code>; K3s SSM path in <code>edge-kubeconfig.sh</code></td>
+</tr>
+<tr>
+<td>~~#75~~</td>
+<td>IoT Job blocks time out</td>
+<td>✅ Closed — root cause was the device-client FP jobs-subscription race (#103), fixed in PR #105</td>
+</tr>
+<tr>
+<td>~~#93~~</td>
+<td>block-4-verify names/ports</td>
+<td>✅ Closed (PR #101)</td>
+</tr>
+<tr>
+<td>~~#106~~</td>
+<td>block-4-verify EKS fall-through</td>
+<td>✅ Closed (PR #107)</td>
+</tr>
+<tr>
+<td>~~#111~~</td>
+<td>Platform teardown fails (Athena workgroup + S3 auto-delete)</td>
+<td>✅ Closed (PR #112) — Athena <code>recursiveDeleteOption</code>, S3 lifecycle rules, bucket pre-empty in <code>sandbox-delete-all.sh</code></td>
+</tr>
+<tr>
+<td>~~#117~~</td>
+<td>Athena queries fail: <code>ICEBERG_MISSING_METADATA</code> — Flink Iceberg sink crash-loops to READY</td>
+<td>✅ Closed — obsoleted by the archive-tier rearchitecture (#124/PR #126): the crash-looping Managed Flink app was removed entirely in favour of Amazon Data Firehose writing Iceberg directly, so there is no Flink job left to crash-loop</td>
+</tr>
+<tr>
+<td>~~#118~~</td>
+<td>Managed Flink Iceberg sink has no CloudWatch logging — crash-loop undiagnosable</td>
+<td>✅ Closed — moot after #124/PR #126 removed the Flink app (the app it was meant to make diagnosable no longer exists)</td>
+</tr>
+<tr>
+<td>~~#119~~</td>
+<td>Docs still say Hudi; deployment migrated off Hudi (~10 files, incl. inverted <code>decisions.md</code> row)</td>
+<td>✅ Closed — the full archive-tier prose sweep to Firehose + Iceberg shipped in #125/PR #129</td>
+</tr>
+</tbody>
+</table>
+<h3 id="remaining">Remaining<a class="headerlink" href="#remaining" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Type</th>
+<th>Title</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>#122</td>
+<td>bug</td>
+<td><code>grant-ci-access.sh</code> uses <code>AmazonEKSAdminPolicy</code> (namespace-admin) — cluster-scoped installs Forbidden; needs <code>AmazonEKSClusterAdminPolicy</code></td>
+<td>🔴 Open</td>
+</tr>
+<tr>
+<td>#123</td>
+<td>bug/iam</td>
+<td><code>WorkshopParticipantRole</code> too narrow for the AWS-CLI workshop steps (participant-persona e2e 7/60)</td>
+<td>🟡 In progress — PR #131</td>
+</tr>
+</tbody>
+</table>
+<p>The archive-tier defects opened 2026-07-30 from the <code>ws-slot06</code> run (#117/#118
+Flink crash-loop, #119 Hudi prose) are all resolved: #124/PR #126 replaced the
+Managed Flink sink with Amazon Data Firehose → Iceberg (removing the crash-loop
+root cause), and #125/PR #129 completed the doc sweep. The earlier note about
+teardown (#41) still holds for a from-scratch run.</p>
+<blockquote>
+<p>GitHub's native issue-relationships feature is the source of truth for
+blocked-by/blocking (see <code>CLAUDE.md</code>). This table is a convenience mirror —
+re-derive it from the API when in doubt.</p>
+</blockquote>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../../07-capstone/block-4-teardown/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Block 4 — Teardown">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Block 4 — Teardown
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../architecture/" class="md-footer__link md-footer__link--next" aria-label="Next: Architecture Reference">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Architecture Reference
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.expand", "navigation.path", "navigation.top", "navigation.footer", "search.highlight", "search.suggest", "content.code.copy", "content.code.annotate"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="../../javascripts/deployment-id.js"></script>
+      
+    
+  </body>
+</html>
