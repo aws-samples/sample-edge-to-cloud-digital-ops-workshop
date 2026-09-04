@@ -54,9 +54,7 @@
   <text x="112" y="504" font-size="24" font-weight="400" fill="#aab6cc">failure through shadow staleness.</text>
 
   <!-- footer meta -->
-  <text x="112" y="560" font-size="22" font-weight="600" fill="#8fa0bd">
-    4 hours <tspan fill="#a78bfa">·</tspan> 3 blocks <tspan fill="#a78bfa">·</tspan> hands-on AWS
-  </text>
+  <text x="112" y="560" font-size="22" font-weight="600" fill="#8fa0bd">4 hours <tspan fill="#a78bfa">·</tspan> 3 blocks <tspan fill="#a78bfa">·</tspan> hands-on AWS</text>
 
   <!-- motif cluster -->
   <g filter="url(#soft)"><rect x="915" y="230" width="120" height="150" rx="12" fill="#a78bfa" opacity="0.18"/><rect x="895" y="210" width="120" height="150" rx="12" fill="url(#nodeGrad)" stroke="#a78bfa" stroke-width="3"/><circle cx="955" cy="260" r="16" fill="none" stroke="#a78bfa" stroke-width="3"/><rect x="923" y="300" width="64" height="8" rx="4" fill="#a78bfa" opacity="0.8"/><rect x="923" y="322" width="44" height="8" rx="4" fill="#a78bfa" opacity="0.5"/><circle cx="955" cy="390" r="7" fill="#a78bfa"><animate attributeName="opacity" values="1;0.2;1" dur="1.4s" repeatCount="indefinite"/></circle></g>

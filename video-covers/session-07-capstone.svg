@@ -55,9 +55,7 @@
   <text x="112" y="496" font-size="24" font-weight="400" fill="#aab6cc">ops, and map it to production.</text>
 
   <!-- footer meta -->
-  <text x="112" y="560" font-size="22" font-weight="600" fill="#8fa0bd">
-    4 hours <tspan fill="#facc15">·</tspan> 4 blocks <tspan fill="#facc15">·</tspan> hands-on AWS
-  </text>
+  <text x="112" y="560" font-size="22" font-weight="600" fill="#8fa0bd">4 hours <tspan fill="#facc15">·</tspan> 4 blocks <tspan fill="#facc15">·</tspan> hands-on AWS</text>
 
   <!-- motif cluster -->
   <g filter="url(#soft)"><polygon points="855,390 955,230 1025,390" fill="url(#nodeGrad)" stroke="#facc15" stroke-width="3"/><polygon points="955,390 1045,270 1125,390" fill="#facc15" opacity="0.25" stroke="#facc15" stroke-width="3"/><polygon points="955,230 930,266 980,266" fill="#facc15"/><line x1="955" y1="230" x2="955" y2="182" stroke="#facc15" stroke-width="3"/><polygon points="955,182 997,192 955,204" fill="#facc15"/></g>

@@ -54,9 +54,7 @@
   <text x="112" y="504" font-size="24" font-weight="400" fill="#aab6cc">the full edge pipeline via Helm.</text>
 
   <!-- footer meta -->
-  <text x="112" y="560" font-size="22" font-weight="600" fill="#8fa0bd">
-    4 hours <tspan fill="#60a5fa">·</tspan> 5 blocks <tspan fill="#60a5fa">·</tspan> hands-on AWS
-  </text>
+  <text x="112" y="560" font-size="22" font-weight="600" fill="#8fa0bd">4 hours <tspan fill="#60a5fa">·</tspan> 5 blocks <tspan fill="#60a5fa">·</tspan> hands-on AWS</text>
 
   <!-- motif cluster -->
   <g filter="url(#soft)"><polygon points="1080.2627944162882,245 1080.2627944162882,355 985,410 889.7372055837118,355 889.7372055837118,245.00000000000003 984.9999999999999,190" fill="none" stroke="#60a5fa" stroke-width="2" opacity="0.35"/><polygon points="1045.6217782649107,265 1045.6217782649107,335 985,370 924.3782217350893,335 924.3782217350893,265 984.9999999999999,230" fill="url(#nodeGrad)" stroke="#60a5fa" stroke-width="3"/><circle cx="985" cy="300" r="22" fill="#60a5fa" /><line x1="985" y1="300" x2="1029" y2="300" stroke="#60a5fa" stroke-width="4"/><circle cx="1029" cy="300" r="9" fill="#60a5fa" /><line x1="985" y1="300" x2="1007" y2="338.1051177665153" stroke="#60a5fa" stroke-width="4"/><circle cx="1007" cy="338.1051177665153" r="9" fill="#60a5fa" /><line x1="985" y1="300" x2="963" y2="338.1051177665153" stroke="#60a5fa" stroke-width="4"/><circle cx="963" cy="338.1051177665153" r="9" fill="#60a5fa" /><line x1="985" y1="300" x2="941" y2="300" stroke="#60a5fa" stroke-width="4"/><circle cx="941" cy="300" r="9" fill="#60a5fa" /><line x1="985" y1="300" x2="963" y2="261.89488223348474" stroke="#60a5fa" stroke-width="4"/><circle cx="963" cy="261.89488223348474" r="9" fill="#60a5fa" /><line x1="985" y1="300" x2="1007" y2="261.8948822334847" stroke="#60a5fa" stroke-width="4"/><circle cx="1007" cy="261.8948822334847" r="9" fill="#60a5fa" /><circle cx="985" cy="300" r="10" fill="#0a0e1a" /></g>

@@ -14,6 +14,18 @@ const H = 720;
 
 const SESSIONS = [
   {
+    n: 0,
+    slug: "00-overview",
+    kicker: "OVERVIEW",
+    label: "COURSE OVERVIEW",
+    title: "Edge-to-Cloud Digital Operations",
+    goal: "The same sensor reading, edge to cloud — and the freshness-vs-scale tradeoffs behind the architecture.",
+    accent: "#2dd4bf",
+    accent2: "#6366f1",
+    footer: "7 sessions · 4 hours each",
+    motif: "overview",
+  },
+  {
     n: 1,
     slug: "01-observe",
     kicker: "OBSERVE",
@@ -217,6 +229,51 @@ function motif(kind, a, a2) {
       s += `<polygon points="${cx - 30},${cy - 118} ${cx + 12},${cy - 108} ${cx - 30},${cy - 96}" fill="${a}"/>`;
       return s;
     }
+    case "overview": {
+      // the whole workshop: edge hex -> flowing pipeline -> cloud store cylinders
+      let s = "";
+      const ex = cx - 150;
+      const sy = cy - 30;
+      // edge cluster hex on the left
+      const hex = (x, y, r) => {
+        let p = "";
+        for (let i = 0; i < 6; i++) {
+          const ang = (Math.PI / 3) * i - Math.PI / 6;
+          p += `${x + r * Math.cos(ang)},${y + r * Math.sin(ang)} `;
+        }
+        return p.trim();
+      };
+      s += `<polygon points="${hex(ex, sy, 56)}" fill="url(#nodeGrad)" stroke="${a}" stroke-width="3"/>`;
+      s += node(ex, sy, 14, a);
+      for (let i = 0; i < 6; i++) {
+        const ang = (Math.PI / 3) * i;
+        const x2 = ex + 30 * Math.cos(ang);
+        const y2 = sy + 30 * Math.sin(ang);
+        s += `<line x1="${ex}" y1="${sy}" x2="${x2}" y2="${y2}" stroke="${a}" stroke-width="3"/>`;
+        s += node(x2, y2, 6, a);
+      }
+      s += node(ex, sy, 6, "#0a0e1a");
+      s += `<text x="${ex}" y="${sy + 92}" text-anchor="middle" font-size="17" font-weight="700" fill="${a}" opacity="0.85">EDGE</text>`;
+      // flowing pipeline across to the cloud
+      s += `<line x1="${ex + 60}" y1="${sy}" x2="${cx + 30}" y2="${sy}" stroke="${a}" stroke-width="3" stroke-dasharray="6 6" opacity="0.75"><animate attributeName="stroke-dashoffset" from="24" to="0" dur="1.2s" repeatCount="indefinite"/></line>`;
+      // cloud: four store cylinders on the right
+      const pos = [
+        [cx + 50, sy - 46],
+        [cx + 135, sy - 46],
+        [cx + 50, sy + 30],
+        [cx + 135, sy + 30],
+      ];
+      pos.forEach(([x, y], i) => {
+        const op = i === 0 ? 1 : 0.6 + i * 0.05;
+        s += `<g opacity="${op}"><ellipse cx="${x + 24}" cy="${y}" rx="27" ry="9" fill="${a}"/>`;
+        s += `<rect x="${x - 3}" y="${y}" width="54" height="46" fill="url(#nodeGrad)"/>`;
+        s += `<rect x="${x - 3}" y="${y}" width="54" height="46" fill="${a}" opacity="0.12"/>`;
+        s += `<ellipse cx="${x + 24}" cy="${y + 46}" rx="27" ry="9" fill="url(#nodeGrad)" stroke="${a}" stroke-width="2"/>`;
+        s += `<ellipse cx="${x + 24}" cy="${y}" rx="27" ry="9" fill="none" stroke="${a}" stroke-width="2"/></g>`;
+      });
+      s += `<text x="${cx + 133}" y="${sy + 116}" text-anchor="middle" font-size="17" font-weight="700" fill="${a}" opacity="0.85">CLOUD</text>`;
+      return s;
+    }
     default:
       return "";
   }
@@ -280,7 +337,9 @@ function svg(s) {
         fill="#7c8aa5">EDGE-TO-CLOUD · DIGITAL OPS WORKSHOP</text>
 
   <!-- session label -->
-  <text x="112" y="205" font-size="30" font-weight="700" letter-spacing="6" fill="${a}">SESSION ${s.n}<tspan fill="#5b6b86">  ·  ${esc(s.kicker)}</tspan></text>
+  ${s.n === 0
+    ? `<text x="112" y="205" font-size="30" font-weight="700" letter-spacing="6" fill="${a}">${esc(s.label)}</text>`
+    : `<text x="112" y="205" font-size="30" font-weight="700" letter-spacing="6" fill="${a}">SESSION ${s.n}<tspan fill="#5b6b86">  ·  ${esc(s.kicker)}</tspan></text>`}
 
   <!-- title -->
   ${titleBlock(s.title)}
@@ -289,9 +348,9 @@ function svg(s) {
   ${goalBlock(s.goal, wrap(s.title, 18).length)}
 
   <!-- footer meta -->
-  <text x="112" y="560" font-size="22" font-weight="600" fill="#8fa0bd">
-    4 hours <tspan fill="${a}">·</tspan> ${s.blocks} <tspan fill="${a}">·</tspan> hands-on AWS
-  </text>
+  ${s.footer
+    ? `<text x="112" y="560" font-size="22" font-weight="600" fill="#8fa0bd">${esc(s.footer)} <tspan fill="${a}">·</tspan> hands-on AWS</text>`
+    : `<text x="112" y="560" font-size="22" font-weight="600" fill="#8fa0bd">4 hours <tspan fill="${a}">·</tspan> ${s.blocks} <tspan fill="${a}">·</tspan> hands-on AWS</text>`}
 
   <!-- motif cluster -->
   <g filter="url(#soft)">${motif(s.motif, a, a2)}</g>
@@ -353,4 +412,4 @@ for (const s of SESSIONS) {
   writeFileSync(out, svg(s));
   console.log("wrote", out);
 }
-console.log("done — 7 covers generated");
+console.log(`done — ${SESSIONS.length} covers generated`);

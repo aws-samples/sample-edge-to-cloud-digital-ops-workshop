@@ -54,9 +54,7 @@
   <text x="112" y="504" font-size="24" font-weight="400" fill="#aab6cc">operate devices at scale.</text>
 
   <!-- footer meta -->
-  <text x="112" y="560" font-size="22" font-weight="600" fill="#8fa0bd">
-    4 hours <tspan fill="#fbbf24">·</tspan> 5 blocks <tspan fill="#fbbf24">·</tspan> hands-on AWS
-  </text>
+  <text x="112" y="560" font-size="22" font-weight="600" fill="#8fa0bd">4 hours <tspan fill="#fbbf24">·</tspan> 5 blocks <tspan fill="#fbbf24">·</tspan> hands-on AWS</text>
 
   <!-- motif cluster -->
   <g filter="url(#soft)"><circle cx="985" cy="210" r="30" fill="url(#nodeGrad)" stroke="#fbbf24" stroke-width="3"/><path d="M 975 202 l 10 10 l 18 -18" fill="none" stroke="#0a0e1a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><line x1="985" y1="240" x2="865" y2="340" stroke="#fbbf24" stroke-width="2" opacity="0.6"/><rect x="835" y="340" width="60" height="90" rx="8" fill="url(#nodeGrad)" stroke="#fbbf24" stroke-width="2.5"/><circle cx="865" cy="415" r="5" fill="#fbbf24"/><rect x="847" y="354" width="36" height="6" rx="3" fill="#fbbf24" opacity="0.6"/><line x1="985" y1="240" x2="985" y2="340" stroke="#fbbf24" stroke-width="2" opacity="0.6"/><rect x="955" y="340" width="60" height="90" rx="8" fill="url(#nodeGrad)" stroke="#fbbf24" stroke-width="2.5"/><circle cx="985" cy="415" r="5" fill="#fbbf24"/><rect x="967" y="354" width="36" height="6" rx="3" fill="#fbbf24" opacity="0.6"/><line x1="985" y1="240" x2="1105" y2="340" stroke="#fbbf24" stroke-width="2" opacity="0.6"/><rect x="1075" y="340" width="60" height="90" rx="8" fill="url(#nodeGrad)" stroke="#fbbf24" stroke-width="2.5"/><circle cx="1105" cy="415" r="5" fill="#fbbf24"/><rect x="1087" y="354" width="36" height="6" rx="3" fill="#fbbf24" opacity="0.6"/></g>

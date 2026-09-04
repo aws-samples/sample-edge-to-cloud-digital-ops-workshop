@@ -53,9 +53,7 @@
   <text x="112" y="504" font-size="24" font-weight="400" fill="#aab6cc">→ Athena, and measure data freshness.</text>
 
   <!-- footer meta -->
-  <text x="112" y="560" font-size="22" font-weight="600" fill="#8fa0bd">
-    4 hours <tspan fill="#22d3ee">·</tspan> 4 blocks <tspan fill="#22d3ee">·</tspan> hands-on AWS
-  </text>
+  <text x="112" y="560" font-size="22" font-weight="600" fill="#8fa0bd">4 hours <tspan fill="#22d3ee">·</tspan> 4 blocks <tspan fill="#22d3ee">·</tspan> hands-on AWS</text>
 
   <!-- motif cluster -->
   <g filter="url(#soft)"><line x1="835" y1="300" x2="935" y2="300" stroke="#22d3ee" stroke-width="3" stroke-dasharray="6 6" opacity="0.7"><animate attributeName="stroke-dashoffset" from="24" to="0" dur="1.2s" repeatCount="indefinite"/></line><line x1="935" y1="300" x2="1035" y2="300" stroke="#22d3ee" stroke-width="3" stroke-dasharray="6 6" opacity="0.7"><animate attributeName="stroke-dashoffset" from="24" to="0" dur="1.2s" repeatCount="indefinite"/></line><line x1="1035" y1="300" x2="1135" y2="300" stroke="#22d3ee" stroke-width="3" stroke-dasharray="6 6" opacity="0.7"><animate attributeName="stroke-dashoffset" from="24" to="0" dur="1.2s" repeatCount="indefinite"/></line><circle cx="835" cy="300" r="26" fill="url(#nodeGrad)" stroke="#22d3ee" stroke-width="2.5"/><circle cx="935" cy="300" r="26" fill="url(#nodeGrad)" stroke="#22d3ee" stroke-width="2.5"/><circle cx="1035" cy="300" r="26" fill="url(#nodeGrad)" stroke="#22d3ee" stroke-width="2.5"/><circle cx="1135" cy="300" r="26" fill="url(#nodeGrad)" stroke="#22d3ee" stroke-width="2.5"/><path d="M 823 300 q 6 -14 12 0 t 12 0 t 12 0" fill="none" stroke="#0a0e1a" stroke-width="2.5"/><rect x="1123" y="288" width="24" height="24" rx="3" fill="none" stroke="#0a0e1a" stroke-width="2.5"/></g>
