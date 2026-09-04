@@ -91,28 +91,38 @@ Or leave the port-forward running in another terminal and connect interactively 
 
 ## Query the Views
 
-Once your edge nodes are running (Session 5), messages appear in the views within seconds.
-The shared instance holds every slot's rows, so filter on `deployment_id` to see only
-your own devices:
+The EC2 nodes you provisioned in earlier sessions have been publishing cpu/mem/disk/net
+**node telemetry** to the `raw.telemetry` topic all along, so that data is already
+flowing through these views right now — the industrial sensor sim (`sensors_raw_cloud`)
+comes online later, once your edge nodes are running (Session 5). The shared instance
+holds every slot's rows, so filter on `deployment_id` to see only your own devices:
 
 ```sql
--- Poll for incoming messages — this source has no deployment_id column yet
--- (it's derived downstream, see sim_all_slots in ddl-cloud.sql), so LIMIT and
--- eyeball your own site_id (ws-slot00-sim) among everyone else's.
-SELECT sensor, site_id, value, unit FROM sensors_raw_cloud LIMIT 10;
+-- Poll the raw telemetry as it lands from your EC2 instances. Unlike the sim
+-- source, this one carries deployment_id directly (the IoT rule stamps it —
+-- see amplify/custom/participant-stack.ts), so you can filter to your own slot.
+SELECT thing_name,
+       round(cpu_pct::numeric, 1)       AS cpu_pct,
+       round(mem_used_pct::numeric, 1)  AS mem_pct,
+       round(disk_used_pct::numeric, 1) AS disk_pct
+FROM sensors_raw_telemetry
+WHERE deployment_id = 'ws-slot00'
+LIMIT 10;
 
--- Latest reading per sensor per site — your slot only
+-- Latest reading per metric per node — your slot only. The telemetry columns
+-- are unpivoted into per-metric rows (sensor = cpu_pct, mem_used_pct, …;
+-- site_id = the thing_name), unioned with the sim site (offline until Session 5).
 SELECT sensor, site_id, round(value::numeric, 2) AS value, unit
 FROM mv_sensor_fleet_latest
 WHERE deployment_id = 'ws-slot00'
-ORDER BY sensor;
+ORDER BY site_id, sensor;
 
 -- 1-minute bucket averages — your slot only
 SELECT sensor, site_id, round(avg_value::numeric, 2) AS avg_v,
        sample_count, window_start
 FROM mv_fleet_1min_avg
 WHERE deployment_id = 'ws-slot00'
-ORDER BY sensor, window_start DESC;
+ORDER BY site_id, sensor, window_start DESC;
 ```
 
 Query the views and observe **sub-100 ms response times** — and notice they stay that
