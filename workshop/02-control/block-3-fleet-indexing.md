@@ -61,22 +61,33 @@
     ```bash
     aws iot search-index --index-name AWS_Things \
       --query-string 'attributes.deploymentId:ws-slot00' \
-    | jq -r '["THING","CONFIG_VERSION","TELEMETRY_AGENT"],
-             (.things[] | [
-               .thingName,
-               (.shadow | fromjson | .name["device-config"].reported.config_version),
-               (.shadow | fromjson | .name["$package"].reported["telemetry-agent"].version)
-             ]) | @tsv' | column -t
+    | jq -r '["THING","CONNECTED","CONFIG_VERSION","TELEMETRY_AGENT"],
+             (.things[]
+              | (.shadow // "{}" | fromjson) as $s
+              | [ .thingName,
+                  (if .connectivity.connected then "online" else "offline" end),
+                  ($s.name["device-config"].reported.config_version // "—"),
+                  ($s.name["$package"].reported["telemetry-agent"].version // "—") ]
+             ) | @tsv' | column -t
     ```
     <!-- e2e:assert {"contains": "TELEMETRY_AGENT"} -->
+
+    A device that hasn't reported a given shadow yet (e.g. one still `QUEUED` in a
+    staged rollout, or never provisioned with a `$package` shadow) has a `null`
+    `shadow` field. Piping that straight into `fromjson` aborts the whole pipeline
+    (`jq: error … null (null) only strings can be parsed`) after just the first few
+    rows — so the fallbacks are load-bearing: `.shadow // "{}"` parses a missing
+    shadow as an empty object, and each `// "—"` fills in for a field the device
+    hasn't reported. Without them you only see the handful of devices before the
+    first gap.
 
     Output — one row per device:
 
     ```
-    THING                CONFIG_VERSION  TELEMETRY_AGENT
-    i-012cb542a8cd2ad6b  2.0.0           2.0.0
-    i-0a661fd3a5c46da02  2.0.0           2.0.0
-    i-0233f0350a555411c  2.0.0           2.0.0
+    THING                CONNECTED  CONFIG_VERSION  TELEMETRY_AGENT
+    i-012cb542a8cd2ad6b  online     2.0.0           2.0.0
+    i-0a661fd3a5c46da02  online     2.0.0           2.0.0
+    i-0233f0350a555411c  offline    1.0.0           —
     ```
 
     > **Note:** Fleet-indexing search is a *filter*, not a *projection* — a Lucene
