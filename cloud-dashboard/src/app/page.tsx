@@ -2,10 +2,12 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+  BarChart, Bar, LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer,
 } from "recharts";
 import type { FreshnessPayload } from "./api/freshness/route";
+import type { VolumePayload } from "./api/volume/route";
+import { useTimeseriesBuffer } from "../hooks/useTimeseriesBuffer";
 
 // ── colour palette ────────────────────────────────────────────────────────────
 const COLOUR_RW      = "#6366f1"; // indigo — RisingWave
@@ -15,6 +17,7 @@ const COLOUR_INFLUX  = "#06b6d4"; // cyan — Timestream for InfluxDB
 const COLOUR_APPSYNC = "#f43f5e"; // rose — AppSync live push (no storage)
 const COLOUR_CPU     = "#3b82f6"; // blue
 const COLOUR_MEM     = "#a855f7"; // purple
+const COLOUR_VOLUME  = "#2dd4bf"; // teal — ingest volume (single series, no tier collision)
 
 // ── chart 1: freshness (log scale) ───────────────────────────────────────────
 // recharts doesn't support log scale natively, so we store log10 values and
@@ -32,6 +35,13 @@ function msLabel(ms: number | null): string {
 
 const LOG_TICKS = [1, 10, 100, 1_000, 10_000, 100_000]; // ms
 const logTickFormatter = (v: number) => msLabel(Math.pow(10, v));
+
+// ── shared X-axis tick formatter for the time-series panels (#270) ──────────
+// All three new panels plot a numeric epoch-ms `t`/`window_start` on X, so
+// recharts can space real time gaps correctly (a load run's minute-scale
+// burst isn't evenly sampled) — formatted here as a wall-clock HH:MM:SS tick.
+const formatTimeTick = (t: number) =>
+  new Date(t).toLocaleTimeString([], { hour12: false });
 
 interface FreshnessBarDatum {
   tier: string;
@@ -493,6 +503,177 @@ function LatencyMap({ rw, tsdb, athena, influx, appsync }: { rw: FreshnessPayloa
   );
 }
 
+// ── poll hook: ingest volume (#269/#270) ─────────────────────────────────────
+// Backs the "Ingest Volume Over Time" panel. Bursts are minute-scale, not
+// sub-second, so a plain poll is enough — no SSE needed here unlike the two
+// push-based freshness tiers.
+function useVolume(deploymentId: string, intervalMs = 3000) {
+  const [data, setData] = useState<VolumePayload | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/volume?did=${encodeURIComponent(deploymentId)}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json: VolumePayload = await res.json();
+        if (!cancelled) { setData(json); setError(null); }
+      } catch (e: any) {
+        if (!cancelled) setError(e.message);
+      }
+    };
+    poll();
+    const id = setInterval(poll, intervalMs);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [deploymentId, intervalMs]);
+
+  return { data, error };
+}
+
+// ── time-series point shapes (#270) ──────────────────────────────────────────
+// One merged snapshot per buffer tick, mirroring the five-tier shape the
+// snapshot bar charts already use, so the trend panels below can reuse the
+// same colours/log-scale treatment.
+interface FreshnessTsPoint {
+  rw: number | null; tsdb: number | null; athena: number | null; influx: number | null; appsync: number | null;
+}
+interface LatencyTsPoint {
+  rw: number | null; tsdb: number | null; athena: number | null; influx: number | null; appsync: number | null;
+}
+
+// ── time-series panel 1: ingest volume over time (#269/#270) ────────────────
+// Single series -> per the dataviz skill's rule, a lone series needs no
+// legend box, the title already names it. Server-bounded to ~10 min of
+// history (see cloud-dashboard/src/app/api/volume/route.ts), so no client
+// ring buffer is needed for this one — unlike the two charts below.
+function IngestVolumeChart({ points }: { points: VolumePayload["points"] }) {
+  const chartData = points.map((p) => ({ t: p.window_start, msg_per_s: p.msg_per_s }));
+
+  const CustomTooltip = ({ active, payload, label }: any) => {
+    if (!active || !payload?.length) return null;
+    return (
+      <div style={{ background: "#1e293b", border: "1px solid #334155", padding: "8px 12px", borderRadius: 6, fontSize: 13 }}>
+        <p style={{ margin: 0, color: "#94a3b8" }}>{formatTimeTick(label)}</p>
+        <p style={{ margin: "4px 0 0", color: COLOUR_VOLUME, fontWeight: 600 }}>{payload[0].value.toFixed(1)} msg/s</p>
+      </div>
+    );
+  };
+
+  return (
+    <div className="card">
+      <h2 style={{ marginBottom: "0.25rem", fontSize: "1rem" }}>Ingest Volume Over Time</h2>
+      <p style={{ color: "#888", fontSize: "0.8rem", marginBottom: "0.75rem" }}>
+        Fleet-wide incoming message rate for this slot (mv_fleet_ingest_rate, 5s buckets). Ramp simulator/frac-msk-load.py against the MSK-tunnel and watch this climb.
+      </p>
+      {chartData.length < 2 ? (
+        <p style={{ color: "#64748b", fontSize: "0.8rem" }}>Collecting samples&hellip;</p>
+      ) : (
+        <ResponsiveContainer width="100%" height={200}>
+          <AreaChart data={chartData} margin={{ top: 4, right: 16, left: 8, bottom: 4 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+            <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} tickFormatter={formatTimeTick} tick={{ fill: "#94a3b8", fontSize: 11 }} />
+            <YAxis
+              tick={{ fill: "#94a3b8", fontSize: 11 }}
+              label={{ value: "msg/s", angle: -90, position: "insideLeft", fill: "#64748b", fontSize: 11 }}
+            />
+            <Tooltip content={<CustomTooltip />} />
+            <Area type="monotone" dataKey="msg_per_s" name="Ingest rate" stroke={COLOUR_VOLUME} fill={COLOUR_VOLUME} fillOpacity={0.25} strokeWidth={2} isAnimationActive={false} />
+          </AreaChart>
+        </ResponsiveContainer>
+      )}
+    </div>
+  );
+}
+
+// A shared multi-line log-scale time-series chart — the trend counterpart of
+// TierMsBarChart above. Same five tiers, same log axis/tick trick, plotted
+// against a client-side ring buffer (useTimeseriesBuffer) instead of a single
+// latest value, so freshness/latency divergence under load is visible as a
+// trend, not just a snapshot.
+function TierMsLineChart({
+  title, blurb, axisLabel, height, points,
+}: {
+  title: string; blurb: string; axisLabel: string; height: number;
+  points: Array<(FreshnessTsPoint | LatencyTsPoint) & { t: number }>;
+}) {
+  const chartData = points.map((p) => ({
+    t: p.t,
+    rw: logVal(p.rw), tsdb: logVal(p.tsdb), athena: logVal(p.athena), influx: logVal(p.influx), appsync: logVal(p.appsync),
+  }));
+
+  const CustomTooltip = ({ active, payload, label }: any) => {
+    if (!active || !payload?.length) return null;
+    return (
+      <div style={{ background: "#1e293b", border: "1px solid #334155", padding: "8px 12px", borderRadius: 6, fontSize: 13 }}>
+        <p style={{ margin: 0, color: "#94a3b8" }}>{formatTimeTick(label)}</p>
+        {payload.map((p: any) => (
+          <p key={p.dataKey} style={{ margin: "4px 0 0", color: p.stroke, fontWeight: 600 }}>
+            {p.name}: {msLabel(Math.pow(10, p.value))}
+          </p>
+        ))}
+      </div>
+    );
+  };
+
+  return (
+    <div className="card">
+      <h2 style={{ marginBottom: "0.25rem", fontSize: "1rem" }}>{title}</h2>
+      <p style={{ color: "#888", fontSize: "0.8rem", marginBottom: "0.75rem" }}>{blurb}</p>
+      {chartData.length < 2 ? (
+        <p style={{ color: "#64748b", fontSize: "0.8rem" }}>Collecting samples&hellip;</p>
+      ) : (
+        <ResponsiveContainer width="100%" height={height}>
+          <LineChart data={chartData} margin={{ top: 4, right: 16, left: 8, bottom: 4 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+            <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} tickFormatter={formatTimeTick} tick={{ fill: "#94a3b8", fontSize: 11 }} />
+            <YAxis
+              tickFormatter={logTickFormatter}
+              ticks={LOG_TICKS.map((v) => Math.log10(v))}
+              domain={[0, Math.log10(100_000)]}
+              tick={{ fill: "#94a3b8", fontSize: 11 }}
+              label={{ value: axisLabel, angle: -90, position: "insideLeft", fill: "#64748b", fontSize: 11 }}
+            />
+            <Tooltip content={<CustomTooltip />} />
+            <Legend wrapperStyle={{ fontSize: 12, color: "#94a3b8" }} />
+            <Line type="monotone" dataKey="rw"      name="RisingWave"  stroke={COLOUR_RW}      strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />
+            <Line type="monotone" dataKey="tsdb"    name="TimescaleDB" stroke={COLOUR_TSDB}    strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />
+            <Line type="monotone" dataKey="influx"  name="InfluxDB"    stroke={COLOUR_INFLUX}  strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />
+            <Line type="monotone" dataKey="athena"  name="Athena/S3"   stroke={COLOUR_ATHENA}  strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />
+            <Line type="monotone" dataKey="appsync" name="AppSync"     stroke={COLOUR_APPSYNC} strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />
+          </LineChart>
+        </ResponsiveContainer>
+      )}
+    </div>
+  );
+}
+
+// ── time-series panel 2: freshness over time (#270) ──────────────────────────
+function FreshnessTimeseriesChart({ points }: { points: Array<FreshnessTsPoint & { t: number }> }) {
+  return (
+    <TierMsLineChart
+      title="Data Freshness Over Time (log scale)"
+      blurb="The same per-tier staleness numbers as the snapshot chart above, trended over the last ~10 minutes in this browser tab (client-side buffer, not a stored history). Ramp a load burst and watch RisingWave/TimescaleDB/InfluxDB respond while Athena/AppSync stay flat — they read straight from MQTT, not MSK."
+      axisLabel="staleness (log)"
+      height={240}
+      points={points}
+    />
+  );
+}
+
+// ── time-series panel 3: query latency over time (#270) ─────────────────────
+function LatencyTimeseriesChart({ points }: { points: Array<LatencyTsPoint & { t: number }> }) {
+  return (
+    <TierMsLineChart
+      title="Query Latency Over Time (log scale)"
+      blurb="The same per-tier read-path cost as the snapshot chart above, trended over the last ~10 minutes. AppSync has no query step (see the snapshot chart's blurb), so its line always sits at n/a."
+      axisLabel="latency (log)"
+      height={240}
+      points={points}
+    />
+  );
+}
+
 // ── pulse indicator ───────────────────────────────────────────────────────────
 function Pulse({ active }: { active: boolean }) {
   return (
@@ -521,6 +702,43 @@ export default function DashboardPage() {
   // AppSync live-push (#259) — the "no storage" leg: no aggregate query, no
   // poll cadence, just a direct onTelemetry subscription relayed over SSE.
   const { data: appsyncData, error: appsyncError } = useAppSyncFreshness(deploymentId);
+  // Ingest-volume time-series (#269/#270) — the "cause" panel: watch this
+  // climb while running simulator/frac-msk-load.py against this slot.
+  const { data: volumeData } = useVolume(deploymentId);
+
+  // Client-side ring buffers (#270) — the "effect" panels: trend the same
+  // freshness/latency numbers the snapshot charts below show, so divergence
+  // under load is visible over time, not just as a single latest value.
+  const freshnessBuf = useTimeseriesBuffer<FreshnessTsPoint>();
+  const latencyBuf = useTimeseriesBuffer<LatencyTsPoint>();
+
+  useEffect(() => {
+    freshnessBuf.push(
+      {
+        rw: rwData?.tierFreshness.risingwave_ms ?? null,
+        tsdb: tsdbData?.tierFreshness.timescaledb_ms ?? null,
+        athena: athenaData?.tierFreshness.athena_ms ?? null,
+        influx: influxData?.tierFreshness.influxdb_ms ?? null,
+        appsync: appsyncData?.tierFreshness.appsync_ms ?? null,
+      },
+      { minIntervalMs: 1000 }
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rwData, tsdbData, athenaData, influxData, appsyncData]);
+
+  useEffect(() => {
+    latencyBuf.push(
+      {
+        rw: rwData?.tierLatency.risingwave_ms ?? null,
+        tsdb: tsdbData?.tierLatency.timescaledb_ms ?? null,
+        athena: athenaData?.tierLatency.athena_ms ?? null,
+        influx: influxData?.tierLatency.influxdb_ms ?? null,
+        appsync: appsyncData?.tierLatency.appsync_ms ?? null,
+      },
+      { minIntervalMs: 1000 }
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rwData, tsdbData, athenaData, influxData, appsyncData]);
 
   const isMock = rwData?.source === "mock" || tsdbData?.source === "mock" || athenaData?.source === "mock" || influxData?.source === "mock" || appsyncData?.source === "mock";
 
@@ -541,6 +759,13 @@ export default function DashboardPage() {
           )}
         </div>
       </div>
+
+      <IngestVolumeChart points={volumeData?.points ?? []} />
+      <div style={{ height: "1rem" }} />
+      <FreshnessTimeseriesChart points={freshnessBuf.points} />
+      <div style={{ height: "1rem" }} />
+      <LatencyTimeseriesChart points={latencyBuf.points} />
+      <div style={{ height: "1.5rem" }} />
 
       <FreshnessChart  rw={rwData}   tsdb={tsdbData} athena={athenaData} influx={influxData} appsync={appsyncData} />
       <div style={{ height: "1rem" }} />
