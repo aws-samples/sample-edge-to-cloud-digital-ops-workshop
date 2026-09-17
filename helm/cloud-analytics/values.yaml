@@ -173,6 +173,13 @@ risingwave:
 # ──────────────────────────────────────────────────────────────────────────────
 timescaledb:
   enabled: true
+  # Idiomatic-read comparison (Block 4 / load-test blog): when true, the
+  # tsdb-notify-ddl Job builds the sensor_readings_cagg continuous aggregate
+  # (10s buckets, real-time aggregation) + a 10s refresh policy, and the
+  # dashboard reads the tier from that CAGG (TIMESCALEDB_CAGG_READ). Off by
+  # default so the committed baseline stays the raw windowed read the docs
+  # describe and no slot pays the continuous-refresh cost unless it opts in.
+  caggEnabled: false
   crName: timescaledb-cloud
   imageName: ghcr.io/clevyr/cloudnativepg-timescale:16.4-ts2.16
   instances: 2

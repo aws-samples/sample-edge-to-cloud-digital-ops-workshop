@@ -151,3 +151,46 @@ export async function queryTimescaleDbFreshness(pool: Pool, deploymentId: string
   );
   return toPayload(rows, "timescaledb", Date.now() - t0);
 }
+
+// Idiomatic-read variant of queryTimescaleDbFreshness that reads the continuous
+// aggregate (sensor_readings_cagg) instead of the raw hypertable — the
+// write-time-pre-paid counterpart to RisingWave's MV, taught in Block 4.
+// Selected by the /api/freshness route only when TIMESCALEDB_CAGG_READ is set;
+// the committed default stays the raw windowed read (Blocks 1/4 document that
+// path), so flipping this on is an opt-in for the load-test comparison.
+//
+// The CAGG (see helm/cloud-analytics/templates/timescaledb-notify-ddl-job.yaml)
+// stores, per (deployment_id, site_id, sensor, 10 s bucket): SUM(value),
+// COUNT(*), and MAX(ts_ms). Recombining SUM/COUNT across the window gives the
+// exact row-level mean per (site, sensor) — identical semantics to the raw
+// query's AVG(value) — rather than an unweighted average of per-bucket means
+// (which would drift when 10 s buckets hold unequal row counts). materialized_only
+// is false, so this read is a UNION of the pre-materialised buckets and a live
+// scan of the un-materialised tail newer than the refresh watermark.
+export async function queryTimescaleDbCaggFreshness(pool: Pool, deploymentId: string): Promise<FreshnessPayload> {
+  const t0 = Date.now();
+  const { rows } = await pool.query<Row>(
+    `
+    SELECT
+      site_id,
+      AVG(CASE WHEN sensor = 'cpu_pct'      THEN 100.0 - per_sensor_avg END) AS avg_free_cpu_pct,
+      AVG(CASE WHEN sensor = 'mem_used_pct' THEN 100.0 - per_sensor_avg END) AS avg_free_mem_pct,
+      MAX(latest_ts_ms)                                                       AS latest_ts_ms
+    FROM (
+      SELECT
+        site_id,
+        sensor,
+        SUM(sum_value) / NULLIF(SUM(n), 0) AS per_sensor_avg,
+        MAX(max_ts_ms)                     AS latest_ts_ms
+      FROM sensor_readings_cagg
+      WHERE deployment_id = $1
+        AND bucket > now() - interval '15 minutes'
+      GROUP BY site_id, sensor
+    ) s
+    GROUP BY site_id
+    ORDER BY site_id
+  `,
+    [deploymentId]
+  );
+  return toPayload(rows, "timescaledb", Date.now() - t0);
+}

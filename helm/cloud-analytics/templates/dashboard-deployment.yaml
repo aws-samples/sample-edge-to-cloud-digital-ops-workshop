@@ -72,6 +72,16 @@ spec:
                   # NOT optional: the initContainer above guarantees the secret
                   # exists before this container starts. Marking it optional
                   # would silently drop the var and fall back to mock data.
+            {{- if .Values.timescaledb.caggEnabled }}
+            # Idiomatic read (Block 4): serve the TimescaleDB tier from the
+            # continuous aggregate (sensor_readings_cagg, created by
+            # timescaledb-notify-ddl-job.yaml when caggEnabled) instead of the
+            # raw windowed hypertable scan. Off by default — the committed
+            # dashboard reads raw, which Blocks 1/4 document; this flag pairs
+            # the CAGG DDL with the CAGG read for the load-test comparison.
+            - name: TIMESCALEDB_CAGG_READ
+              value: "1"
+            {{- end }}
             {{- if .Values.dashboard.athenaDatabase }}
             - name: ATHENA_DATABASE
               value: {{ .Values.dashboard.athenaDatabase | quote }}

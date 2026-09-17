@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { queryRisingWaveFreshness, queryTimescaleDbFreshness } from "../../../lib/freshness-queries";
+import { queryRisingWaveFreshness, queryTimescaleDbFreshness, queryTimescaleDbCaggFreshness } from "../../../lib/freshness-queries";
 
 // Returned by GET /api/freshness?tier=risingwave|timescaledb|athena|influxdb
 // Contains all four chart datasets in one call. The two live tiers are also
@@ -155,7 +155,13 @@ export async function GET(req: NextRequest) {
     try {
       const { Pool } = await import("pg");
       const pool = new Pool({ connectionString: endpoint, connectionTimeoutMillis: 5000 });
-      const payload = await queryTimescaleDbFreshness(pool, deploymentId);
+      // Idiomatic read (Block 4): when TIMESCALEDB_CAGG_READ is set, serve from
+      // the continuous aggregate (write-time pre-paid, flat under load) instead
+      // of the raw windowed hypertable scan. Default (unset) keeps the raw read
+      // the committed docs describe.
+      const payload = process.env.TIMESCALEDB_CAGG_READ
+        ? await queryTimescaleDbCaggFreshness(pool, deploymentId)
+        : await queryTimescaleDbFreshness(pool, deploymentId);
       await pool.end();
       return NextResponse.json(payload);
     } catch (e: any) {
