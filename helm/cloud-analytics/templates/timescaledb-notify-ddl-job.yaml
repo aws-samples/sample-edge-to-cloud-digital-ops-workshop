@@ -65,4 +65,37 @@ spec:
                 FOR EACH STATEMENT EXECUTE FUNCTION notify_sensor_reading();
               SQL
               echo "DDL complete."
+              {{- if .Values.timescaledb.caggEnabled }}
+              # Idiomatic-read comparison (Block 4 / load-test blog): build the
+              # deployment_id-aware continuous aggregate the dashboard reads when
+              # TIMESCALEDB_CAGG_READ is set. Store SUM(value)+COUNT(*) (not
+              # AVG) per 10s bucket so the read recombines an exact weighted
+              # mean; real-time aggregation (materialized_only=false) unions the
+              # pre-materialised buckets with a live scan of the tail newer than
+              # the 10s refresh watermark. Every statement runs in psql
+              # autocommit — CREATE MATERIALIZED VIEW ... WITH (timescaledb.continuous)
+              # cannot run inside a transaction block. Idempotent: IF NOT EXISTS
+              # + policy if_not_exists => TRUE, so re-running on each upgrade is a
+              # no-op once built.
+              echo "Ensuring sensor_readings_cagg continuous aggregate (caggEnabled)..."
+              psql "$TIMESCALE_DSN" <<'CAGGSQL'
+              CREATE MATERIALIZED VIEW IF NOT EXISTS sensor_readings_cagg
+              WITH (timescaledb.continuous) AS
+              SELECT
+                deployment_id,
+                site_id,
+                sensor,
+                time_bucket('10 seconds', partition_time) AS bucket,
+                sum(value) AS sum_value,
+                count(*)   AS n,
+                max(ts_ms) AS max_ts_ms
+              FROM sensor_readings
+              GROUP BY deployment_id, site_id, sensor, bucket
+              WITH NO DATA;
+              CAGGSQL
+              psql "$TIMESCALE_DSN" -c "ALTER MATERIALIZED VIEW sensor_readings_cagg SET (timescaledb.materialized_only = false);"
+              psql "$TIMESCALE_DSN" -c "ALTER MATERIALIZED VIEW sensor_readings_cagg OWNER TO workshop;"
+              psql "$TIMESCALE_DSN" -c "SELECT add_continuous_aggregate_policy('sensor_readings_cagg', start_offset => INTERVAL '30 minutes', end_offset => INTERVAL '10 seconds', schedule_interval => INTERVAL '10 seconds', if_not_exists => TRUE);"
+              echo "CAGG ready."
+              {{- end }}
 {{- end }}

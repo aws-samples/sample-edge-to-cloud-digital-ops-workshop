@@ -173,6 +173,13 @@ risingwave:
 # ──────────────────────────────────────────────────────────────────────────────
 timescaledb:
   enabled: true
+  # Idiomatic-read comparison (Block 4 / load-test blog): when true, the
+  # tsdb-notify-ddl Job builds the sensor_readings_cagg continuous aggregate
+  # (10s buckets, real-time aggregation) + a 10s refresh policy, and the
+  # dashboard reads the tier from that CAGG (TIMESCALEDB_CAGG_READ). Off by
+  # default so the committed baseline stays the raw windowed read the docs
+  # describe and no slot pays the continuous-refresh cost unless it opts in.
+  caggEnabled: false
   crName: timescaledb-cloud
   imageName: ghcr.io/clevyr/cloudnativepg-timescale:16.4-ts2.16
   instances: 2
@@ -233,6 +240,13 @@ telegraf:
   # boundary); 7-day retention keeps it from growing forever.
   bucket: ""          # defaults to "workshop-cloud-analytics" when empty
   retentionSeconds: 604800   # 7 days
+  # kafka_consumer flow control. The plugin default (1000) caps each agent at
+  # ~1000 msg/s with a 1s flush — which under load looks exactly like an InfluxDB
+  # write ceiling but is really the consumer pausing to wait for the flush (the
+  # agent sits at <1% CPU while backlog grows). Raise it so the sink keeps up with
+  # realistic ingest; at ~1k series cardinality a db.influx.medium easily absorbs
+  # it. See the load-test writeup in docs/blog for the full diagnosis.
+  maxUndeliveredMessages: 250000
   # k8s secret (in this namespace) holding the minted per-slot InfluxDB token —
   # written by the provisioning Job, consumed here via envFrom.
   credentialsSecret: influxdb-credentials

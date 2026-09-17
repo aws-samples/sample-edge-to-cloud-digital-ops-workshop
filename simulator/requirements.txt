@@ -1,1 +1,6 @@
 paho-mqtt>=1.6
+# frac-msk-load.py — direct-to-MSK producer + AWS lookups (bootstrap brokers,
+# Secrets Manager creds), same libs as scripts/create-msk-topics.sh's Python
+# fallback path.
+kafka-python>=2.0
+boto3>=1.34

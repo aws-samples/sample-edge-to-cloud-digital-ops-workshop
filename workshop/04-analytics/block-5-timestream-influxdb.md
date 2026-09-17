@@ -96,9 +96,9 @@ clock-skew-free and apples-to-apples.
 Keep two axes distinct when you reason about this tier:
 
 - **Freshness** is an *ingestion-path* property: how long after a device publishes
-  the point becomes visible. Here it is governed by Telegraf's flush interval plus
-  the dashboard's poll cadence — roughly **1–2 s**. It has nothing to do with how
-  hard the query is.
+  the point becomes visible. The dashboard reads the **10 s downsampling-task
+  rollup** (below), so freshness is bounded by that task's cadence — a sawtooth of
+  **~0–10 s, median ~5 s**. It has nothing to do with how hard the read is.
 - **Query latency** is a *read-cost* property: how long a given read takes once the
   data is present. A `last()` per series is cheap; a wide `aggregateWindow`
   downsample over a long range is more expensive.
@@ -106,19 +106,25 @@ Keep two axes distinct when you reason about this tier:
 This is the same **read-complexity vs. write-complexity** trade the session keeps
 returning to. Query-time downsampling with `aggregateWindow` pushes the work to
 **read time** (cheap writes, you pay on every query); a Timestream for InfluxDB
-**task / downsampling** — like a TimescaleDB continuous aggregate — pushes it to
-**write time** (you maintain a rollup continuously, reads are then cheap). The
-store lets you choose per query which side of that trade to pay on.
+**downsampling task** — like a TimescaleDB continuous aggregate — pushes it to
+**write time** (you maintain a rollup continuously, reads are then cheap). This
+tier deliberately takes the **write-time** side: a scheduled task pre-collapses
+the raw bucket into 10 s means, and the dashboard reads that rollup — so its read
+is a fixed, load-independent lookup over ~90 pre-aggregated points per series, at
+the cost of a freshness floor set by the task cadence.
 
 ---
 
 ## Read the store's shape with Flux
 
 The clearest way to *understand* a store is to query it. Point a Flux client at the
-shared bucket and ask for the newest point per series — the same query shape the
-dashboard's `/api/freshness?tier=influxdb` route runs, filtered to your own slot via
-`deployment_id`. The instance is VPC-private, so read its connection details from the
-in-cluster credentials Secret and reach it over a short-lived port-forward:
+**raw** shared bucket and ask for the newest point per series — this reads the
+dimensional model directly, at full resolution, so you can see the raw
+`sensor_reading` points Telegraf writes. (The dashboard runs the identical
+`last()` shape, but against the 10 s rollup bucket rather than this raw one — see
+the freshness note above.) Filter to your own slot via `deployment_id`. The
+instance is VPC-private, so read its connection details from the in-cluster
+credentials Secret and reach it over a short-lived port-forward:
 
 ```bash
 # Connection details for the shared bucket (URL, token, org, bucket name) — this
