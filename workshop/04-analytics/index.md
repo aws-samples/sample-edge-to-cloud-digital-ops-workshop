@@ -42,5 +42,5 @@ Session 4 is the first session you drive from your own laptop against the shared
 | Live push (IoT → AppSync) | No database — direct WebSocket push | ~10–80 ms |
 | RisingWave MV | Incremental streaming compute (50 ms barrier) | ~300–600 ms |
 | TimescaleDB (live scan) | Redpanda Connect 1 s batch + direct query | ~1–3 s |
-| Timestream for InfluxDB (managed) | Telegraf flush + on-demand poll | ~1–2 s |
+| Timestream for InfluxDB (managed) | 10 s downsampling task (rollup) + on-demand poll | ~5 s (10 s task cadence) |
 | Iceberg / Athena | Firehose buffering interval + Iceberg commit | tens of s up to ~300 s |

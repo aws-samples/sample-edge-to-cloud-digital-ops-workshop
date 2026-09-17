@@ -314,7 +314,14 @@ export async function GET(req: NextRequest) {
     const endpoint = process.env.INFLUXDB_ENDPOINT;
     const token = process.env.INFLUXDB_TOKEN;
     const org = process.env.INFLUXDB_ORG;
-    const bucket = process.env.INFLUXDB_BUCKET;
+    // Idiomatic read: prefer the 10s downsampling-task rollup bucket over the raw
+    // bucket. A scheduled Flux task (influxdb-provision-job.yaml) pre-collapses
+    // sensor_reading into 10s means in INFLUXDB_ROLLUP_BUCKET, so this query is a
+    // cheap lookup over ~90 pre-aggregated points/series instead of scanning the
+    // raw window — the same "pre-pay on write" pattern as the TimescaleDB CAGG and
+    // RisingWave MV tiers (see docs/blog writeup). Falls back to the raw bucket
+    // when the rollup var is unset (a deploy predating the rollup).
+    const bucket = process.env.INFLUXDB_ROLLUP_BUCKET || process.env.INFLUXDB_BUCKET;
     if (!endpoint || !token || !org || !bucket) {
       return NextResponse.json(mockPayload("influxdb"));
     }

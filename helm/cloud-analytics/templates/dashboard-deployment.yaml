@@ -117,6 +117,12 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.telegraf.credentialsSecret }}
                   key: INFLUX_BUCKET
+            # Idiomatic read: the dashboard queries the 10s downsampling-task
+            # rollup (provisioned by influxdb-provision-job.yaml), not the raw
+            # bucket, so its read is a cheap lookup over pre-aggregated points.
+            # Derived (not secret) — same convention as the Job's ROLLUP_BUCKET.
+            - name: INFLUXDB_ROLLUP_BUCKET
+              value: {{ printf "%s-10s" (.Values.telegraf.bucket | default "workshop-cloud-analytics") | quote }}
             {{- end }}
           resources:
             {{- toYaml .Values.dashboard.resources | nindent 12 }}
