@@ -53,6 +53,10 @@ data:
       sasl_username = "${MSK_USERNAME}"
       sasl_password = "${MSK_PASSWORD}"
       enable_tls = true
+      # Flow control: the plugin default (1000) pauses the consumer at ~1000
+      # msg/s with a 1s flush — a throttle that mimics an InfluxDB write ceiling.
+      # Raise it so the sink keeps up with real load (see docs/blog writeup).
+      max_undelivered_messages = {{ .Values.telegraf.maxUndeliveredMessages | default 250000 }}
       data_format = "json_v2"
       [[inputs.kafka_consumer.json_v2]]
         measurement_name = "sensor_reading"
@@ -80,6 +84,8 @@ data:
       sasl_username = "${MSK_USERNAME}"
       sasl_password = "${MSK_PASSWORD}"
       enable_tls = true
+      # See Input A: raise the flow-control cap off the 1000 default.
+      max_undelivered_messages = {{ .Values.telegraf.maxUndeliveredMessages | default 250000 }}
       name_override = "node_telemetry"
       # deployment_id is stamped onto every raw.telemetry record by the IoT
       # rule (amplify/custom/participant-stack.ts) — captured as a tag here so

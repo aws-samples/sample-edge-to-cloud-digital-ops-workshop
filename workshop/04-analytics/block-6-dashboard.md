@@ -34,7 +34,7 @@ The Y axis uses a **log₁₀ scale** because the four tiers span four orders of
 |---|---|
 | RisingWave MV | 100 ms – 1 s (sawtooth — steps with each checkpoint barrier) |
 | TimescaleDB (windowed scan) | 100–600 ms |
-| Timestream for InfluxDB (polled) | ~1–2 s (Telegraf flush + poll cadence) |
+| Timestream for InfluxDB (polled) | ~5 s (10 s downsampling-task rollup cadence) |
 | Athena/S3 | tens of s up to ~300 s |
 
 A linear axis would make RisingWave, TimescaleDB, and InfluxDB indistinguishable — the log scale makes all four tiers clearly visible at once.
@@ -240,21 +240,26 @@ charts.
 
 ??? example "Timestream for InfluxDB — freshness + query latency (port 8086)"
     ```bash
-    # Same shared bucket + sensor_reading schema the dashboard's
-    # /api/freshness?tier=influxdb route queries (see Block 5). Assumes a local
-    # tunnel to the managed instance on port 8086 (Block 5 sets this up). The
-    # url/token/org/bucket live in the influxdb-credentials secret (shared
-    # cloud-analytics namespace — #253); read them and run one Flux query for
-    # the newest point's timestamp, filtered to your own slot via
-    # deployment_id. Freshness is subtracted against the CLIENT wall-clock (a
-    # portable epoch-ms helper) — same discipline as the other tiers.
+    # Same sensor_reading schema the dashboard's /api/freshness?tier=influxdb
+    # route queries (see Block 5) — and, like the dashboard, read the 10 s
+    # downsampling-task ROLLUP bucket, not the raw one, so this CLI reproduces
+    # the same freshness number the dashboard bar shows (~5 s sawtooth, bounded
+    # by the task cadence). Assumes a local tunnel to the managed instance on
+    # port 8086 (Block 5 sets this up). The url/token/org/bucket live in the
+    # influxdb-credentials secret (shared cloud-analytics namespace — #253); the
+    # rollup bucket name is derived (`<bucket>-10s`), not stored in the secret.
+    # Read them and run one Flux query for the newest point's timestamp, filtered
+    # to your own slot via deployment_id. Freshness is subtracted against the
+    # CLIENT wall-clock (a portable epoch-ms helper) — same discipline as the
+    # other tiers.
     epoch_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
     IX_TOKEN=$(kubectl get secret influxdb-credentials -n cloud-analytics -o jsonpath='{.data.INFLUX_TOKEN}' | base64 -d)
     IX_ORG=$(kubectl get secret influxdb-credentials -n cloud-analytics -o jsonpath='{.data.INFLUX_ORG}' | base64 -d)
     IX_BUCKET=$(kubectl get secret influxdb-credentials -n cloud-analytics -o jsonpath='{.data.INFLUX_BUCKET}' | base64 -d)
-    # Newest point for this slot, as epoch-ms. Flux `last()` after a wide
-    # range gives the most-recent sensor_reading; _time is RFC3339 → epoch-ms.
-    FLUX='from(bucket:"'"$IX_BUCKET"'") |> range(start:-15m) |> filter(fn:(r)=> r._measurement=="sensor_reading" and r._field=="value" and r.deployment_id=="ws-slot00") |> last() |> keep(columns:["_time"]) |> max(column:"_time")'
+    IX_ROLLUP_BUCKET="${IX_BUCKET}-10s"
+    # Newest point for this slot, as epoch-ms. Flux `last()` after a wide range
+    # gives the most-recent rolled-up sensor_reading; _time is RFC3339 → epoch-ms.
+    FLUX='from(bucket:"'"$IX_ROLLUP_BUCKET"'") |> range(start:-15m) |> filter(fn:(r)=> r._measurement=="sensor_reading" and r._field=="value" and r.deployment_id=="ws-slot00") |> last() |> keep(columns:["_time"]) |> max(column:"_time")'
     IX_T0=$(epoch_ms)
     IX_TIME=$(curl -sf -k "https://localhost:8086/api/v2/query?org=${IX_ORG}" \
       -H "Authorization: Token ${IX_TOKEN}" \

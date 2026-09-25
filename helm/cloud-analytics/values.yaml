@@ -173,6 +173,13 @@ risingwave:
 # ──────────────────────────────────────────────────────────────────────────────
 timescaledb:
   enabled: true
+  # Idiomatic-read comparison (Block 4 / load-test blog): when true, the
+  # tsdb-notify-ddl Job builds the sensor_readings_cagg continuous aggregate
+  # (10s buckets, real-time aggregation) + a 10s refresh policy, and the
+  # dashboard reads the tier from that CAGG (TIMESCALEDB_CAGG_READ). Off by
+  # default so the committed baseline stays the raw windowed read the docs
+  # describe and no slot pays the continuous-refresh cost unless it opts in.
+  caggEnabled: false
   crName: timescaledb-cloud
   imageName: ghcr.io/clevyr/cloudnativepg-timescale:16.4-ts2.16
   instances: 2
@@ -233,6 +240,13 @@ telegraf:
   # boundary); 7-day retention keeps it from growing forever.
   bucket: ""          # defaults to "workshop-cloud-analytics" when empty
   retentionSeconds: 604800   # 7 days
+  # kafka_consumer flow control. The plugin default (1000) caps each agent at
+  # ~1000 msg/s with a 1s flush — which under load looks exactly like an InfluxDB
+  # write ceiling but is really the consumer pausing to wait for the flush (the
+  # agent sits at <1% CPU while backlog grows). Raise it so the sink keeps up with
+  # realistic ingest; at ~1k series cardinality a db.influx.medium easily absorbs
+  # it. See the load-test writeup in docs/blog for the full diagnosis.
+  maxUndeliveredMessages: 250000
   # k8s secret (in this namespace) holding the minted per-slot InfluxDB token —
   # written by the provisioning Job, consumed here via envFrom.
   credentialsSecret: influxdb-credentials
@@ -241,16 +255,68 @@ telegraf:
   adminSecret: influxdb-admin
 
 rp-connect-timescaledb:
-  replicaCount: 1
+  # One committer replica per partition of sensors.raw.sim (the hot topic, 3
+  # partitions). This is the idiomatic "scale the consumer group to the partition
+  # count" — see the sizing note below for what it does and, importantly, what it
+  # does NOT do. (Key is deployment.replicaCount for the connect subchart — a
+  # top-level replicaCount is silently ignored.)
+  deployment:
+    replicaCount: 3
 
   image:
     repository: docker.redpanda.com/redpandadata/connect
     tag: latest
     pullPolicy: IfNotPresent
 
+  # ── What the TimescaleDB write path costs (load-test finding, #272) ──────────
+  # The committer is a Redpanda Connect consumer group (timescaledb-sink) reading
+  # MSK ^sensors\.raw\. + raw.telemetry and BULK-inserting into TimescaleDB (one
+  # 1000-row jsonb_to_recordset INSERT per batch — see
+  # rp-connect-timescaledb-config.yaml). Measured on ws-slot42:
+  #   - The bulk path sustains ~60k row-inserts/s with 3 replicas (backlog-drain
+  #     measurement; bursts >100k/s), and TimescaleDB stays idle at that rate
+  #     (0-1 active backends, 0 lock waits). This is ~2x the single-row path
+  #     (~30k). The database is NOT the bottleneck.
+  #   - An EARLIER version of this note reported a hard ~30k "ceiling" above which
+  #     freshness ran away. That was WRONG — it was two bugs OUTSIDE the database,
+  #     not a real limit (full writeup: docs/blog/2026-09-09-loading-the-data-stores.md):
+  #       (1) the kafka_franz input's checkpoint_limit defaulted to 1024, which
+  #           (with the batched output's ack latency) throttled each partition by
+  #           Little's Law — the DB sat idle while the INPUT starved. Fixed by
+  #           raising checkpoint_limit in the config.
+  #       (2) a per-INSERT pg_notify trigger (the dashboard push path) fired inside
+  #           every batch commit and serialized all concurrent commits on Postgres's
+  #           async-notification lock, collapsing throughput to ~3.5k/s. Fixed by
+  #           moving the notify onto a ~1s tick job (see timescaledb-cluster.yaml).
+  #   - Partition count (3 on sensors.raw.sim) still bounds consumer parallelism —
+  #     replicas beyond the partition count sit idle — but at these rates it was not
+  #     the binding limit; the two bugs above were. Repartition only if a measured,
+  #     bug-free ceiling actually demands it.
+  # Why 3 replicas: match the 3 partitions for resilience + isolation. One consumer
+  # per partition means a single stuck/slow consumer only throttles its own
+  # partition (we observed one wedged pod drag its partition down while the others
+  # held), trivially recovered by restarting that pod, and it demonstrates the
+  # partition-matched consumer-group pattern the workshop teaches.
+  # We pin the replicas to the dedicated, non-burstable r6i pool RisingWave compute
+  # uses (#211: label workload=risingwave-compute, taint
+  # dedicated=risingwave-compute:NoSchedule) so they get real cores, not burst
+  # credits. requests 2 / limits 4 mirrors the RW-compute request-fits-the-node /
+  # limit-is-burst-headroom split. NOTE co-tenancy costs throughput — a committer
+  # replica that lands on the same node as the busy telegraf/InfluxDB writer drained
+  # ~30% slower than its siblings. Disable the pool keys only when deploying against
+  # a cluster without that node group (local/minikube), and set replicaCount to
+  # match the partition count of a smaller sensors.raw.sim.
+  nodeSelector:
+    workload: risingwave-compute
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: risingwave-compute
+      effect: NoSchedule
+
   resources:
-    requests: { cpu: 100m, memory: 256Mi }
-    limits: { cpu: 500m, memory: 512Mi }
+    requests: { cpu: "2", memory: 256Mi }
+    limits: { cpu: "4", memory: 512Mi }
 
   envFrom:
     - secretRef:

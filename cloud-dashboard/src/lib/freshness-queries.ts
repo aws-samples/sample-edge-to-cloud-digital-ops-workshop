@@ -19,7 +19,18 @@ function toPayload(
   queryLatencyMs: number
 ): FreshnessPayload {
   const now = Date.now();
-  const latestTs = rows.length > 0 ? Math.max(...rows.map(r => Number(r.latest_ts_ms))) : 0;
+  // Fleet freshness = age of the STALEST actively-reporting site, not the
+  // freshest. Using MAX(latest_ts_ms) across sites (the freshest single row
+  // anywhere) let a low-rate source that stays current — e.g. the 3-30 device
+  // nodes trickling in every few seconds — mask a high-rate source that has
+  // fallen behind: under a frac-telemetry load test the backlogged sim sites
+  // could be tens of seconds stale while the headline still read ~1-2 s,
+  // because one fresh device row pinned the MAX. The per-site query already
+  // windows out long-dead sites (partition_time > now() - 15 min), so the MIN
+  // over what remains is the stalest site that is *still reporting* — the
+  // freshness figure a fleet operator actually cares about, and the one that
+  // surfaces (rather than hides) ingest backlog on any single source.
+  const latestTs = rows.length > 0 ? Math.min(...rows.map(r => Number(r.latest_ts_ms))) : 0;
   const avgFreeCpu = rows.length > 0
     ? rows.reduce((s, r) => s + (r.avg_free_cpu_pct != null ? parseFloat(r.avg_free_cpu_pct) : 0), 0) / rows.length
     : null;
@@ -144,6 +155,49 @@ export async function queryTimescaleDbFreshness(pool: Pool, deploymentId: string
     FROM sensor_readings
     WHERE deployment_id = $1
       AND partition_time > now() - interval '15 minutes'
+    GROUP BY site_id
+    ORDER BY site_id
+  `,
+    [deploymentId]
+  );
+  return toPayload(rows, "timescaledb", Date.now() - t0);
+}
+
+// Idiomatic-read variant of queryTimescaleDbFreshness that reads the continuous
+// aggregate (sensor_readings_cagg) instead of the raw hypertable — the
+// write-time-pre-paid counterpart to RisingWave's MV, taught in Block 4.
+// Selected by the /api/freshness route only when TIMESCALEDB_CAGG_READ is set;
+// the committed default stays the raw windowed read (Blocks 1/4 document that
+// path), so flipping this on is an opt-in for the load-test comparison.
+//
+// The CAGG (see helm/cloud-analytics/templates/timescaledb-notify-ddl-job.yaml)
+// stores, per (deployment_id, site_id, sensor, 10 s bucket): SUM(value),
+// COUNT(*), and MAX(ts_ms). Recombining SUM/COUNT across the window gives the
+// exact row-level mean per (site, sensor) — identical semantics to the raw
+// query's AVG(value) — rather than an unweighted average of per-bucket means
+// (which would drift when 10 s buckets hold unequal row counts). materialized_only
+// is false, so this read is a UNION of the pre-materialised buckets and a live
+// scan of the un-materialised tail newer than the refresh watermark.
+export async function queryTimescaleDbCaggFreshness(pool: Pool, deploymentId: string): Promise<FreshnessPayload> {
+  const t0 = Date.now();
+  const { rows } = await pool.query<Row>(
+    `
+    SELECT
+      site_id,
+      AVG(CASE WHEN sensor = 'cpu_pct'      THEN 100.0 - per_sensor_avg END) AS avg_free_cpu_pct,
+      AVG(CASE WHEN sensor = 'mem_used_pct' THEN 100.0 - per_sensor_avg END) AS avg_free_mem_pct,
+      MAX(latest_ts_ms)                                                       AS latest_ts_ms
+    FROM (
+      SELECT
+        site_id,
+        sensor,
+        SUM(sum_value) / NULLIF(SUM(n), 0) AS per_sensor_avg,
+        MAX(max_ts_ms)                     AS latest_ts_ms
+      FROM sensor_readings_cagg
+      WHERE deployment_id = $1
+        AND bucket > now() - interval '15 minutes'
+      GROUP BY site_id, sensor
+    ) s
     GROUP BY site_id
     ORDER BY site_id
   `,

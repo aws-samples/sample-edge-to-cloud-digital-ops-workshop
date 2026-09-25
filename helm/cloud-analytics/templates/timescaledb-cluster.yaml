@@ -73,46 +73,50 @@ spec:
         # the workshop role — it must OWN the hypertable to build a
         # continuous aggregate on it (Block 4), not merely hold DML grants.
         - ALTER TABLE sensor_readings OWNER TO workshop;
-        # ── Push path for the cloud dashboard (#160) ──────────────────────
+        # ── Push path for the cloud dashboard (#160, #272) ────────────────
         # TimescaleDB/Postgres has no subscription primitive like RisingWave's
-        # CREATE SUBSCRIPTION — the standard substitute is a trigger that
-        # calls pg_notify() on every insert, paired with a server-side LISTEN
-        # connection (cloud-dashboard's /api/stream/timescaledb route). The
-        # payload only needs to wake the listener, which re-runs the same
-        # fleet-wide aggregate query the polled /api/freshness route uses —
-        # so it stays minimal, well under Postgres's 8000-byte NOTIFY limit.
-        # Use a *named* dollar-quote tag ($notify$), not the bare $$: CNPG's
-        # instance-manager collapses `$$` to a single `$` when it hands each
-        # postInitApplicationSQL entry to the backend, producing
-        # `... AS $ BEGIN ... END; $ LANGUAGE plpgsql` — a syntax error that
-        # aborts initdb (SQLSTATE 42601) and wedges the whole cluster bootstrap.
-        # A named tag survives the collapse intact.
+        # CREATE SUBSCRIPTION — the substitute is pg_notify() on a channel the
+        # cloud-dashboard LISTENs on (its /api/stream/timescaledb route), which
+        # re-runs the same fleet-wide freshness aggregate the polled
+        # /api/freshness route uses. The payload only needs to wake the
+        # listener, so it stays a fixed token, well under Postgres's 8000-byte
+        # NOTIFY limit.
         #
-        # #210: originally FOR EACH ROW — redpanda-connect issues one INSERT
-        # per row regardless of its batching config, so this fired one
-        # dashboard aggregate query per row and saturated the SSE route's pg
-        # pool under load. FOR EACH STATEMENT collapses that to one notify per
-        # INSERT statement; the function can no longer read NEW, so the
-        # payload is just a fixed wakeup token (the listener re-aggregates on
-        # every wakeup regardless of payload contents anyway). This is only
-        # half the fix — see cloud-dashboard/src/app/api/stream/timescaledb/route.ts
-        # for the debounce/single-flight half, and
-        # helm/cloud-analytics/templates/timescaledb-notify-ddl-job.yaml,
-        # which re-applies this function+trigger on every upgrade since
-        # postInitApplicationSQL below only ever runs once, at initdb.
+        # #272: the notify is fired by a ~1s TimescaleDB background job, NOT by
+        # an AFTER INSERT trigger. pg_notify() inside a trigger runs during the
+        # writer's COMMIT, where PreCommit_Notify() takes an AccessExclusiveLock
+        # on the shared async-notification object (pg_database oid / 0), held
+        # across commit + WAL flush — which serializes every concurrent COMMIT
+        # cluster-wide. Under the bulk-ingest path (redpanda-connect committing
+        # 1000-row batches from N workers) that collapsed sustained write
+        # throughput by ~15x (measured: ~3.5k rows/s serialized vs ~60k rows/s
+        # once decoupled). #210 had already cut FOR EACH ROW → FOR EACH
+        # STATEMENT, but one NOTIFY per batch commit still contends the same
+        # lock; only moving it OFF the commit path removes the serialization.
+        # A fixed ~1s tick lets batch writers group-commit in parallel with
+        # zero notify contention, while the dashboard still wakes ~1/s (the
+        # freshness panel is a ~1s sawtooth anyway). See the load-test blog
+        # (docs/blog/2026-09-09-loading-the-data-stores.md) for the measurement
+        # and cloud-dashboard/src/app/api/stream/timescaledb/route.ts for the
+        # LISTEN/debounce half.
+        #
+        # Use a *named* dollar-quote tag ($tick$), not the bare $$: CNPG's
+        # instance-manager collapses `$$` to a single `$` when it hands each
+        # postInitApplicationSQL entry to the backend (SQLSTATE 42601 at initdb,
+        # which wedges the whole cluster bootstrap). A named tag survives it.
+        #
+        # The job that runs this procedure is created/owned by the post-upgrade
+        # notify-ddl Job (timescaledb-notify-ddl-job.yaml), which runs as the
+        # `workshop` role — postInitApplicationSQL only runs once at initdb, so
+        # here we just define the procedure and hand it to workshop.
         - |
-          CREATE OR REPLACE FUNCTION notify_sensor_reading() RETURNS trigger AS $notify$
+          CREATE OR REPLACE PROCEDURE notify_tick(job_id int, config jsonb)
+          LANGUAGE plpgsql AS $tick$
           BEGIN
-            PERFORM pg_notify('sensor_readings_change', 'batch');
-            RETURN NULL;
+            PERFORM pg_notify('sensor_readings_change', 'tick');
           END;
-          $notify$ LANGUAGE plpgsql;
-        - DROP TRIGGER IF EXISTS sensor_readings_notify ON sensor_readings;
-        - |
-          CREATE TRIGGER sensor_readings_notify
-            AFTER INSERT ON sensor_readings
-            FOR EACH STATEMENT EXECUTE FUNCTION notify_sensor_reading();
-        - ALTER FUNCTION notify_sensor_reading() OWNER TO workshop;
+          $tick$;
+        - ALTER PROCEDURE notify_tick(int, jsonb) OWNER TO workshop;
 
   storage:
     size: {{ .Values.timescaledb.storageSize }}

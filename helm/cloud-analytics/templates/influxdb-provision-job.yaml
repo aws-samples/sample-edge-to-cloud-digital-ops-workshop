@@ -52,6 +52,15 @@ spec:
               value: {{ .Values.telegraf.retentionSeconds | quote }}
             - name: CREDENTIALS_SECRET
               value: {{ .Values.telegraf.credentialsSecret | quote }}
+            # Rollup (downsampling) target: a scheduled Flux task pre-collapses
+            # the raw bucket into 10s means here, so the dashboard's read is a
+            # cheap lookup over ~90 pre-aggregated points/series instead of a
+            # full-window scan (see docs/blog writeup). Bucket name is derived,
+            # not secret — the dashboard reads it via INFLUXDB_ROLLUP_BUCKET.
+            - name: ROLLUP_BUCKET
+              value: {{ printf "%s-10s" $bucket | quote }}
+            - name: ROLLUP_EVERY
+              value: "10s"
           command:
             - sh
             - -c
@@ -64,15 +73,10 @@ spec:
               CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
               KUBE=https://kubernetes.default.svc
 
-              # Token-stable: keep an existing secret rather than orphaning tokens.
-              code=$(curl -sS -o /dev/null -w '%{http_code}' --cacert "$CA" \
-                -H "Authorization: Bearer $KTOKEN" \
-                "$KUBE/api/v1/namespaces/$NS/secrets/$CREDENTIALS_SECRET")
-              if [ "$code" = "200" ]; then
-                echo "$CREDENTIALS_SECRET already exists — reusing bucket/token."
-                exit 0
-              fi
-
+              # Note: unlike the credentials Secret (token-stable, minted once —
+              # see the guard before token-mint below), the buckets and the
+              # downsampling task are ensured on EVERY run. They're idempotent by
+              # name, so an existing deploy that predates the rollup still gets it.
               echo "Signing in to InfluxDB at $INFLUX_URL ..."
               until curl -sf -k -c /tmp/cookies -X POST "$INFLUX_URL/api/v2/signin" \
                 -u "$INFLUX_ADMIN_USERNAME:$INFLUX_ADMIN_PASSWORD" >/dev/null 2>&1; do
@@ -93,6 +97,51 @@ spec:
                   -d "{\"orgID\":\"$ORG_ID\",\"name\":\"$BUCKET\",\"retentionRules\":[{\"type\":\"expire\",\"everySeconds\":$RETENTION_SECONDS}]}" >/dev/null
               else
                 echo "bucket $BUCKET already exists ($EXISTING)."
+              fi
+
+              # ── Rollup bucket + downsampling task (the idiomatic pre-aggregate) ──
+              # The dashboard reads 10s means from $ROLLUP_BUCKET, so its query is a
+              # cheap lookup over pre-collapsed points instead of scanning the raw
+              # window. aggregateWindow preserves every tag (incl. deployment_id),
+              # so one shared task correctly rolls up every slot's series.
+              R_EXISTING=$(curl -sf -k -b /tmp/cookies \
+                "$INFLUX_URL/api/v2/buckets?org=$INFLUX_ORG&name=$ROLLUP_BUCKET" \
+                | jq -r '.buckets[0].id // empty')
+              if [ -z "$R_EXISTING" ]; then
+                echo "creating rollup bucket $ROLLUP_BUCKET (retention ${RETENTION_SECONDS}s)..."
+                curl -sf -k -b /tmp/cookies -X POST "$INFLUX_URL/api/v2/buckets" \
+                  -H 'Content-Type: application/json' \
+                  -d "{\"orgID\":\"$ORG_ID\",\"name\":\"$ROLLUP_BUCKET\",\"retentionRules\":[{\"type\":\"expire\",\"everySeconds\":$RETENTION_SECONDS}]}" >/dev/null
+              else
+                echo "rollup bucket $ROLLUP_BUCKET already exists ($R_EXISTING)."
+              fi
+
+              TASK_NAME="downsample-$BUCKET-10s"
+              TASK_ID=$(curl -sf -k -b /tmp/cookies \
+                "$INFLUX_URL/api/v2/tasks?org=$INFLUX_ORG&name=$TASK_NAME" \
+                | jq -r '.tasks[0].id // empty')
+              if [ -z "$TASK_ID" ]; then
+                echo "creating downsampling task $TASK_NAME (every $ROLLUP_EVERY)..."
+                FLUX=$(printf 'option task = {name: "%s", every: %s}\n\nfrom(bucket: "%s")\n  |> range(start: -1m)\n  |> filter(fn: (r) => r._measurement == "sensor_reading" and r._field == "value")\n  |> aggregateWindow(every: %s, fn: mean, createEmpty: false)\n  |> to(bucket: "%s")\n' \
+                  "$TASK_NAME" "$ROLLUP_EVERY" "$BUCKET" "$ROLLUP_EVERY" "$ROLLUP_BUCKET")
+                TBODY=$(jq -n --arg org "$ORG_ID" --arg flux "$FLUX" \
+                  '{orgID:$org,status:"active",flux:$flux}')
+                curl -sf -k -b /tmp/cookies -X POST "$INFLUX_URL/api/v2/tasks" \
+                  -H 'Content-Type: application/json' -d "$TBODY" >/dev/null
+              else
+                echo "downsampling task $TASK_NAME already exists ($TASK_ID)."
+              fi
+
+              # Token-stable: keep an existing credentials Secret rather than
+              # orphaning tokens (the API only returns a token value at creation).
+              # Buckets + task above are already ensured, so a pre-rollup deploy
+              # still gets the rollup on this upgrade; only the token mint is gated.
+              code=$(curl -sS -o /dev/null -w '%{http_code}' --cacert "$CA" \
+                -H "Authorization: Bearer $KTOKEN" \
+                "$KUBE/api/v1/namespaces/$NS/secrets/$CREDENTIALS_SECRET")
+              if [ "$code" = "200" ]; then
+                echo "$CREDENTIALS_SECRET already exists — reusing token; provisioning done."
+                exit 0
               fi
 
               echo "minting read/write token for $BUCKET ..."

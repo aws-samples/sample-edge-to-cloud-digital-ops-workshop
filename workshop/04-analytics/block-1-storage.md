@@ -46,7 +46,7 @@ measured against (~10–80 ms), with no history and no query engine.
 | **AppSync push** | in-flight message (no store) | Direct WebSocket push | "Tell me the instant a value changes" | ~10–80 ms |
 | **RisingWave** | **in-memory** MV state (durable checkpoints spill to S3) | Streaming MV engine — incremental compute | Pre-defined aggregations, always-current, push | ~300–600 ms |
 | **TimescaleDB** | **disk** (Postgres hypertables on a PVC) | Relational time-series | Ad-hoc SQL over recent raw rows; range scans | ~1–3 s |
-| **Timestream for InfluxDB** | **disk** (AWS-managed instance) | Dimensional time-series (measurement/tags/fields) | The same hot-tier job, fully managed | ~1–2 s |
+| **Timestream for InfluxDB** | **disk** (AWS-managed instance) | Dimensional time-series (measurement/tags/fields) | The same hot-tier job, fully managed | ~5 s (10 s rollup task) |
 | **Iceberg / Athena** | **object store** (columnar Parquet in S3) | Query engine over files | Cheap retention of unlimited history; large scans | tens of s → ~300 s |
 
 You'll query each of these directly in Blocks 2–5, then see all four side by side on
@@ -143,7 +143,7 @@ eliminated. Only the table/MV and the recent-window predicate differ per store:
 | **RisingWave** | `mv_sensor_fleet_latest` (pre-materialised MV) | none — the MV is already collapsed to latest-per-site |
 | **TimescaleDB** | `sensor_readings` (raw hypertable) | `partition_time > now() - interval '15 minutes'` (load-bearing: chunk exclusion) |
 | **Athena / Iceberg** | `workshop_telemetry.telemetry` | optional `deployment_id=` scope |
-| **Timestream for InfluxDB** | `sensor_reading` bucket | `range(start:-15m) \|> last()` (Flux) |
+| **Timestream for InfluxDB** | `sensor_reading` 10 s rollup bucket (downsampling task) | `range(start:-15m) \|> last()` over the pre-aggregated rollup (Flux) |
 
 Blocks 2–5 build each tier's version of this query;
 [Block 6](block-6-dashboard.md#chart-1-data-freshness-log-scale) shows the exact

@@ -49,20 +49,65 @@ spec:
               until psql "$TIMESCALE_DSN" -c 'SELECT 1' >/dev/null 2>&1; do
                 sleep 3
               done
-              echo "Re-applying sensor_readings_notify function + trigger (statement-level, #210)..."
+              echo "Re-applying dashboard push path: ~1s notify tick, commit-decoupled (#272)..."
               psql "$TIMESCALE_DSN" <<'SQL'
-              CREATE OR REPLACE FUNCTION notify_sensor_reading() RETURNS trigger AS $notify$
-              BEGIN
-                PERFORM pg_notify('sensor_readings_change', 'batch');
-                RETURN NULL;
-              END;
-              $notify$ LANGUAGE plpgsql;
-
+              -- Retire the old per-insert push path if this slot still has it.
+              -- The AFTER INSERT trigger fired pg_notify() inside each writer's
+              -- COMMIT, serializing concurrent bulk-batch commits on Postgres's
+              -- async-notification AccessExclusiveLock (#272 — see the comment in
+              -- timescaledb-cluster.yaml). Move it off the commit path entirely.
               DROP TRIGGER IF EXISTS sensor_readings_notify ON sensor_readings;
+              DROP FUNCTION IF EXISTS notify_sensor_reading();
 
-              CREATE TRIGGER sensor_readings_notify
-                AFTER INSERT ON sensor_readings
-                FOR EACH STATEMENT EXECUTE FUNCTION notify_sensor_reading();
+              -- Procedure the ~1s background job runs to wake the dashboard's
+              -- LISTEN (payload is a fixed token; the listener re-aggregates).
+              CREATE OR REPLACE PROCEDURE notify_tick(job_id int, config jsonb)
+              LANGUAGE plpgsql AS $tick$
+              BEGIN
+                PERFORM pg_notify('sensor_readings_change', 'tick');
+              END;
+              $tick$;
+
+              -- Exactly one 1s tick job. add_job() has no upsert, so delete any
+              -- existing notify_tick jobs first — this keeps re-runs on every
+              -- helm upgrade idempotent (no duplicate ticks piling up).
+              SELECT delete_job(job_id)
+                FROM timescaledb_information.jobs
+                WHERE proc_name = 'notify_tick';
+              SELECT add_job('notify_tick', schedule_interval => INTERVAL '1 second');
               SQL
               echo "DDL complete."
+              {{- if .Values.timescaledb.caggEnabled }}
+              # Idiomatic-read comparison (Block 4 / load-test blog): build the
+              # deployment_id-aware continuous aggregate the dashboard reads when
+              # TIMESCALEDB_CAGG_READ is set. Store SUM(value)+COUNT(*) (not
+              # AVG) per 10s bucket so the read recombines an exact weighted
+              # mean; real-time aggregation (materialized_only=false) unions the
+              # pre-materialised buckets with a live scan of the tail newer than
+              # the 10s refresh watermark. Every statement runs in psql
+              # autocommit — CREATE MATERIALIZED VIEW ... WITH (timescaledb.continuous)
+              # cannot run inside a transaction block. Idempotent: IF NOT EXISTS
+              # + policy if_not_exists => TRUE, so re-running on each upgrade is a
+              # no-op once built.
+              echo "Ensuring sensor_readings_cagg continuous aggregate (caggEnabled)..."
+              psql "$TIMESCALE_DSN" <<'CAGGSQL'
+              CREATE MATERIALIZED VIEW IF NOT EXISTS sensor_readings_cagg
+              WITH (timescaledb.continuous) AS
+              SELECT
+                deployment_id,
+                site_id,
+                sensor,
+                time_bucket('10 seconds', partition_time) AS bucket,
+                sum(value) AS sum_value,
+                count(*)   AS n,
+                max(ts_ms) AS max_ts_ms
+              FROM sensor_readings
+              GROUP BY deployment_id, site_id, sensor, bucket
+              WITH NO DATA;
+              CAGGSQL
+              psql "$TIMESCALE_DSN" -c "ALTER MATERIALIZED VIEW sensor_readings_cagg SET (timescaledb.materialized_only = false);"
+              psql "$TIMESCALE_DSN" -c "ALTER MATERIALIZED VIEW sensor_readings_cagg OWNER TO workshop;"
+              psql "$TIMESCALE_DSN" -c "SELECT add_continuous_aggregate_policy('sensor_readings_cagg', start_offset => INTERVAL '30 minutes', end_offset => INTERVAL '10 seconds', schedule_interval => INTERVAL '10 seconds', if_not_exists => TRUE);"
+              echo "CAGG ready."
+              {{- end }}
 {{- end }}

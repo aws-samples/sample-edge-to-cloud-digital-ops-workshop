@@ -19,6 +19,16 @@ data:
           - "^sensors\\.raw\\."
           - "^raw\\.telemetry$"
         regexp_topics: true
+        # #272: raise the in-flight ceiling. kafka_franz caps *unacked* messages
+        # at checkpoint_limit (default 1024) and a message isn't acked until its
+        # whole output batch has flushed. With the bulk sql_raw output below,
+        # per-message ack latency is ~50ms, so by Little's Law the default 1024
+        # pins each partition at ~1024/0.05 ≈ 20k, and before the notify fix
+        # (~0.46s ack latency) at only ~2.2k msg/s — the input, not TimescaleDB,
+        # was the ceiling (the DB sat idle). A large checkpoint_limit lets the
+        # input keep reading ahead of the batched output instead of stalling on
+        # the ack window; the batch size below still bounds a single INSERT.
+        checkpoint_limit: 100000
         # #253: cloud-analytics is now ONE shared release reading the full,
         # shared MSK topics for every slot — a single consumer group with one
         # full-topic cursor is correct (there is no other consumer to split
@@ -69,33 +79,55 @@ data:
                     root.deployment_id = this.site_id.re_replace_all("^(ws-slot[0-9]+).*", "$1")
         - mapping: |
             root = this
-            root.partition_time = ((this.ts_ms / 60000).floor() * 60).ts_unix().format_timestamp("2006-01-02T15:04:00Z07:00")
+            # Floor to a 10 s grid — MUST match the continuous aggregate's
+            # `time_bucket('10 seconds', partition_time)` (timescaledb-notify-ddl-job.yaml).
+            # A coarser grid (e.g. 60 s) collapses every intra-window row onto one
+            # bucket timestamp, so rows arriving later in the window fall *behind* the
+            # CAGG refresh watermark and the `materialized_only = false` live tail can't
+            # see them — the real-time read then sawtooths up to a full grid-interval
+            # stale even though the raw table is sub-second fresh. Aligning the grid to
+            # the bucket keeps the newest window in the live tail so the CAGG read
+            # tracks the raw table. `05` is Go's seconds placeholder (not a literal).
+            root.partition_time = ((this.ts_ms / 10000).floor() * 10).ts_unix().format_timestamp("2006-01-02T15:04:05Z07:00")
 
+    # BULK insert path (TimescaleDB's recommended ingest pattern). The obvious
+    # `sql_insert` output issues one single-row INSERT per reading regardless of
+    # its `batching` config — Postgres/TimescaleDB's slowest write path (a
+    # parse/plan, a WAL record, and two-index maintenance per row), which caps a
+    # drain pipeline far below what the store can absorb. Instead, collapse each
+    # batch into ONE multi-row INSERT via `jsonb_to_recordset`: the
+    # `archive: json_array` batch-processor turns up to 1000 readings into a
+    # single JSON-array message, and `sql_raw` lands them all in one statement
+    # (single parse/plan, one WAL group-commit). Parameterised as `$1::jsonb`,
+    # so no value escaping.
+    #
+    # #272 (load test — docs/blog/2026-09-09-loading-the-data-stores.md): this
+    # bulk path sustains ~60k rows/s (measured, backlog-drain) and the DB stays
+    # idle at that rate — well above the single-row path's ~30k. Getting there
+    # was NOT a TimescaleDB tuning problem; it was two things OUTSIDE the DB:
+    # (1) the input's `checkpoint_limit` (raised above), and (2) removing the
+    # per-commit pg_notify serialization (the ~1s tick job in
+    # timescaledb-cluster.yaml). `max_in_flight` is a modest 8 — enough
+    # concurrent batches to hide per-INSERT latency across the topic's
+    # partitions without opening dozens of DB connections per replica; it was
+    # never the real lever (64 helped nothing while the input was throttled).
     output:
-      sql_insert:
+      sql_raw:
         driver: postgres
         dsn: "${TIMESCALE_DSN}"
-        table: sensor_readings
-        columns:
-          - sensor
-          - site_id
-          - deployment_id
-          - value
-          - unit
-          - ts_ms
-          - partition_time
-        args_mapping: |
-          root = [
-            this.sensor,
-            this.site_id,
-            this.deployment_id,
-            this.value,
-            this.unit,
-            this.ts_ms,
-            this.partition_time
-          ]
-        max_in_flight: 64
+        query: |
+          INSERT INTO sensor_readings (sensor, site_id, deployment_id, value, unit, ts_ms, partition_time)
+          SELECT sensor, site_id, deployment_id, value, unit, ts_ms, partition_time
+          FROM jsonb_to_recordset($1::jsonb) AS x(
+            sensor text, site_id text, deployment_id text,
+            value double precision, unit text, ts_ms bigint, partition_time timestamptz
+          )
+        args_mapping: 'root = [ content().string() ]'
+        max_in_flight: 8
         batching:
           count: 1000
           period: "1s"
+          processors:
+            - archive:
+                format: json_array
 {{- end }}

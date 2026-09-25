@@ -58,6 +58,7 @@
 -- ─────────────────────────────────────────────────────────────────────────────
 DROP SUBSCRIPTION IF EXISTS dashboard_freshness_sub;
 SELECT pg_sleep(5);
+DROP MATERIALIZED VIEW IF EXISTS mv_fleet_ingest_rate;
 DROP MATERIALIZED VIEW IF EXISTS mv_fleet_1min_avg;
 DROP MATERIALIZED VIEW IF EXISTS mv_sensor_fleet_latest;
 DROP MATERIALIZED VIEW IF EXISTS mv_device_hop_latency;
@@ -230,6 +231,33 @@ FROM telemetry_all_slots
 WHERE message_timestamp IS NOT NULL
   AND to_timestamp(ingest_ts / 1000) > now() - INTERVAL '15' MINUTE
 GROUP BY deployment_id;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Materialized view: fleet-wide ingest rate, 5-second tumbling window, per
+-- deployment_id. Backs the dashboard's "Ingest Volume over time" panel
+-- (cloud-dashboard/src/app/api/volume/route.ts) — the signal an operator
+-- watches climb while running simulator/frac-msk-load.py against a slot.
+-- Counts raw incoming messages from BOTH sources (sim_all_slots: one row per
+-- Kafka message; telemetry_all_slots: same, one row per device metrics
+-- record) WITHOUT unpivoting telemetry into per-metric rows first — unlike
+-- mv_sensor_fleet_latest / mv_fleet_1min_avg above, this MV counts wire
+-- messages, not sensor readings, so a telemetry record isn't overcounted 5x.
+-- Bucketed by (ts_ms / 5000) integer division, same "no watermark required"
+-- approach as mv_fleet_1min_avg's 1-minute buckets (RisingWave's TUMBLE()
+-- table function needs a WATERMARK on the source to close windows, which
+-- these sources don't declare) — window_start is the bucket's epoch-ms floor.
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_fleet_ingest_rate AS
+SELECT
+    deployment_id,
+    (ts_ms / 5000) * 5000 AS window_start,
+    COUNT(*)              AS msg_count
+FROM (
+    SELECT deployment_id, ts_ms         FROM sim_all_slots
+    UNION ALL
+    SELECT deployment_id, ingest_ts AS ts_ms FROM telemetry_all_slots
+) combined
+GROUP BY deployment_id, (ts_ms / 5000);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Subscription: change feed on mv_sensor_fleet_latest for the cloud dashboard's
